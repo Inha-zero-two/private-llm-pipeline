@@ -193,7 +193,11 @@ def plan_install(probe: Probe, backend="auto", venv_dir=None, python_executable=
         reason = "표시된 CUDA GPU가 없거나 총 VRAM이 7 GiB 미만입니다"
     else:
         gpu = eligible[0]
-        return InstallPlan("cuda", "CUDA GPU의 총 VRAM이 7 GiB 이상입니다", target, python_executable, gpu, compatible_cuda_indexes(probe.driver_cuda, gpu.compute_capability))
+        indexes = compatible_cuda_indexes(probe.driver_cuda, gpu.compute_capability)
+        for device in eligible[1:]:
+            supported = set(compatible_cuda_indexes(probe.driver_cuda, device.compute_capability))
+            indexes = tuple(index for index in indexes if index in supported)
+        return InstallPlan("cuda", "CUDA GPU의 총 VRAM이 7 GiB 이상입니다", target, python_executable, gpu, indexes)
     return InstallPlan("remote", reason, target, python_executable)
 
 
