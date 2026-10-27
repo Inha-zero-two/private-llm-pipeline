@@ -1,6 +1,6 @@
 # 코드 컨벤션
 
-## 이름 규칙
+## 변수/모듈 이름 규칙
 
 Python 표준인 [PEP 8](https://peps.python.org/pep-0008/#naming-conventions)을 따릅니다.
 
@@ -78,7 +78,7 @@ class Rule(BaseModel):
 - 필드 이름이나 값이 틀리면 만드는 순간 에러가 나서, 담당자끼리 형식이 어긋나는 걸 바로 알 수 있습니다.
 - 열거형(`EndReason`, `PromptIdx` 등)은 `StrEnum`으로 만듭니다.
 
-### 어디에 두는가
+### 각 모듈에서 주고받는 데이터 형식
 
 | 구분 | 위치 | 예시 |
 | --- | --- | --- |
