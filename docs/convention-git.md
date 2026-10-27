@@ -1,9 +1,9 @@
-# GitHub 컨벤션
+# Git · PR 컨벤션
 
 ## 작업 흐름
 
 - 이슈는 쓰지 않고, 모든 작업은 **PR**로 올립니다.
-- PR 본문은 [PR 템플릿](.github/PULL_REQUEST_TEMPLATE.md)을 따릅니다. PR을 열면 자동으로 채워집니다.
+- PR 본문은 [PR 템플릿](../.github/PULL_REQUEST_TEMPLATE.md)을 따릅니다. PR을 열면 자동으로 채워집니다.
 
 ## 브랜치 전략
 
@@ -28,7 +28,7 @@ dev      ●──────────●──────────●�
 - PR을 `dev`로 머지할 때 CI가 돌아갑니다. CI가 통과해야 머지합니다.
 - `dev`가 배포할 만한 상태가 되면, `dev` → `main` PR을 열어 **수동으로** 머지합니다.
 - `main`과 `dev`에는 직접 push하지 않습니다. 항상 PR로 합칩니다.
-- 작업 브랜치는 **작업 하나당 하나**씩 만들고, 머지된 브랜치는 삭제합니다.
+- 작업 브랜치는 **작업 하나당 하나**씩 만듭니다. 머지되면 GitHub에서 자동으로 삭제됩니다.
 
 > CI · CD 설정은 아직 없습니다. 추가되면 이 문서에 적습니다.
 
@@ -71,13 +71,14 @@ git push -u origin feat/planner
 ```
 
 5. GitHub에서 **Compare & pull request**를 눌러 PR을 엽니다. **base가 `dev`인지** 확인하고, 본문은 템플릿대로 채우고 라벨을 붙입니다.
-6. 리뷰가 끝나고 CI가 통과하면 머지하고, **Delete branch**를 눌러 브랜치를 지웁니다.
-7. 내 PC에서도 `dev`로 돌아가 최신 상태를 받습니다.
+6. 리뷰가 끝나고 CI가 통과하면 머지합니다. 머지된 브랜치는 GitHub에서 자동으로 삭제됩니다.
+7. 내 PC에서도 `dev`로 돌아가 최신 상태를 받고, 로컬 브랜치를 지웁니다.
 
 ```bash
 git checkout dev
 git pull
-git branch -d feat/planner
+git fetch --prune            # GitHub에서 지워진 브랜치를 목록에서 정리
+git branch -d feat/planner   # 내 PC의 작업 브랜치 삭제
 ```
 
 ### 배포 (`dev` → `main`)
