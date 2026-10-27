@@ -7,19 +7,30 @@
 
 ## 브랜치 전략
 
-`main` 하나를 기준으로 두고, 작업마다 브랜치를 새로 만들어 PR로 합칩니다.
+브랜치는 `main`과 `dev` 두 개를 기본으로 둡니다.
+
+| 브랜치 | 역할 |
+| --- | --- |
+| `main` | **배포판.** `main`에 머지되면 CD가 돌아 배포됩니다. |
+| `dev` | **개발 기준.** 모든 작업 브랜치는 `dev`에서 만들고 `dev`로 머지합니다. |
 
 ```
-feat/planner          ●──●──●
-                     /        \
-main  ──●───────────●──────────●─────●──▶
-                     \              /
-fix/leakguard-regex   ●──●─────────●
+main ──●─────────────────────────────●──▶  (배포)
+        \                           /
+dev      ●──────────●──────────●───●──▶
+          \        / \        /
+           ●──●───●   ●──●───●
+           feat/planner
+                      fix/leakguard-regex
 ```
 
-- `main`에는 직접 push하지 않습니다. 항상 PR로 합칩니다.
-- 브랜치는 **작업 하나당 하나**씩, 항상 **최신 `main`에서** 만듭니다.
-- 머지된 브랜치는 삭제합니다. 이어서 작업할 게 있으면 최신 `main`에서 새로 만듭니다.
+- 작업 브랜치는 **최신 `dev`에서** 만들고, PR도 **`dev`로** 올립니다.
+- PR을 `dev`로 머지할 때 CI가 돌아갑니다. CI가 통과해야 머지합니다.
+- `dev`가 배포할 만한 상태가 되면, `dev` → `main` PR을 열어 **수동으로** 머지합니다.
+- `main`과 `dev`에는 직접 push하지 않습니다. 항상 PR로 합칩니다.
+- 작업 브랜치는 **작업 하나당 하나**씩 만들고, 머지된 브랜치는 삭제합니다.
+
+> CI · CD 설정은 아직 없습니다. 추가되면 이 문서에 적습니다.
 
 ### 브랜치 이름
 
@@ -44,11 +55,11 @@ fix: 빈 입력일 때 LeakGuard 오류 수정
 ### 작업 순서
 
 ```bash
-# 1. 최신 main 받기
-git checkout main
+# 1. 최신 dev 받기
+git checkout dev
 git pull
 
-# 2. 브랜치 만들기
+# 2. dev에서 작업 브랜치 만들기
 git checkout -b feat/planner
 
 # 3. 작업 후 커밋
@@ -59,15 +70,21 @@ git commit -m "feat: Planner 계획 생성 함수 추가"
 git push -u origin feat/planner
 ```
 
-5. GitHub에서 **Compare & pull request**를 눌러 PR을 엽니다. 본문은 템플릿대로 채우고 라벨을 붙입니다.
-6. 리뷰가 끝나면 머지하고, **Delete branch**를 눌러 브랜치를 지웁니다.
-7. 내 PC에서도 `main`으로 돌아가 최신 상태를 받습니다.
+5. GitHub에서 **Compare & pull request**를 눌러 PR을 엽니다. **base가 `dev`인지** 확인하고, 본문은 템플릿대로 채우고 라벨을 붙입니다.
+6. 리뷰가 끝나고 CI가 통과하면 머지하고, **Delete branch**를 눌러 브랜치를 지웁니다.
+7. 내 PC에서도 `dev`로 돌아가 최신 상태를 받습니다.
 
 ```bash
-git checkout main
+git checkout dev
 git pull
 git branch -d feat/planner
 ```
+
+### 배포 (`dev` → `main`)
+
+1. GitHub에서 base `main`, compare `dev`로 PR을 엽니다.
+2. 어떤 작업이 배포되는지 본문에 적고 머지합니다.
+3. `main`에 머지되면 CD가 배포합니다.
 
 ## PR 라벨
 
