@@ -1,8 +1,9 @@
 # 내부 테스트용 Llama 어댑터
 
 로컬 CUDA 환경에서는 원본 `llama_cpp.Llama`를 직접 반환하고, 그 외 환경에서는
-`http://satisshin.iptime.org:4000`의 Gemma 4 E4B QAT 서버를 사용합니다.
+`https://satisshin.iptime.org:4000`의 Gemma 4 E4B QAT 서버를 사용합니다.
 macOS, CUDA GPU가 없는 환경, GPU VRAM이 7GiB보다 작은 환경은 원격으로 실행됩니다.
+테스트용 자가 서명 인증서를 사용하며 라이브러리는 인증서 검증을 생략합니다.
 
 ## 설치
 
@@ -61,9 +62,10 @@ my_app/
 ## 호출
 
 ```python
+from contextlib import closing
 from llama_wrapper import Llama
 
-with Llama(model_path="models/gemma.gguf", n_ctx=65536) as llm:
+with closing(Llama(model_path="models/gemma.gguf", n_ctx=65536)) as llm:
     response = llm.create_chat_completion(
         messages=[{"role": "user", "content": "대한민국의 수도는 어디야?"}],
         max_tokens=512,

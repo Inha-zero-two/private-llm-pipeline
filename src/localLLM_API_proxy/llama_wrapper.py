@@ -34,7 +34,7 @@ def execution_directory() -> Path:
     if main_path is not None:
         return main_path.parent
     argv_path = _script_path(sys.argv[0] if sys.argv else None)
-    if argv_path is not None:
+    if argv_path is not None and not argv_path.is_relative_to(Path(sys.prefix).resolve()):
         return argv_path.parent
     return Path.cwd().resolve()
 
@@ -282,7 +282,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 
-DEFAULT_SERVER_URL = "http://satisshin.iptime.org:4000"
+DEFAULT_SERVER_URL = "https://satisshin.iptime.org:4000"
 
 _COMPLETION_DEFAULTS = {
     "suffix": None, "max_tokens": 16, "temperature": 0.8, "top_p": 0.95,
@@ -385,6 +385,9 @@ class AdaptiveLlama:
             options.setdefault("n_ctx", 65536)
             options.setdefault("n_gpu_layers", -1)
             native = _load_native_module()
+            if decision.selected_gpu is not None:
+                options.setdefault("main_gpu", decision.selected_gpu)
+                options["split_mode"] = native.LLAMA_SPLIT_MODE_NONE
             return native.Llama(model_path=str(model_path) if model_path is not None else None, **options)
         instance = super().__new__(cls)
         instance._routing_decision = decision
@@ -436,6 +439,7 @@ class AdaptiveLlama:
             headers={"Authorization": "Bearer " + server_token},
             timeout=timeout,
             transport=transport,
+            verify=False,
             trust_env=False,
             follow_redirects=False,
         )
@@ -471,7 +475,11 @@ class AdaptiveLlama:
             options = dict(kwargs)
             options.setdefault("n_ctx", 65536)
             options.setdefault("n_gpu_layers", -1)
-            return _load_native_module().Llama.from_pretrained(
+            native = _load_native_module()
+            if decision.selected_gpu is not None:
+                options.setdefault("main_gpu", decision.selected_gpu)
+                options["split_mode"] = native.LLAMA_SPLIT_MODE_NONE
+            return native.Llama.from_pretrained(
                 repo_id=repo_id, filename=filename, additional_files=additional_files,
                 local_dir=local_dir, local_dir_use_symlinks=local_dir_use_symlinks,
                 cache_dir=cache_dir, **options,

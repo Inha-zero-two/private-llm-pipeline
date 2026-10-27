@@ -61,17 +61,21 @@ class InstallPlan:
 
 
 def _run(command, *, env=None, capture=False, check=True):
-    """쉘 문자열을 만들지 않고 인자 목록으로 실행한다. 환경변수는 출력하지 않는다."""
-    command = [str(item) for item in command]
+    """인자 목록 또는 cmd 전용 명령줄을 실행한다. 환경변수는 출력하지 않는다."""
+    if isinstance(command, str):
+        display, program = command, "Windows 명령줄"
+    else:
+        command = [str(item) for item in command]
+        display, program = subprocess.list2cmdline(command), command[0]
     if not capture:
-        print("실행: " + subprocess.list2cmdline(command), flush=True)
+        print("실행: " + display, flush=True)
     try:
         result = subprocess.run(command, env=env, text=True, encoding="utf-8", errors="replace", capture_output=capture)
     except OSError as error:
-        raise InstallError(f"명령을 실행할 수 없습니다: {command[0]} ({type(error).__name__})") from None
+        raise InstallError(f"명령을 실행할 수 없습니다: {program} ({type(error).__name__})") from None
     if check and result.returncode:
         detail = (result.stderr or "").strip()[-2000:]
-        raise InstallError(f"명령 실패: {command[0]} (종료 코드 {result.returncode})" + ("\n" + detail if detail else ""))
+        raise InstallError(f"명령 실패: {program} (종료 코드 {result.returncode})" + ("\n" + detail if detail else ""))
     return result
 
 
@@ -323,7 +327,10 @@ def _visual_studio_environment(environment):
     if not vcvars.is_file():
         return environment
     # 이 명령의 환경변수 출력은 파싱만 하고 로그나 파일에 기록하지 않는다.
-    result = _run([environment.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", f'chcp 65001 >nul && call "{vcvars}" x64 >nul && set'], capture=True)
+    # cmd의 명령 문자열에는 list2cmdline의 역슬래시 인용 규칙을 적용하지 않는다.
+    prefix = subprocess.list2cmdline([environment.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c"])
+    script = f'chcp 65001 >nul && call "{vcvars}" x64 >nul && set'
+    result = _run(prefix + ' "' + script + '"', capture=True)
     updated = dict(environment)
     for line in result.stdout.splitlines():
         if "=" in line and not line.startswith("="):
