@@ -43,6 +43,7 @@ Linux/macOS:
 
 CUDA 환경에서는 공식 CUDA wheel을 먼저 사용하고, 맞는 wheel이 없으면 설치된 CUDA Toolkit·C++ 컴파일러로 빌드합니다.
 빌드 도구가 없거나 설치에 실패하면 오류를 알려줍니다. 로컬 실행용 GGUF 모델은 별도로 준비합니다.
+GPU 번호를 설치 때 직접 고를 필요는 없습니다. 설치기는 보이는 CUDA GPU 중 총 VRAM이 7GiB 이상인 장치를 확인해 호환 빌드를 설치하며, 실행 GPU를 저장·고정하지 않습니다.
 
 ## 인증키 배치
 
@@ -73,6 +74,10 @@ with closing(Llama(model_path="models/gemma.gguf", n_ctx=65536)) as llm:
     )
     print(response["choices"][0]["message"]["content"])
 ```
+
+호출 시에는 보이는 적격 GPU 중 첫 번째를 골라 GPU 하나만 사용합니다. 직접 고르려면 `Llama(model_path="models/gemma.gguf", main_gpu=1)`처럼 지정하세요.
+`CUDA_VISIBLE_DEVICES`로 제한하면 보이는 순서의 논리 번호를 사용하므로 첫 장치는 `main_gpu=0`입니다. 필터는 설치·실행 모두 같은 값으로 Python 프로세스 시작 전에 적용하세요.
+기본 자동 모드에서 지정한 번호의 GPU가 존재하지 않거나 총 VRAM이 7GiB 미만이면 원격으로 실행합니다.
 
 `response`는 dict이며, 실제 서버 호출에서 다음 필드를 확인했습니다.
 
