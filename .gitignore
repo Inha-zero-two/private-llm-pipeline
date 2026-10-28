@@ -1,24 +1,37 @@
+# 올려야 하는 파일 (무시하지 않음)
+# - uv.lock, package-lock.json, .python-version: 모두 같은 버전을 설치하려면 필요
+# - 프롬프트 파일 (PROMPT_DIR)
+# - app/data/ 는 코드 폴더이므로 data/ 를 통째로 무시하지 않음
+
 # 환경 변수 · 비밀 키 (.env.example은 올림)
 .env
 .env.*
 !.env.example
 *.pem
 *.key
+# 서버 인증키 폴더 (PR #8 llama_wrapper). 파일 이름과 상관없이 통째로 무시
+keys/
 
 # HTTPS 인증서 다운로드·배포 산출물 (묶음 ZIP과 API 응답 포함)
 deploy/https/private/
 
 # 로컬 LLM 모델 파일
+models/
 *.gguf
 *.bin
 *.safetensors
+*.onnx
+*.pt
 
 # SQLite DB
 *.db
 *.sqlite
 *.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
 
-# Python
+# Python (server)
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -29,19 +42,33 @@ venv/
 .ruff_cache/
 .ipynb_checkpoints/
 
-# React (Node)
+# React (web)
 node_modules/
 dist/
 build/
+.vite/
+*.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+
+# 테스트 결과
+.coverage
+htmlcov/
+.tox/
+coverage/
 
 # 로그
 *.log
 
-# OS · 에디터
+# OS
 .DS_Store
 Thumbs.db
+desktop.ini
+*.stackdump
+
+# 에디터 · 개인 설정 (.claude/settings.json은 올림)
 .idea/
 .vscode/
+.claude/settings.local.json
