@@ -3,12 +3,80 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 import install
+
+
+@pytest.mark.parametrize("timeout", [None, 0.25])
+def test_run_forwards_timeout_without_limiting_install_commands_by_default(
+    monkeypatch: pytest.MonkeyPatch, timeout: float | None
+) -> None:
+    command = ["python", "-m", "pip", "install", "package"]
+    result = subprocess.CompletedProcess(command, 0, stdout="installed", stderr="")
+    run = Mock(return_value=result)
+    monkeypatch.setattr(install.subprocess, "run", run)
+    options = {} if timeout is None else {"timeout": timeout}
+
+    assert install._run(command, capture=True, **options) is result
+    assert run.call_args.kwargs["timeout"] == timeout
+
+
+def test_run_timeout_becomes_install_error_without_sensitive_details(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "private-command-argument"
+    command = ["nvidia-smi", secret]
+    run = Mock(
+        side_effect=subprocess.TimeoutExpired(command, 5, output=secret, stderr=secret)
+    )
+    monkeypatch.setattr(install.subprocess, "run", run)
+
+    with pytest.raises(install.InstallError, match="nvidia-smi") as error:
+        install._run(command, env={"API_TOKEN": secret}, capture=True, timeout=5)
+
+    captured = capsys.readouterr()
+    assert secret not in str(error.value) + captured.out + captured.err
+    assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize("system", ["Linux", "Windows"])
+@pytest.mark.parametrize("timeout_call", [None, 0, 1])
+def test_hardware_probe_bounds_both_smi_calls_and_falls_back_on_timeout(
+    monkeypatch: pytest.MonkeyPatch, system: str, timeout_call: int | None
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(install.platform, "system", lambda: system)
+    monkeypatch.setattr(install.shutil, "which", lambda name: "nvidia-smi")
+    monkeypatch.setattr(install, "_driver_probe", Mock(side_effect=OSError))
+    results = [
+        subprocess.CompletedProcess(
+            ["nvidia-smi"], 0, stdout="0, GPU-test, Test GPU, 8192, 8.6\n"
+        ),
+        subprocess.CompletedProcess(["nvidia-smi"], 0, stdout="CUDA Version: 12.5"),
+    ]
+    responses: list[subprocess.CompletedProcess[str] | subprocess.TimeoutExpired] = (
+        list(results)
+    )
+    if timeout_call is not None:
+        responses[timeout_call] = subprocess.TimeoutExpired("nvidia-smi", 5)
+    run = Mock(side_effect=responses)
+    monkeypatch.setattr(install.subprocess, "run", run)
+
+    probe = install.probe_hardware()
+
+    if timeout_call is None:
+        assert probe == install.Probe(
+            system, (install.GPU(0, "Test GPU", 8 * 1024**3, (8, 6)),), (12, 5)
+        )
+    else:
+        assert probe == install.Probe(system, ())
+    assert run.call_count == (2 if timeout_call is None else timeout_call + 1)
+    assert all(call.kwargs["timeout"] == 5 for call in run.call_args_list)
 
 
 @pytest.mark.parametrize("system", ["Linux", "Windows", "Darwin"])

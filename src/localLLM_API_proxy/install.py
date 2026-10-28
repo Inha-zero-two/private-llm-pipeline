@@ -69,6 +69,7 @@ def _run(
     env: Mapping[str, str] | None = None,
     capture: bool = False,
     check: bool = True,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """인자 목록 또는 cmd 전용 명령줄을 실행한다. 환경변수는 출력하지 않는다."""
     if isinstance(command, str):
@@ -86,7 +87,10 @@ def _run(
             encoding="utf-8",
             errors="replace",
             capture_output=capture,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired:
+        raise InstallError(f"명령 시간 초과: {program}") from None
     except OSError as error:
         raise InstallError(
             f"명령을 실행할 수 없습니다: {program} ({type(error).__name__})"
@@ -166,6 +170,7 @@ def _smi_probe(system: str) -> Probe:
         ],
         capture=True,
         check=False,
+        timeout=5,
     )
     if result.returncode:
         return Probe(system, ())
@@ -193,7 +198,7 @@ def _smi_probe(system: str) -> Probe:
                 break
             selected.append(match)
         records = selected
-    banner = _run([executable], capture=True, check=False)
+    banner = _run([executable], capture=True, check=False, timeout=5)
     match = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", banner.stdout or "")
     driver_cuda = (int(match[1]), int(match[2])) if match else None
     return Probe(
