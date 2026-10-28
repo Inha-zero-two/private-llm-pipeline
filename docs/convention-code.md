@@ -11,6 +11,8 @@ Python 표준인 [PEP 8](https://peps.python.org/pep-0008/#naming-conventions)�
 | 클래스 | PascalCase | `LeakGuard`, `MemoManager` |
 | 상수 | 대문자 + `_` | `N_CTX = 32768` |
 
+상세 설계서의 이름(`parseRules()`, `memoManager` 등)을 코드에서 어떻게 쓰는지는 [설계서 ↔ 코드 이름 대응표](naming-map.md)에 모듈별로 정리했습니다.
+
 ## 폴더 구조
 
 서버와 화면을 루트에서 폴더 두 개로 나눕니다. 명령(`uv`, `npm`)은 각자 자기 폴더 안에서 실행합니다.
