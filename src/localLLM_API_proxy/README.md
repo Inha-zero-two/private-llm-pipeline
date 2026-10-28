@@ -108,3 +108,42 @@ with closing(Llama(model_path="models/gemma.gguf", n_ctx=65536)) as llm:
 
 최종 제품에서 원본 라이브러리로 교체할 때는 `from llama_cpp import Llama`로 가져오면 됩니다.
 공통 호출 코드는 원본 `llama_cpp.Llama`의 인자와 응답 구조를 사용합니다.
+
+## 코드 컨벤션과 호환성 범위
+
+[PR #9의 코드 컨벤션](https://github.com/Inha-zero-two/private-llm-pipeline/blob/de871642f8d8ab37701351fe2af1efe1c2513cb2/docs/convention-code.md)에 맞춰
+함수·변수는 `snake_case`, 클래스는 `PascalCase`, 상수는 대문자와 `_`를 사용합니다.
+모든 함수의 인자와 반환값에 타입 힌트를 붙이고, import 순서와 서식은 Ruff로 검사합니다.
+변경되는 내부 상태는 상수가 아니므로 `_last_native_diagnostic`처럼 소문자로 씁니다.
+
+이 모듈은 llama-cpp-python을 대체하는 개발용 어댑터이므로 다음은 호환성을 우선합니다.
+
+- `from llama_wrapper import Llama`, 기존 클래스·예외 이름, 메서드와 키워드 인자,
+  기본값을 유지합니다. 특히 `create_embedding(input=...)`와 `embed(input=...)`의
+  `input`은 원본 API 이름이므로 `input_`으로 바꾸지 않습니다.
+- 요청·응답·스트리밍 청크는 기존 dict 형식과 추가 필드를 그대로 유지합니다.
+  Pydantic 검증이나 필드 변환을 추가하지 않습니다.
+- 공개된 `CudaDevice`, `RoutingInfo`와 설치기의 데이터 구조는 위치 인자 생성과
+  불변성을 유지하기 위해 기존 frozen dataclass를 사용합니다. 새로운 런타임 의존성은 없습니다.
+- 기존 설치 명령, 예제 실행 경로와 단일 파일 복사를 유지하기 위해
+  `src/localLLM_API_proxy/` 경로와 `llama_wrapper.py` 단일 파일 구성을 유지합니다.
+  서버의 `app/runtime/` 구조로 옮기는 작업은 이 어댑터의 호환성 변경과 별도로 다룹니다.
+- 네이티브 객체를 직접 반환하는 팩터리, 네이티브 도우미 전달, 확장 가능한 JSON 값과
+  `*args`/`**kwargs`에는 의도적으로 `Any`를 사용합니다. 타입 힌트가 런타임 검증을 추가하지는 않습니다.
+
+## 개발 검증
+
+이 폴더에서 가상환경의 Python으로 실행합니다.
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest -q
+```
+
+`tests/test_llama_wrapper.py`와 `tests/test_install.py`는 HTTP·네이티브 백엔드를
+테스트 대역으로 바꿔 호출 규격, dict 응답, 스트리밍, GPU 선택과 설치 계획을 검사합니다.
+실제 인증키·서버·GPU 모델이나 네이티브 패키지 설치는 필요하지 않습니다.
+`tests/public_api.json`은 컨벤션 적용 전 커밋 `30a447f`의 호출 이름·인자·기본값을 기록합니다.
+이는 기존 어댑터와의 호환성 검사이며, llama-cpp-python의 모든 기능을 검증한다는 뜻은 아닙니다.

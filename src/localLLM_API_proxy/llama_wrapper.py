@@ -3,23 +3,42 @@
 적격 로컬 CUDA에서는 원본 llama_cpp.Llama 인스턴스를 직접 반환한다.
 그 외 환경에서는 고정된 서버와 실행 파일 주변의 키 파일을 사용한다.
 """
+
 from __future__ import annotations
 
+import __main__
+import ctypes
+import fnmatch
+import importlib
+import json
+import math
+import os
+import platform
+import stat
+import subprocess
+import sys
+import time
+import uuid
+import warnings
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Iterator, NoReturn
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
+
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
 
 # 실행 파일 주변의 인증키 탐색
-import __main__
-from collections import deque
-import fnmatch
-from pathlib import Path
-import stat
-import sys
-
 KEY_FILE_PATTERN = "llama_api_key*.key"
 _EXCLUDED_DIRECTORIES = {".venv", "venv", ".git", "node_modules", "__pycache__"}
 
 
-def _script_path(value) -> Path | None:
+def _script_path(value: object) -> Path | None:
     if value is None:
         return None
     text = str(value).strip()
@@ -34,7 +53,9 @@ def execution_directory() -> Path:
     if main_path is not None:
         return main_path.parent
     argv_path = _script_path(sys.argv[0] if sys.argv else None)
-    if argv_path is not None and not argv_path.is_relative_to(Path(sys.prefix).resolve()):
+    if argv_path is not None and not argv_path.is_relative_to(
+        Path(sys.prefix).resolve()
+    ):
         return argv_path.parent
     return Path.cwd().resolve()
 
@@ -106,32 +127,27 @@ def resolve_server_token(
     except UnicodeError:
         raise ValueError("Server key file must contain valid UTF-8 text") from None
     except (OSError, RuntimeError):
-        raise OSError("Server key file could not be read; check server_token_file and file permissions") from None
+        raise OSError(
+            "Server key file could not be read; check server_token_file and file permissions"
+        ) from None
     return _validate_token(text), selected
 
 
 # 원격 호출 오류
-class UnsupportedRemoteOperation(NotImplementedError):
+class UnsupportedRemoteOperation(NotImplementedError):  # noqa: N818 — public API name
     """Python 또는 네이티브 연산을 HTTP API로 표현할 수 없을 때 발생한다."""
 
 
 class RemoteServerError(RuntimeError):
     """서버가 요청을 거부하거나 SSE 스트림 안에서 오류를 보냈을 때 발생한다."""
 
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(self, message: str, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
 
 
 # CUDA 및 VRAM 확인
-import ctypes
-import importlib
-import os
-import platform
-import subprocess
-from dataclasses import dataclass
-
-MIN_VRAM_BYTES = 7 * 1024 ** 3
+MIN_VRAM_BYTES = 7 * 1024**3
 
 
 @dataclass(frozen=True)
@@ -151,7 +167,9 @@ class RoutingInfo:
 
 def _driver_devices() -> tuple[CudaDevice, ...]:
     # 드라이버 호출로 NVIDIA 하드웨어가 실제로 CUDA를 초기화할 수 있는지 확인한다.
-    lib = ctypes.CDLL("nvcuda.dll" if platform.system() == "Windows" else "libcuda.so.1")
+    lib = ctypes.CDLL(
+        "nvcuda.dll" if platform.system() == "Windows" else "libcuda.so.1"
+    )
     lib.cuInit.argtypes = [ctypes.c_uint]
     lib.cuInit.restype = ctypes.c_int
     if lib.cuInit(0):
@@ -170,28 +188,41 @@ def _driver_devices() -> tuple[CudaDevice, ...]:
     for ordinal in range(count.value):
         device, memory = ctypes.c_int(), ctypes.c_size_t()
         name = ctypes.create_string_buffer(256)
-        if lib.cuDeviceGet(ctypes.byref(device), ordinal) or mem_fn(ctypes.byref(memory), device):
+        if lib.cuDeviceGet(ctypes.byref(device), ordinal) or mem_fn(
+            ctypes.byref(memory), device
+        ):
             continue
         lib.cuDeviceGetName(name, len(name), device)
-        devices.append(CudaDevice(ordinal, name.value.decode("utf-8", "replace"), memory.value))
+        devices.append(
+            CudaDevice(ordinal, name.value.decode("utf-8", "replace"), memory.value)
+        )
     return tuple(devices)
 
 
 def _smi_devices() -> tuple[CudaDevice, ...]:
     executable = "nvidia-smi"
     if platform.system() == "Windows":
-        candidate = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32", "nvidia-smi.exe")
+        candidate = os.path.join(
+            os.environ.get("WINDIR", r"C:\Windows"), "System32", "nvidia-smi.exe"
+        )
         if os.path.isfile(candidate):
             executable = candidate
     result = subprocess.run(
-        [executable, "--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, timeout=5, check=True,
+        [
+            executable,
+            "--query-gpu=index,uuid,name,memory.total",
+            "--format=csv,noheader,nounits",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     records = []
     for line in result.stdout.splitlines():
         index, uuid, name, memory = [part.strip() for part in line.split(",", 3)]
-        records.append((index, uuid, name, int(memory) * 1024 ** 2))
+        records.append((index, uuid, name, int(memory) * 1024**2))
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible is not None:
         if not visible.strip() or visible.strip() == "-1":
@@ -199,12 +230,23 @@ def _smi_devices() -> tuple[CudaDevice, ...]:
         selected = []
         for identifier in visible.split(","):
             identifier = identifier.strip()
-            match = next((r for r in records if r[0] == identifier or r[1].startswith(identifier)), None)
-            if match is None:  # 잘못된 장치 지정이 나오면 CUDA의 표시 장치 목록이 끝난다.
+            match = next(
+                (
+                    r
+                    for r in records
+                    if r[0] == identifier or r[1].startswith(identifier)
+                ),
+                None,
+            )
+            if (
+                match is None
+            ):  # 잘못된 장치 지정이 나오면 CUDA의 표시 장치 목록이 끝난다.
                 break
             selected.append(match)
         records = selected
-    return tuple(CudaDevice(i, record[2], record[3]) for i, record in enumerate(records))
+    return tuple(
+        CudaDevice(i, record[2], record[3]) for i, record in enumerate(records)
+    )
 
 
 def detect_cuda_devices() -> tuple[CudaDevice, ...]:
@@ -262,58 +304,111 @@ def choose_backend(backend: str = "auto", main_gpu: int | None = None) -> Routin
                 "Use backend='remote' only if you explicitly want the server."
             )
         else:
-            return RoutingInfo("local", "CUDA GPU has at least 7 GiB VRAM and native CUDA is available", devices, candidates[0].index)
+            return RoutingInfo(
+                "local",
+                "CUDA GPU has at least 7 GiB VRAM and native CUDA is available",
+                devices,
+                candidates[0].index,
+            )
     if backend == "local":
         raise RuntimeError(f"Cannot use local backend: {reason}")
     return RoutingInfo("remote", reason or "local CUDA is unavailable", devices)
 
 
 # 원본 직접 생성 또는 원격 HTTP 호출
-import importlib
-import json
-import math
-import time
-import uuid
-import warnings
-from pathlib import Path
-from typing import Any, Iterator
-from urllib.parse import urlsplit, urlunsplit
-
-import httpx
-
-
 DEFAULT_SERVER_URL = "https://satisshin.iptime.org:4000"
 
 _COMPLETION_DEFAULTS = {
-    "suffix": None, "max_tokens": 16, "temperature": 0.8, "top_p": 0.95,
-    "min_p": 0.05, "typical_p": 1.0, "logprobs": None, "echo": False,
-    "stop": None, "frequency_penalty": 0.0, "presence_penalty": 0.0,
-    "repeat_penalty": 1.0, "top_k": 40, "stream": False, "seed": None,
-    "tfs_z": 1.0, "mirostat_mode": 0, "mirostat_tau": 5.0, "mirostat_eta": 0.1,
-    "model": None, "stopping_criteria": None, "logits_processor": None,
-    "grammar": None, "logit_bias": None,
+    "suffix": None,
+    "max_tokens": 16,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "min_p": 0.05,
+    "typical_p": 1.0,
+    "logprobs": None,
+    "echo": False,
+    "stop": None,
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+    "repeat_penalty": 1.0,
+    "top_k": 40,
+    "stream": False,
+    "seed": None,
+    "tfs_z": 1.0,
+    "mirostat_mode": 0,
+    "mirostat_tau": 5.0,
+    "mirostat_eta": 0.1,
+    "model": None,
+    "stopping_criteria": None,
+    "logits_processor": None,
+    "grammar": None,
+    "logit_bias": None,
 }
 _CHAT_DEFAULTS = {
-    "functions": None, "function_call": None, "tools": None, "tool_choice": None,
-    "temperature": 0.2, "top_p": 0.95, "top_k": 40, "min_p": 0.05,
-    "typical_p": 1.0, "stream": False, "stop": None, "seed": None,
-    "response_format": None, "max_tokens": None, "presence_penalty": 0.0,
-    "frequency_penalty": 0.0, "repeat_penalty": 1.0, "tfs_z": 1.0,
-    "mirostat_mode": 0, "mirostat_tau": 5.0, "mirostat_eta": 0.1,
-    "model": None, "logits_processor": None, "grammar": None, "logit_bias": None,
-    "logprobs": None, "top_logprobs": None,
+    "functions": None,
+    "function_call": None,
+    "tools": None,
+    "tool_choice": None,
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "top_k": 40,
+    "min_p": 0.05,
+    "typical_p": 1.0,
+    "stream": False,
+    "stop": None,
+    "seed": None,
+    "response_format": None,
+    "max_tokens": None,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "repeat_penalty": 1.0,
+    "tfs_z": 1.0,
+    "mirostat_mode": 0,
+    "mirostat_tau": 5.0,
+    "mirostat_eta": 0.1,
+    "model": None,
+    "logits_processor": None,
+    "grammar": None,
+    "logit_bias": None,
+    "logprobs": None,
+    "top_logprobs": None,
 }
 _REMOTE_UNSUPPORTED = {
-    "eval", "sample", "generate", "save_state", "load_state", "reset",
-    "eval_tokens", "eval_logits", "scores", "input_ids", "n_tokens",
-    "ctx", "model", "model_params", "context_params", "tokenizer_", "metadata",
-    "_ctx", "_model", "_batch", "_scores", "_input_ids",
-    "token_bos", "token_eos", "token_nl", "token_prefix", "token_middle", "token_suffix",
-    "token_eot", "pooling_type", "tokenizer",
+    "eval",
+    "sample",
+    "generate",
+    "save_state",
+    "load_state",
+    "reset",
+    "eval_tokens",
+    "eval_logits",
+    "scores",
+    "input_ids",
+    "n_tokens",
+    "ctx",
+    "model",
+    "model_params",
+    "context_params",
+    "tokenizer_",
+    "metadata",
+    "_ctx",
+    "_model",
+    "_batch",
+    "_scores",
+    "_input_ids",
+    "token_bos",
+    "token_eos",
+    "token_nl",
+    "token_prefix",
+    "token_middle",
+    "token_suffix",
+    "token_eot",
+    "pooling_type",
+    "tokenizer",
 }
 
 
-def _load_native_module():
+def _load_native_module() -> ModuleType:
     return importlib.import_module("llama_cpp")
 
 
@@ -327,14 +422,18 @@ def _normalize_url(url: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("server_url must use HTTP or HTTPS")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("server_url cannot contain credentials, query parameters, or fragments")
+        raise ValueError(
+            "server_url cannot contain credentials, query parameters, or fragments"
+        )
     path = parsed.path.rstrip("/")
     if path.endswith("/v1"):
         path = path[:-3]
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
-def _bind(defaults: dict, args: tuple, kwargs: dict) -> dict:
+def _bind(
+    defaults: dict[str, Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> dict[str, Any]:
     if len(args) > len(defaults):
         raise TypeError("too many positional arguments")
     result = dict(defaults)
@@ -352,13 +451,23 @@ def _grammar_text(grammar: Any) -> str:
     text = getattr(grammar, "_grammar", None)
     if isinstance(text, str):
         return text
-    raise UnsupportedRemoteOperation("Remote grammar must be a GBNF string or LlamaGrammar with its original GBNF text")
+    raise UnsupportedRemoteOperation(
+        "Remote grammar must be a GBNF string or LlamaGrammar with its original GBNF text"
+    )
 
 
-def _reject_callbacks(params: dict) -> None:
-    for name in ("logits_processor", "stopping_criteria", "chat_handler", "draft_model", "tokenizer"):
+def _reject_callbacks(params: dict[str, Any]) -> None:
+    for name in (
+        "logits_processor",
+        "stopping_criteria",
+        "chat_handler",
+        "draft_model",
+        "tokenizer",
+    ):
         if params.get(name) is not None:
-            raise UnsupportedRemoteOperation(f"{name} executes Python/native code and cannot run through llama-server HTTP")
+            raise UnsupportedRemoteOperation(
+                f"{name} executes Python/native code and cannot run through llama-server HTTP"
+            )
         params.pop(name, None)
 
 
@@ -374,10 +483,10 @@ class AdaptiveLlama:
         timeout: float | httpx.Timeout = 300.0,
         transport: httpx.BaseTransport | None = None,
         cache_prompt: bool = True,
-        cache_capacity_bytes: int = 1024 ** 3,
+        cache_capacity_bytes: int = 1024**3,
         remote_model: str | None = None,
         **llama_kwargs: Any,
-    ):
+    ) -> Any:
         decision = choose_backend(backend, llama_kwargs.get("main_gpu"))
         if decision.backend == "local":
             # 서버 접속 인자와 HTTP 전용 설정은 원본 생성자에 전달하지 않는다.
@@ -388,7 +497,10 @@ class AdaptiveLlama:
             if decision.selected_gpu is not None:
                 options.setdefault("main_gpu", decision.selected_gpu)
                 options["split_mode"] = native.LLAMA_SPLIT_MODE_NONE
-            return native.Llama(model_path=str(model_path) if model_path is not None else None, **options)
+            return native.Llama(
+                model_path=str(model_path) if model_path is not None else None,
+                **options,
+            )
         instance = super().__new__(cls)
         instance._routing_decision = decision
         return instance
@@ -404,12 +516,14 @@ class AdaptiveLlama:
         timeout: float | httpx.Timeout = 300.0,
         transport: httpx.BaseTransport | None = None,
         cache_prompt: bool = True,
-        cache_capacity_bytes: int = 1024 ** 3,
+        cache_capacity_bytes: int = 1024**3,
         remote_model: str | None = None,
         **llama_kwargs: Any,
-    ):
+    ) -> None:
         self.server_url = _normalize_url(server_url)
-        server_token, self.server_token_file = resolve_server_token(server_token, server_token_file)
+        server_token, self.server_token_file = resolve_server_token(
+            server_token, server_token_file
+        )
         # 원격 model_path는 기록만 하며 파일 검사·다운로드·요청 모델 선택에 사용하지 않는다.
         self.model_path = str(model_path) if model_path is not None else None
         self._http: httpx.Client | None = None
@@ -424,16 +538,41 @@ class AdaptiveLlama:
         self.routing_info = self._routing_decision
         del self._routing_decision
         self.backend = self.routing_info.backend
-        unsupported_init = {key: value for key, value in llama_kwargs.items() if key in {
-            "chat_handler", "draft_model", "tokenizer", "chat_format", "lora_path", "lora_base", "kv_overrides",
-        } and value is not None}
+        unsupported_init = {
+            key: value
+            for key, value in llama_kwargs.items()
+            if key
+            in {
+                "chat_handler",
+                "draft_model",
+                "tokenizer",
+                "chat_format",
+                "lora_path",
+                "lora_base",
+                "kv_overrides",
+            }
+            and value is not None
+        }
         if unsupported_init:
-            raise UnsupportedRemoteOperation("These constructor settings require a local model or server-side configuration: " + ", ".join(sorted(unsupported_init)))
+            raise UnsupportedRemoteOperation(
+                "These constructor settings require a local model or server-side configuration: "
+                + ", ".join(sorted(unsupported_init))
+            )
         # 메모리 배치, 스레드 수, GPU 레이어 설정은 서버 프로세스에서 관리한다.
         # 실제로 적용되지 않는 API 옵션으로 보내지 않고 호출자가 확인할 수 있게 보관한다.
-        self.remote_ignored_parameters = tuple(sorted(set(llama_kwargs) - {"seed", "n_ctx", "last_n_tokens_size", "embedding", "verbose"}))
+        self.remote_ignored_parameters = tuple(
+            sorted(
+                set(llama_kwargs)
+                - {"seed", "n_ctx", "last_n_tokens_size", "embedding", "verbose"}
+            )
+        )
         if self.remote_ignored_parameters:
-            warnings.warn("Remote server controls these model-loading settings: " + ", ".join(self.remote_ignored_parameters), UserWarning, stacklevel=2)
+            warnings.warn(
+                "Remote server controls these model-loading settings: "
+                + ", ".join(self.remote_ignored_parameters),
+                UserWarning,
+                stacklevel=2,
+            )
         self._http = httpx.Client(
             base_url=self.server_url + "/",
             headers={"Authorization": "Bearer " + server_token},
@@ -447,28 +586,34 @@ class AdaptiveLlama:
     def __repr__(self) -> str:
         return f"{type(self).__name__}(backend={self.backend!r}, server_url={self.server_url!r})"
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> NoReturn:
         if name in _REMOTE_UNSUPPORTED:
-            raise UnsupportedRemoteOperation(f"{name} requires local llama-cpp-python state; the server has shared native state")
+            raise UnsupportedRemoteOperation(
+                f"{name} requires local llama-cpp-python state; the server has shared native state"
+            )
         raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
 
     @classmethod
     def from_pretrained(
-        cls, repo_id: str, filename: str | None = None,
+        cls,
+        repo_id: str,
+        filename: str | None = None,
         additional_files: list[str] | None = None,
         local_dir: str | Path | None = None,
         local_dir_use_symlinks: bool | str = "auto",
         cache_dir: str | Path | None = None,
-        *, server_url: str = DEFAULT_SERVER_URL, server_token: str | None = None,
+        *,
+        server_url: str = DEFAULT_SERVER_URL,
+        server_token: str | None = None,
         server_token_file: str | Path | None = None,
         backend: str = "auto",
         timeout: float | httpx.Timeout = 300.0,
         transport: httpx.BaseTransport | None = None,
         cache_prompt: bool = True,
-        cache_capacity_bytes: int = 1024 ** 3,
+        cache_capacity_bytes: int = 1024**3,
         remote_model: str | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> Any:
         """로컬이면 원본 다운로드 생성자를 호출하고 원격이면 다운로드를 건너뛴다."""
         decision = choose_backend(backend, kwargs.get("main_gpu"))
         if decision.backend == "local":
@@ -480,15 +625,24 @@ class AdaptiveLlama:
                 options.setdefault("main_gpu", decision.selected_gpu)
                 options["split_mode"] = native.LLAMA_SPLIT_MODE_NONE
             return native.Llama.from_pretrained(
-                repo_id=repo_id, filename=filename, additional_files=additional_files,
-                local_dir=local_dir, local_dir_use_symlinks=local_dir_use_symlinks,
-                cache_dir=cache_dir, **options,
+                repo_id=repo_id,
+                filename=filename,
+                additional_files=additional_files,
+                local_dir=local_dir,
+                local_dir_use_symlinks=local_dir_use_symlinks,
+                cache_dir=cache_dir,
+                **options,
             )
         instance = cls(
-            server_url=server_url, server_token=server_token, server_token_file=server_token_file,
+            server_url=server_url,
+            server_token=server_token,
+            server_token_file=server_token_file,
             backend="remote",
-            timeout=timeout, transport=transport, cache_prompt=cache_prompt,
-            cache_capacity_bytes=cache_capacity_bytes, remote_model=remote_model,
+            timeout=timeout,
+            transport=transport,
+            cache_prompt=cache_prompt,
+            cache_capacity_bytes=cache_capacity_bytes,
+            remote_model=remote_model,
             **kwargs,
         )
         instance.routing_info = decision
@@ -510,12 +664,19 @@ class AdaptiveLlama:
             try:
                 body = response.json()
                 error = body.get("error", body)
-                detail = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+                detail = (
+                    error.get("message", str(error))
+                    if isinstance(error, dict)
+                    else str(error)
+                )
             except (ValueError, UnicodeError):
                 detail = response.text[:1000]
-            raise RemoteServerError(f"llama-server HTTP {response.status_code}: {detail}", response.status_code)
+            raise RemoteServerError(
+                f"llama-server HTTP {response.status_code}: {detail}",
+                response.status_code,
+            )
 
-    def _request(self, method: str, path: str, **kwargs):
+    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         response = self._client().request(method, path.lstrip("/"), **kwargs)
         self._check_response(response)
         result = response.json()
@@ -523,7 +684,7 @@ class AdaptiveLlama:
             raise RemoteServerError(str(result["error"]))
         return result
 
-    def _sse(self, path: str, payload: dict) -> Iterator[dict]:
+    def _sse(self, path: str, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
         with self._client().stream("POST", path.lstrip("/"), json=payload) as response:
             if response.is_error or response.is_redirect:
                 response.read()
@@ -552,11 +713,15 @@ class AdaptiveLlama:
                         raise RemoteServerError(str(event["error"]))
                     yield event
 
-    def _sampling_params(self, values: dict, *, chat: bool = False) -> dict:
+    def _sampling_params(
+        self, values: dict[str, Any], *, chat: bool = False
+    ) -> dict[str, Any]:
         values = dict(values)
         _reject_callbacks(values)
         if values.pop("tfs_z", 1.0) != 1.0:
-            raise UnsupportedRemoteOperation("Current llama-server does not implement tail-free sampling (tfs_z)")
+            raise UnsupportedRemoteOperation(
+                "Current llama-server does not implement tail-free sampling (tfs_z)"
+            )
         grammar = values.pop("grammar", None)
         if grammar is not None:
             values["grammar"] = _grammar_text(grammar)
@@ -571,12 +736,16 @@ class AdaptiveLlama:
         if isinstance(values.get("stop"), str):
             values["stop"] = [values["stop"]]
         if values.get("logit_bias") is not None and not chat:
-            values["logit_bias"] = [[int(token), bias] for token, bias in values["logit_bias"].items()]
+            values["logit_bias"] = [
+                [int(token), bias] for token, bias in values["logit_bias"].items()
+            ]
         values.setdefault("cache_prompt", self._cache_prompt)
         values.setdefault("repeat_last_n", self._repeat_last_n)
         return {key: value for key, value in values.items() if value is not None}
 
-    def create_completion(self, prompt: str | list[int], *args, **kwargs):
+    def create_completion(
+        self, prompt: str | list[int], *args: Any, **kwargs: Any
+    ) -> dict[str, Any] | Iterator[dict[str, Any]]:
         self._ensure_open()
         values = _bind(_COMPLETION_DEFAULTS, args, kwargs)
         suffix = values.pop("suffix")
@@ -585,17 +754,25 @@ class AdaptiveLlama:
         echo = values.pop("echo")
         logprobs = values.pop("logprobs")
         if echo and logprobs is not None:
-            raise UnsupportedRemoteOperation("llama-server does not expose prompt logprobs for echo=True")
+            raise UnsupportedRemoteOperation(
+                "llama-server does not expose prompt logprobs for echo=True"
+            )
         max_tokens = values.pop("max_tokens")
         payload = self._sampling_params(values)
         payload["prompt"] = prompt
         endpoint = "/completion"
         if suffix is not None:
             endpoint = "/infill"
-            payload["input_prefix"] = prompt if isinstance(prompt, str) else self.detokenize(prompt).decode("utf-8", "replace")
+            payload["input_prefix"] = (
+                prompt
+                if isinstance(prompt, str)
+                else self.detokenize(prompt).decode("utf-8", "replace")
+            )
             payload["input_suffix"] = suffix
             payload["prompt"] = ""
-        payload["n_predict"] = -1 if max_tokens is None or max_tokens <= 0 else max_tokens
+        payload["n_predict"] = (
+            -1 if max_tokens is None or max_tokens <= 0 else max_tokens
+        )
         if logprobs is not None:
             payload["n_probs"] = logprobs
         prompt_text = prompt if isinstance(prompt, str) else None
@@ -607,54 +784,115 @@ class AdaptiveLlama:
             return self._completion_stream(payload, prefix, logprob_offset, endpoint)
         raw = self._request("POST", endpoint, json=payload)
         if not isinstance(raw, dict):
-            raise RemoteServerError("Expected one completion; batched prompts require the server's native API")
-        return self._completion_response(raw, prefix + raw.get("content", ""), payload, offset=logprob_offset)
+            raise RemoteServerError(
+                "Expected one completion; batched prompts require the server's native API"
+            )
+        return self._completion_response(
+            raw, prefix + raw.get("content", ""), payload, offset=logprob_offset
+        )
 
     __call__ = create_completion
 
-    def _completion_response(self, raw: dict, text: str, payload: dict, *, completion_id: str | None = None, created: int | None = None, offset: int = 0) -> dict:
+    def _completion_response(
+        self,
+        raw: dict[str, Any],
+        text: str,
+        payload: dict[str, Any],
+        *,
+        completion_id: str | None = None,
+        created: int | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         stopped = raw.get("stop", True)
-        reason = "length" if raw.get("stop_type") == "limit" or raw.get("stopped_limit") else "stop"
+        reason = (
+            "length"
+            if raw.get("stop_type") == "limit" or raw.get("stopped_limit")
+            else "stop"
+        )
         result = {
             "id": completion_id or "cmpl-" + uuid.uuid4().hex,
             "object": "text_completion",
             "created": int(time.time()) if created is None else created,
             "model": raw.get("model") or payload.get("model") or "remote",
-            "choices": [{"text": text, "index": 0, "logprobs": self._convert_logprobs(raw, offset), "finish_reason": reason if stopped else None}],
+            "choices": [
+                {
+                    "text": text,
+                    "index": 0,
+                    "logprobs": self._convert_logprobs(raw, offset),
+                    "finish_reason": reason if stopped else None,
+                }
+            ],
         }
         if stopped:
             timings = raw.get("timings", {})
             prompt_count = raw.get("tokens_evaluated", timings.get("prompt_n", 0))
             generated_count = raw.get("tokens_predicted", timings.get("predicted_n", 0))
-            result["usage"] = {"prompt_tokens": prompt_count, "completion_tokens": generated_count, "total_tokens": prompt_count + generated_count}
+            result["usage"] = {
+                "prompt_tokens": prompt_count,
+                "completion_tokens": generated_count,
+                "total_tokens": prompt_count + generated_count,
+            }
         return result
 
     @staticmethod
-    def _convert_logprobs(raw: dict, offset: int) -> dict | None:
+    def _convert_logprobs(raw: dict[str, Any], offset: int) -> dict[str, Any] | None:
         probabilities = raw.get("completion_probabilities", raw.get("probs"))
         if probabilities is None:
             return None
-        result = {"tokens": [], "token_logprobs": [], "top_logprobs": [], "text_offset": []}
+        result = {
+            "tokens": [],
+            "token_logprobs": [],
+            "top_logprobs": [],
+            "text_offset": [],
+        }
         for entry in probabilities:
             text = entry.get("token", entry.get("content", ""))
             result["tokens"].append(text)
             result["token_logprobs"].append(entry.get("logprob"))
-            result["top_logprobs"].append({item.get("token", item.get("tok_str", "")): item.get("logprob", math.log(max(item.get("prob", 1e-45), 1e-45))) for item in entry.get("top_logprobs", entry.get("probs", []))})
+            result["top_logprobs"].append(
+                {
+                    item.get("token", item.get("tok_str", "")): item.get(
+                        "logprob", math.log(max(item.get("prob", 1e-45), 1e-45))
+                    )
+                    for item in entry.get("top_logprobs", entry.get("probs", []))
+                }
+            )
             result["text_offset"].append(offset)
             offset += len(text)
         return result
 
-    def _completion_stream(self, payload: dict, prefix: str, offset: int = 0, endpoint: str = "/completion") -> Iterator[dict]:
+    def _completion_stream(
+        self,
+        payload: dict[str, Any],
+        prefix: str,
+        offset: int = 0,
+        endpoint: str = "/completion",
+    ) -> Iterator[dict[str, Any]]:
         completion_id, created = "cmpl-" + uuid.uuid4().hex, int(time.time())
         if prefix:
-            yield self._completion_response({"stop": False}, prefix, payload, completion_id=completion_id, created=created)
+            yield self._completion_response(
+                {"stop": False},
+                prefix,
+                payload,
+                completion_id=completion_id,
+                created=created,
+            )
             offset = len(prefix)
         for event in self._sse(endpoint, payload):
             text = event.get("content", "")
-            yield self._completion_response(event, text, payload, completion_id=completion_id, created=created, offset=offset)
+            yield self._completion_response(
+                event,
+                text,
+                payload,
+                completion_id=completion_id,
+                created=created,
+                offset=offset,
+            )
             offset += len(text)
 
-    def create_chat_completion(self, messages: list[dict], *args, **kwargs):
+    def create_chat_completion(
+        self, messages: list[dict[str, Any]], *args: Any, **kwargs: Any
+    ) -> dict[str, Any] | Iterator[dict[str, Any]]:
         self._ensure_open()
         values = _bind(_CHAT_DEFAULTS, args, kwargs)
         # 기존 Python 함수 호출 형식을 tools API 형식으로 변환한다.
@@ -665,7 +903,11 @@ class AdaptiveLlama:
                 raise ValueError("Specify either functions or tools")
             values["tools"] = [{"type": "function", "function": fn} for fn in functions]
         if function_call is not None:
-            values["tool_choice"] = {"type": "function", "function": function_call} if isinstance(function_call, dict) else function_call
+            values["tool_choice"] = (
+                {"type": "function", "function": function_call}
+                if isinstance(function_call, dict)
+                else function_call
+            )
         payload = self._sampling_params(values, chat=True)
         payload["messages"] = messages
         if payload.get("max_tokens", 1) <= 0:
@@ -674,47 +916,82 @@ class AdaptiveLlama:
             return self._sse("/v1/chat/completions", payload)
         return self._request("POST", "/v1/chat/completions", json=payload)
 
-    def create_chat_completion_openai_v1(self, *args, **kwargs):
+    def create_chat_completion_openai_v1(
+        self, *args: Any, **kwargs: Any
+    ) -> ChatCompletion | Iterator[ChatCompletionChunk]:
         self._ensure_open()
         try:
             from openai.types.chat import ChatCompletion, ChatCompletionChunk
         except ImportError as error:
-            raise ImportError("Optional OpenAI response objects require the SDK; install it with: pip install openai") from error
+            raise ImportError(
+                "Optional OpenAI response objects require the SDK; install it with: pip install openai"
+            ) from error
         result = self.create_chat_completion(*args, **kwargs)
         if isinstance(result, dict):
             return ChatCompletion.model_validate(result)
         return (ChatCompletionChunk.model_validate(chunk) for chunk in result)
 
-    def tokenize(self, text: bytes, add_bos: bool = True, special: bool = False) -> list[int]:
+    def tokenize(
+        self, text: bytes, add_bos: bool = True, special: bool = False
+    ) -> list[int]:
         self._ensure_open()
         if not isinstance(text, bytes):
             raise TypeError("text must be bytes, matching llama-cpp-python.tokenize")
         try:
             content = text.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise UnsupportedRemoteOperation("HTTP tokenization requires valid UTF-8; arbitrary byte input requires a local tokenizer") from error
-        return self._request("POST", "/tokenize", json={"content": content, "add_special": add_bos, "parse_special": special})["tokens"]
+            raise UnsupportedRemoteOperation(
+                "HTTP tokenization requires valid UTF-8; arbitrary byte input requires a local tokenizer"
+            ) from error
+        return self._request(
+            "POST",
+            "/tokenize",
+            json={"content": content, "add_special": add_bos, "parse_special": special},
+        )["tokens"]
 
-    def detokenize(self, tokens: list[int], prev_tokens: list[int] | None = None, special: bool = False) -> bytes:
+    def detokenize(
+        self,
+        tokens: list[int],
+        prev_tokens: list[int] | None = None,
+        special: bool = False,
+    ) -> bytes:
         self._ensure_open()
         if special:
-            raise UnsupportedRemoteOperation("The server detokenize endpoint cannot select special-token rendering")
+            raise UnsupportedRemoteOperation(
+                "The server detokenize endpoint cannot select special-token rendering"
+            )
         # 기본 엔드포인트는 Unicode 문자열을 반환하므로 불완전한 UTF-8 토큰열은
         # 네이티브 바이트 표현과 정확히 동일하게 복원할 수 없다.
         if prev_tokens:
-            previous = self._request("POST", "/detokenize", json={"tokens": list(prev_tokens)})["content"]
-            combined = self._request("POST", "/detokenize", json={"tokens": list(prev_tokens) + list(tokens)})["content"]
-            return combined.encode("utf-8")[len(previous.encode("utf-8")):]
-        return self._request("POST", "/detokenize", json={"tokens": list(tokens)})["content"].encode("utf-8")
+            previous = self._request(
+                "POST", "/detokenize", json={"tokens": list(prev_tokens)}
+            )["content"]
+            combined = self._request(
+                "POST", "/detokenize", json={"tokens": list(prev_tokens) + list(tokens)}
+            )["content"]
+            return combined.encode("utf-8")[len(previous.encode("utf-8")) :]
+        return self._request("POST", "/detokenize", json={"tokens": list(tokens)})[
+            "content"
+        ].encode("utf-8")
 
-    def create_embedding(self, input: str | list[str], model: str | None = None, **kwargs):
+    # Keep input= for llama-cpp-python keyword compatibility.
+    def create_embedding(
+        self, input: str | list[str], model: str | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
         self._ensure_open()
         payload = {"input": input, **kwargs}
         if model or self._remote_model:
             payload["model"] = model or self._remote_model
         return self._request("POST", "/v1/embeddings", json=payload)
 
-    def embed(self, input: str | list[str], normalize: bool = False, truncate: bool = True, return_count: bool = False):
+    # Keep input= for llama-cpp-python keyword compatibility.
+    def embed(
+        self,
+        input: str | list[str],
+        normalize: bool = False,
+        truncate: bool = True,
+        return_count: bool = False,
+    ) -> list[Any] | tuple[list[Any], int]:
         self._ensure_open()
         inputs = [input] if isinstance(input, str) else input
         vectors, count = [], 0
@@ -722,7 +999,9 @@ class AdaptiveLlama:
             tokens = self.tokenize(text.encode("utf-8"))
             limit = self.n_ctx()
             if len(tokens) > limit and not truncate:
-                raise ValueError(f"Embedding input has {len(tokens)} tokens, exceeding n_ctx={limit}")
+                raise ValueError(
+                    f"Embedding input has {len(tokens)} tokens, exceeding n_ctx={limit}"
+                )
             if len(tokens) > limit:
                 tokens = tokens[:limit]
                 text = self.detokenize(tokens).decode("utf-8")
@@ -740,7 +1019,7 @@ class AdaptiveLlama:
         return (value, count) if return_count else value
 
     @property
-    def server_properties(self) -> dict:
+    def server_properties(self) -> dict[str, Any]:
         params = {"model": self._remote_model} if self._remote_model else None
         if self._props_cache is None:
             self._props_cache = self._request("GET", "/props", params=params)
@@ -753,12 +1032,18 @@ class AdaptiveLlama:
         server_limit = settings.get("n_ctx", props.get("n_ctx", 65536))
         return min(self._requested_n_ctx or server_limit, server_limit)
 
-    def _model_meta(self) -> dict:
+    def _model_meta(self) -> dict[str, Any]:
         if self._model_info_cache is None:
             models = self._request("GET", "/v1/models")["data"]
-            candidates = [item for item in models if self._remote_model is None or item["id"] == self._remote_model]
+            candidates = [
+                item
+                for item in models
+                if self._remote_model is None or item["id"] == self._remote_model
+            ]
             if len(candidates) != 1 or not candidates[0].get("meta"):
-                raise RemoteServerError("The server did not return unambiguous loaded model metadata")
+                raise RemoteServerError(
+                    "The server did not return unambiguous loaded model metadata"
+                )
             self._model_info_cache = candidates[0]["meta"]
         return self._model_info_cache
 
@@ -774,14 +1059,16 @@ class AdaptiveLlama:
         """서버가 슬롯마다 요청한 크기 이상의 컨텍스트를 확보했는지 확인한다."""
         actual = self.n_ctx()
         if self._requested_n_ctx and actual < self._requested_n_ctx:
-            raise ValueError(f"Server context is {actual}; requested n_ctx={self._requested_n_ctx}. Change the server configuration.")
+            raise ValueError(
+                f"Server context is {actual}; requested n_ctx={self._requested_n_ctx}. Change the server configuration."
+            )
         return actual
 
-    def health(self) -> dict:
+    def health(self) -> dict[str, Any]:
         self._ensure_open()
         return self._request("GET", "/health")
 
-    def apply_chat_template(self, messages: list[dict], **kwargs) -> str:
+    def apply_chat_template(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
         self._ensure_open()
         payload = {"messages": messages, **kwargs}
         if self._remote_model:
@@ -792,10 +1079,12 @@ class AdaptiveLlama:
         self._ensure_open()
         self._seed = seed
 
-    def set_cache(self, cache) -> None:
+    def set_cache(self, cache: Any) -> None:
         self._ensure_open()
         if cache is not None:
-            raise UnsupportedRemoteOperation("Python cache objects require local inference; use cache_prompt=True for server caching")
+            raise UnsupportedRemoteOperation(
+                "Python cache objects require local inference; use cache_prompt=True for server caching"
+            )
         self._cache_prompt = False
 
     def close(self) -> None:
@@ -805,12 +1094,12 @@ class AdaptiveLlama:
         if self._http is not None:
             self._http.close()
 
-    def __enter__(self):
+    def __enter__(self) -> AdaptiveLlama:
         if self._closed:
             raise RuntimeError("Llama instance is closed")
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: Any) -> None:
         self.close()
 
 
@@ -819,10 +1108,23 @@ Llama = AdaptiveLlama
 
 # 공개 API와 선택적 원본 도우미
 __version__ = "0.1.0"
-__all__ = ["Llama", "AdaptiveLlama", "DEFAULT_SERVER_URL", "resolve_server_token", "find_token_file", "execution_directory", "CudaDevice", "RoutingInfo", "choose_backend", "detect_cuda_devices", "RemoteServerError", "UnsupportedRemoteOperation"]
+__all__ = [
+    "Llama",
+    "AdaptiveLlama",
+    "DEFAULT_SERVER_URL",
+    "resolve_server_token",
+    "find_token_file",
+    "execution_directory",
+    "CudaDevice",
+    "RoutingInfo",
+    "choose_backend",
+    "detect_cuda_devices",
+    "RemoteServerError",
+    "UnsupportedRemoteOperation",
+]
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     """LlamaGrammar, 캐시, 저수준 API 등 선택적 네이티브 도우미를 계속 제공한다.
 
     원격 클라이언트에서 이 모듈을 가져올 때는 네이티브 라이브러리가 필요 없다.
@@ -830,12 +1132,15 @@ def __getattr__(name):
     """
     if name.startswith("__"):
         raise AttributeError(name)
-    import importlib
     try:
         native = importlib.import_module("llama_cpp")
     except ImportError as error:
-        raise AttributeError(f"{name} requires the optional llama-cpp-python installation") from error
+        raise AttributeError(
+            f"{name} requires the optional llama-cpp-python installation"
+        ) from error
     try:
         return getattr(native, name)
     except AttributeError as error:
-        raise AttributeError(f"module llama_wrapper has no attribute {name!r}") from error
+        raise AttributeError(
+            f"module llama_wrapper has no attribute {name!r}"
+        ) from error
