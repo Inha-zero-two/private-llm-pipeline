@@ -1,0 +1,209 @@
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-bottom: 28px;
+}
+
+.user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.userBubble {
+  max-width: 80%;
+  padding: 10px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-user);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 현재 동작 */
+.step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--text-muted);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.stepLabel {
+  background: linear-gradient(
+    90deg,
+    var(--text-muted) 0%,
+    var(--text-faint) 50%,
+    var(--text-muted) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.6s linear infinite;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* 답변 */
+.answer[data-streaming='true'] > div > :last-child::after {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--text);
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 종료 안내 */
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 14px;
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.notice svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+
+.notice[data-kind='stopped'] {
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+}
+
+.notice[data-kind='error'] {
+  background: var(--deny-bg);
+  color: var(--deny);
+}
+
+/* 동의 결과 */
+.consentLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.consentLine[data-result='allow'] svg {
+  color: var(--allow);
+}
+
+.consentLine[data-result='deny'] svg {
+  color: var(--deny);
+}
+
+.consentItems {
+  color: var(--text-faint);
+}
+
+/* 외부 모델 질의 · 응답 토글 */
+.frontier {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.frontierHeader {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.frontierHeader:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.chevron {
+  transition: transform 0.15s;
+}
+
+.chevron[data-open='true'] {
+  transform: rotate(90deg);
+}
+
+.frontierList {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0 0 0 14px;
+  border-left: 2px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.frontierItem {
+  font-size: 14px;
+}
+
+.frontierRound {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.frontierStatus {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--deny-bg);
+  color: var(--deny);
+}
+
+.frontierLabel {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.frontierText {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+}

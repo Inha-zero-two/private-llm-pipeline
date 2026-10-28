@@ -1,0 +1,88 @@
+.dialog {
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+
+.dialog::backdrop {
+  background: var(--bg-overlay);
+}
+
+.dialog[open] {
+  animation: pop 0.16s ease-out;
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+.body {
+  padding: 24px;
+}
+
+.title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.description {
+  margin: 0 0 16px;
+  color: var(--text-muted);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+/* 창 안에서 쓰는 버튼 */
+.button {
+  min-width: 72px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-weight: 550;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.primary {
+  composes: button;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--accent);
+  opacity: 0.88;
+}
+
+.danger {
+  composes: button;
+  border-color: var(--deny);
+  background: var(--deny);
+  color: #fff;
+}
+
+.danger:hover:not(:disabled) {
+  background: var(--deny);
+  opacity: 0.88;
+}
+
+.button:disabled {
+  opacity: 0.5;
+}

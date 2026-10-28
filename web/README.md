@@ -1,32 +1,89 @@
-# React + TypeScript + Vite
+# web — 채팅 화면
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + Vite (TypeScript). 상세 설계서 9장의 화면 세 개(메인 채팅, 추가 개인정보 공개 요청, 공개 허용 설정)를 만든다.
 
-Currently, two official plugins are available:
+## 실행
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+cd web
+npm install
+npm run dev        # http://localhost:5173
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+| 명령             | 내용                                      |
+| ---------------- | ----------------------------------------- |
+| `npm run dev`    | 개발 서버                                 |
+| `npm run build`  | 타입 검사 + 빌드                          |
+| `npm run lint`   | oxlint                                    |
+| `npm run format` | Prettier로 정리 (`format:check`는 검사만) |
+
+## 구성
+
+웹은 **앱 서버(FastAPI)만** 부른다. 로컬 LLM은 앱 서버 뒤에 있고(래퍼 API), 웹은 직접 부르지 않는다.
+
+| 환경 | 웹                                | 앱 서버 · 로컬 LLM                    | 웹 → 서버              |
+| ---- | --------------------------------- | ------------------------------------- | ---------------------- |
+| 개발 | `localhost:5173` (Vite 개발 서버) | 로컬에서 띄운 서버 (`localhost:8000`) | http, 개발 서버 프록시 |
+| 운영 | CloudFront                        | 로컬 LLM과 같은 곳 (위치 미정)        | **https**              |
+
+```
+개발:  브라우저 ─▶ localhost:5173 (Vite) ──프록시 /api──▶ localhost:8000 앱 서버 ─▶ 로컬 LLM 래퍼
+운영:  브라우저 ─▶ CloudFront (웹) ··· 브라우저 ──HTTPS + SSE──▶ 앱 서버 ─▶ 로컬 LLM 래퍼
+                                                                       └──▶ 프론티어 LLM
+```
+
+운영에서는 웹과 앱 서버가 **서로 다른 곳**에 있다. 그래서 웹은
+
+- 서버 주소를 `VITE_API_BASE_URL`로 받는다 (빌드할 때 박힌다). 웹이 https이므로 서버도 https여야 하고, `http://` 주소를 넣으면 빌드를 멈춘다 (`vite.config.ts`).
+- `GET /api/health`로 서버 · 로컬 모델 상태를 주기적으로 확인하고, 문제가 있으면 상단 배너로 알리고 전송을 막는다.
+- 요청마다 시간 제한을 두고, SSE가 끊기면 다시 접속하는 중임을 표시한다.
+
+## 목업 / 실제 서버
+
+앱 서버가 나오기 전까지는 **브라우저 안 목업**(`src/api/mock`)으로 동작한다. 목업은 설계서 흐름(①~⑧)대로 SSE 이벤트를 흘리며, 데이터는 메모리에만 있어 새로고침하면 사라진다.
+
+`.env.example`을 복사해 설정한다.
+
+| 상황                     | 파일                                      | 설정                                                                      |
+| ------------------------ | ----------------------------------------- | ------------------------------------------------------------------------- |
+| 목업으로 개발            | (없어도 됨)                               | `VITE_API_MODE=mock`                                                      |
+| 로컬 앱 서버에 붙여 개발 | `.env.local`                              | `VITE_API_MODE=http` (서버 포트가 다르면 `API_URL=http://localhost:포트`) |
+| 배포 빌드 (CloudFront)   | `.env.production.local` 또는 CI 환경 변수 | `VITE_API_MODE=http`, `VITE_API_BASE_URL=https://서버주소`                |
+
+- 운영에서 CloudFront가 `/api`만 앱 서버로 넘겨 웹과 API를 같은 주소로 제공한다면 `VITE_API_BASE_URL`은 비워 둔다.
+- 서버 주소가 웹과 다르면 앱 서버가 웹 주소에 **CORS**를 열어야 한다. 자세한 요구 사항은 `API_보완_제안서.md`의 A-09 ~ A-11.
+- `npm run build` 결과물(`dist/`)은 정적 파일이라 S3 + CloudFront에 그대로 올리면 된다.
+
+### 목업 시나리오
+
+질문에 아래 낱말을 넣으면 해당 상황을 볼 수 있다.
+
+| 질문에 넣을 것                                                     | 상황                                     |
+| ------------------------------------------------------------------ | ---------------------------------------- |
+| 나이(`27살`), 전화번호, 회사 · 학교 이름(`삼성전자`, `인하대학교`) | 추가 공개 동의 요청                      |
+| `동의`                                                             | 위 항목이 없어도 예시 항목으로 동의 요청 |
+| `오류`                                                             | 실행 오류 (`error` 이벤트)               |
+| `오프라인`                                                         | 외부 모델 연결 불가 (`offline`)          |
+| `상한`                                                             | 질문 상한 도달 (`call_limit`)            |
+
+공개 허용 설정에서 허용한 종류(예: "나이는 공개해도 돼")는 동의를 묻지 않는다.
+
+## 구조
+
+```
+src/
+  api/
+    types.ts        API · SSE 이벤트 자료형 (설계서 7장 + API_보완_제안서)
+    http.ts         실제 서버 호출 (fetch, EventSource)
+    mock/           목업 앱 서버와 시나리오
+    index.ts        VITE_API_MODE에 따라 둘 중 하나를 내보낸다
+  hooks/
+    useLiveRun.ts   진행 중인 실행의 SSE를 화면 상태로 모은다
+  lib/
+    turns.ts        저장된 기록 + 진행 중인 실행 → 화면에 그릴 질문 · 답변 목록
+  components/       사이드바, 대화, 입력창, 동의 창, 설정 창 등
+```
+
+## API 기준
+
+화면은 상세 설계서 7장에 `API_보완_제안서.md`(상위 폴더, 💡 팀 확인 전)의 보완안을 더한 형식을 쓴다. 팀이 다르게 정하면 `src/api/`만 고친다.

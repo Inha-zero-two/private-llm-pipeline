@@ -1,0 +1,47 @@
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: var(--content-w);
+  width: calc(100% - 32px);
+  margin: 0 auto 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+
+.banner svg {
+  flex-shrink: 0;
+}
+
+.banner[data-kind='error'] {
+  background: var(--deny-bg);
+  color: var(--deny);
+}
+
+.banner[data-kind='warn'] {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.banner[data-kind='info'] {
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+}
+
+.text {
+  flex: 1;
+}
+
+.retry {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.retry:hover {
+  background: rgb(127 127 127 / 12%);
+}
