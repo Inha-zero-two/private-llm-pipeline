@@ -49,23 +49,18 @@ reviews:
   suggested_reviewers: false
   auto_assign_reviewers: false
 
-  reviews:
-  auto_review:
-    enabled: true
-    base_branches:
-      - dev
-
   # PR 요약 마지막에 짧은 시 한 편을 추가합니다 🐰
   poem: true
 
   # -------------------------------------------------------------- #
   #                       자동 리뷰 설정                             #
   # -------------------------------------------------------------- #
-  auto_review:
-    # PR 생성 시 자동으로 리뷰 시작
-    enabled: true
-    # 기존 리뷰가 있는 PR에 새 커밋이 추가되면 변경분만 다시 리뷰
-    auto_incremental_review: true
+   reviews:
+    auto_review:
+      enabled: true
+      base_branches:
+        - dev
+        - main
 
 # ================================================================ #
 #                         채팅 설정                                  #
