@@ -316,7 +316,7 @@ def choose_backend(backend: str = "auto", main_gpu: int | None = None) -> Routin
 
 
 # 원본 직접 생성 또는 원격 HTTP 호출
-DEFAULT_SERVER_URL = "https://satisshin.iptime.org:4000"
+DEFAULT_SERVER_URL = "https://satisshin.top:4000"
 
 _COMPLETION_DEFAULTS = {
     "suffix": None,
@@ -414,17 +414,36 @@ def _load_native_module() -> ModuleType:
 
 def _normalize_url(url: str) -> str:
     if not isinstance(url, str) or not url.strip():
-        raise ValueError("server_url must be a nonempty domain or HTTP(S) URL")
+        raise ValueError("server_url must be a nonempty domain or HTTPS URL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in url):
+        raise ValueError("server_url cannot contain control characters")
     url = url.strip()
+    if any(character.isspace() for character in url) or "\\" in url:
+        raise ValueError("server_url must be a valid HTTPS URL")
     if "://" not in url:
         url = "https://" + url
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("server_url must use HTTP or HTTPS")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+    try:
+        parsed = urlsplit(url)
+        hostname, port = parsed.hostname, parsed.port
+        # Validate with the same URL parser that will create the HTTP request.
+        httpx.URL(url)
+    except (ValueError, httpx.InvalidURL):
+        raise ValueError("server_url must be a valid HTTPS URL") from None
+    if parsed.scheme != "https" or not hostname:
+        raise ValueError("server_url must use HTTPS with a hostname")
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or "?" in url
+        or "#" in url
+    ):
         raise ValueError(
             "server_url cannot contain credentials, query parameters, or fragments"
         )
+    if "%" in parsed.netloc or parsed.netloc.endswith(":"):
+        raise ValueError("server_url must have a valid hostname and port")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("server_url port must be between 1 and 65535")
     path = parsed.path.rstrip("/")
     if path.endswith("/v1"):
         path = path[:-3]
@@ -578,7 +597,7 @@ class AdaptiveLlama:
             headers={"Authorization": "Bearer " + server_token},
             timeout=timeout,
             transport=transport,
-            verify=False,
+            verify=True,
             trust_env=False,
             follow_redirects=False,
         )

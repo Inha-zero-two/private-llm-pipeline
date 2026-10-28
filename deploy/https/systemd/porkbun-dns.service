@@ -1,0 +1,23 @@
+[Unit]
+Description=Update the satisshin.top root A record when the public IPv4 changes
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=true
+EnvironmentFile=/etc/satisshin/porkbun.env
+ExecStart=/usr/bin/python3 /opt/satisshin/https/sync_dns.py --domain satisshin.top --apply
+TimeoutStartSec=120s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=

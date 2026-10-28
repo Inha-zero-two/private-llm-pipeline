@@ -1,0 +1,21 @@
+[Unit]
+Description=Start the existing LLM server after a usable GPU is detected
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=shin-pi
+Group=shin-pi
+EnvironmentFile=-/etc/satisshin/llama-runtime.env
+ExecStart=/usr/bin/python3 /opt/satisshin/boot/start_llm.py --config /etc/satisshin/boot.json --run
+Restart=always
+RestartSec=30s
+TimeoutStopSec=120s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,9 +1,15 @@
 # 내부 테스트용 Llama 어댑터
 
 로컬 CUDA 환경에서는 원본 `llama_cpp.Llama`를 직접 반환하고, 그 외 환경에서는
-`https://satisshin.iptime.org:4000`의 Gemma 4 E4B QAT 서버를 사용합니다.
+`https://satisshin.top:4000`의 원격 서버를 사용하도록 준비되어 있습니다.
 macOS, CUDA GPU가 없는 환경, GPU VRAM이 7GiB보다 작은 환경은 원격으로 실행됩니다.
-테스트용 자가 서명 인증서를 사용하며 라이브러리는 인증서 검증을 생략합니다.
+공인 CA 인증서와 접속 도메인을 검증합니다. 이전 자가 서명 인증서는 허용하지 않습니다.
+
+새 서버에서 기존 키 인증·실제 채팅·스트리밍과 공개 HTTPS 접속을 검증했습니다.
+[인증서 발급·연동 안내](../../deploy/https/README.md)를 참고하세요.
+원격 `server_url`은 HTTPS만 허용합니다. 명시한 HTTP URL은 loopback을 포함해 거부합니다.
+서버는 `https://satisshin.top:4000`에서 공개되며 기존 키를 그대로 사용합니다.
+외부 관리 API는 차단하므로 슬롯·지표 관리는 서버 안에서 진행합니다.
 
 ## 설치
 
@@ -119,10 +125,13 @@ with closing(Llama(model_path="models/gemma.gguf", n_ctx=65536)) as llm:
 이 모듈은 llama-cpp-python을 대체하는 개발용 어댑터이므로 다음은 호환성을 우선합니다.
 
 - `from llama_wrapper import Llama`, 기존 클래스·예외 이름, 메서드와 키워드 인자,
-  기본값을 유지합니다. 특히 `create_embedding(input=...)`와 `embed(input=...)`의
+  호출 규격을 유지합니다. HTTPS 전환으로 기본 서버 주소와 인증서 검증 정책은 변경했습니다.
+  특히 `create_embedding(input=...)`와 `embed(input=...)`의
   `input`은 원본 API 이름이므로 `input_`으로 바꾸지 않습니다.
-- 요청·응답·스트리밍 청크는 기존 dict 형식과 추가 필드를 그대로 유지합니다.
-  Pydantic 검증이나 필드 변환을 추가하지 않습니다.
+- `create_chat_completion`의 dict 응답·스트리밍 청크는 서버의 추가 필드를 그대로 유지합니다.
+  `create_completion`은 응답·청크를 정해진 필드의 호환 dict로 재구성합니다.
+  `create_chat_completion_openai_v1`은 OpenAI SDK의 Pydantic 모델
+  (`ChatCompletion` / `ChatCompletionChunk`)로 검증·변환합니다. 기존 메서드별 동작을 유지합니다.
 - 공개된 `CudaDevice`, `RoutingInfo`와 설치기의 데이터 구조는 위치 인자 생성과
   불변성을 유지하기 위해 기존 frozen dataclass를 사용합니다. 새로운 런타임 의존성은 없습니다.
 - 기존 설치 명령, 예제 실행 경로와 단일 파일 복사를 유지하기 위해

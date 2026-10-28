@@ -5,6 +5,9 @@
 *.pem
 *.key
 
+# HTTPS 인증서 다운로드·배포 산출물 (묶음 ZIP과 API 응답 포함)
+deploy/https/private/
+
 # 로컬 LLM 모델 파일
 *.gguf
 *.bin

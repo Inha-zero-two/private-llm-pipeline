@@ -1,0 +1,17 @@
+[Unit]
+Description=Validate and synchronize the satisshin.top certificate from Porkbun
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0027
+EnvironmentFile=/etc/satisshin/porkbun.env
+ExecStart=/usr/bin/python3 /opt/satisshin/https/sync_certificate.py --domain satisshin.top --output-dir /etc/satisshin/tls --group caddy
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/satisshin/tls

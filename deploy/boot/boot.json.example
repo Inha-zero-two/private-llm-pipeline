@@ -1,0 +1,11 @@
+{
+  "llama_server": "/ABSOLUTE/PATH/TO/EXISTING/llama-server",
+  "working_directory": "/ABSOLUTE/PATH/TO/EXISTING/PROJECT",
+  "api_key_file": "/ABSOLUTE/PATH/TO/EXISTING/PROJECT/api-keys.key",
+  "model_arguments": [
+    "--model", "/ABSOLUTE/PATH/TO/EXISTING/MODEL.gguf",
+    "--n-gpu-layers", "99"
+  ],
+  "gpu_device_pattern": "CUDA[0-9]+",
+  "probe_timeout": 10
+}

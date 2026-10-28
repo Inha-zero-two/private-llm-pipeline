@@ -36,6 +36,126 @@ def test_existing_call_signatures() -> None:
     assert wrapper.Llama is wrapper.AdaptiveLlama
 
 
+@pytest.mark.parametrize("pretrained", [False, True])
+def test_remote_defaults_verify_new_domain_and_keep_transport_settings(
+    monkeypatch: pytest.MonkeyPatch, pretrained: bool
+) -> None:
+    http_client = Mock()
+    monkeypatch.setattr(wrapper.httpx, "Client", http_client)
+
+    client = (
+        wrapper.Llama.from_pretrained(
+            "nonexistent/repo", backend="remote", server_token="test-key"
+        )
+        if pretrained
+        else wrapper.Llama(backend="remote", server_token="test-key")
+    )
+    try:
+        assert wrapper.DEFAULT_SERVER_URL == "https://satisshin.top:4000"
+        assert client.server_url == wrapper.DEFAULT_SERVER_URL
+        http_client.assert_called_once_with(
+            base_url="https://satisshin.top:4000/",
+            headers={"Authorization": "Bearer test-key"},
+            timeout=300.0,
+            transport=None,
+            verify=True,
+            trust_env=False,
+            follow_redirects=False,
+        )
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("satisshin.top:4000/v1/", "https://satisshin.top:4000"),
+        (" https://example.invalid/proxy/v1/ ", "https://example.invalid/proxy"),
+        ("https://example.invalid:65535/", "https://example.invalid:65535"),
+        ("https://localhost:4000", "https://localhost:4000"),
+        ("https://127.0.0.1:4000/", "https://127.0.0.1:4000"),
+        ("https://[::1]:4000/v1", "https://[::1]:4000"),
+    ],
+)
+def test_https_url_normalization_preserves_supported_endpoints(
+    url: str, expected: str
+) -> None:
+    assert wrapper._normalize_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        123,
+        "",
+        "   ",
+        "http://public.invalid:4000",
+        "http://127.0.0.1:4001",
+        "http://localhost:4001",
+        "http://[::1]:4001",
+        "ftp://example.invalid",
+        "https://",
+        "https:///path",
+        "https://:4000",
+        "https://user:synthetic-secret@example.invalid",
+        "https://@example.invalid",
+        "https://example.invalid?token=synthetic-secret",
+        "https://example.invalid?",
+        "https://example.invalid#synthetic-secret",
+        "https://example.invalid#",
+        "https://example.invalid:invalid-port",
+        "https://example.invalid:0",
+        "https://example.invalid:-1",
+        "https://example.invalid:65536",
+        "https://example.invalid:",
+        "https://[::1",
+        "https://[::1]suffix",
+        "https://[::1]:",
+        "https://example.invalid\n",
+        "https://exam\tple.invalid",
+        "https://example.invalid/\x00",
+        "https://example.invalid/\x7f",
+        "https://exa mple.invalid",
+        "https://example.invalid\\path",
+        "https://example.invalid%40other.invalid",
+        "//example.invalid",
+    ],
+)
+def test_unsafe_urls_are_rejected_before_reading_keys_or_creating_client(
+    monkeypatch: pytest.MonkeyPatch, url: Any
+) -> None:
+    resolve_token = Mock(
+        side_effect=AssertionError("must reject URL before reading key")
+    )
+    http_client = Mock(side_effect=AssertionError("must reject URL before HTTP setup"))
+    monkeypatch.setattr(wrapper, "resolve_server_token", resolve_token)
+    monkeypatch.setattr(wrapper.httpx, "Client", http_client)
+
+    with pytest.raises(ValueError) as error:
+        wrapper.Llama(backend="remote", server_url=url)
+
+    resolve_token.assert_not_called()
+    http_client.assert_not_called()
+    assert "synthetic-secret" not in str(error.value)
+
+
+def test_remote_pretrained_also_rejects_plaintext_before_reading_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolve_token = Mock(
+        side_effect=AssertionError("must reject URL before reading key")
+    )
+    monkeypatch.setattr(wrapper, "resolve_server_token", resolve_token)
+
+    with pytest.raises(ValueError, match="HTTPS"):
+        wrapper.Llama.from_pretrained(
+            "nonexistent/repo", backend="remote", server_url="http://public.invalid"
+        )
+
+    resolve_token.assert_not_called()
+
+
 def test_frozen_routing_records_keep_positional_construction() -> None:
     device = wrapper.CudaDevice(0, "test GPU", wrapper.MIN_VRAM_BYTES)
     info = wrapper.RoutingInfo("local", "reason", (device,), 0)
@@ -248,6 +368,31 @@ def test_remote_errors(stream: bool) -> None:
         if stream:
             list(result)
     assert error.value.status_code == (None if stream else 401)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_redirect_never_forwards_bearer_key(stream: bool) -> None:
+    requests: list[httpx.Request] = []
+
+    def redirect(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "http://other.invalid/collect"})
+
+    with wrapper.Llama(
+        backend="remote",
+        server_url="https://example.invalid",
+        server_token="synthetic-key",
+        transport=httpx.MockTransport(redirect),
+    ) as client:
+        with pytest.raises(wrapper.RemoteServerError) as error:
+            result = client.create_chat_completion([], stream=stream)
+            if stream:
+                list(result)
+
+    assert error.value.status_code == 302
+    assert len(requests) == 1
+    assert requests[0].url == "https://example.invalid/v1/chat/completions"
+    assert requests[0].headers["Authorization"] == "Bearer synthetic-key"
 
 
 def test_embedding_input_keyword_is_preserved() -> None:
