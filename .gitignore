@@ -12,6 +12,9 @@
 # 서버 인증키 폴더 (PR #8 llama_wrapper). 파일 이름과 상관없이 통째로 무시
 keys/
 
+# HTTPS 인증서 다운로드·배포 산출물 (묶음 ZIP과 API 응답 포함)
+deploy/https/private/
+
 # 로컬 LLM 모델 파일
 models/
 *.gguf

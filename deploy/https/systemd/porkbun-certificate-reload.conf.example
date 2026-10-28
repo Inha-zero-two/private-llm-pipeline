@@ -1,0 +1,5 @@
+# Caddy 기동을 확인한 뒤 인증서 동기화 서비스의 drop-in으로 설치합니다.
+# 인증서 변경 시 Caddy만 부드럽게 재로드하며 LLM은 재시작하지 않습니다.
+[Service]
+ExecStart=
+ExecStart=/usr/bin/python3 /opt/satisshin/https/sync_certificate.py --domain satisshin.top --output-dir /etc/satisshin/tls --group caddy --reload-caddy
