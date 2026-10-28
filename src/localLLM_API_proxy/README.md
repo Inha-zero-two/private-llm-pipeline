@@ -1,15 +1,9 @@
 # 내부 테스트용 Llama 어댑터
 
-로컬 CUDA 환경에서는 원본 `llama_cpp.Llama`를 직접 반환하고, 그 외 환경에서는
-`https://satisshin.top:4000`의 원격 서버를 사용하도록 준비되어 있습니다.
+사용 가능한 CUDA GPU의 총 VRAM이 7GiB 이상이면 로컬에서 실행하고, 그 외 환경에서는
+`https://satisshin.top:4000`의 원격 서버를 사용합니다.
 macOS, CUDA GPU가 없는 환경, GPU VRAM이 7GiB보다 작은 환경은 원격으로 실행됩니다.
-공인 CA 인증서와 접속 도메인을 검증합니다. 이전 자가 서명 인증서는 허용하지 않습니다.
-
-새 서버에서 기존 키 인증·실제 채팅·스트리밍과 공개 HTTPS 접속을 검증했습니다.
-[인증서 발급·연동 안내](../../deploy/https/README.md)를 참고하세요.
-원격 `server_url`은 HTTPS만 허용합니다. 명시한 HTTP URL은 loopback을 포함해 거부합니다.
-서버는 `https://satisshin.top:4000`에서 공개되며 기존 키를 그대로 사용합니다.
-외부 관리 API는 차단하므로 슬롯·지표 관리는 서버 안에서 진행합니다.
+원격 접속은 HTTPS만 허용하며 공인 CA 인증서와 도메인을 검증합니다.
 
 ## 설치
 
@@ -54,6 +48,8 @@ GPU 번호를 설치 때 직접 고를 필요는 없습니다. 설치기는 보�
 ## 인증키 배치
 
 다른 앱에서 가져다 쓸 때는 `llama_wrapper.py`를 실행 파일(`app.py`) 옆에 복사하세요.
+별도 가상환경에서 사용한다면 그 환경에도 `httpx==0.28.1`이 필요합니다.
+로컬 추론용 네이티브 패키지는 위 설치 스크립트의 `--venv` 옵션으로 해당 환경에 설치합니다.
 전달받은 키 파일은 실행할 Python 파일 옆이나 하위 폴더에 복사합니다.
 ```text
 my_app/
@@ -81,17 +77,19 @@ with closing(Llama(model_path="models/gemma.gguf", n_ctx=65536)) as llm:
     print(response["choices"][0]["message"]["content"])
 ```
 
-호출 시에는 보이는 적격 GPU 중 첫 번째를 골라 GPU 하나만 사용합니다. 직접 고르려면 `Llama(model_path="models/gemma.gguf", main_gpu=1)`처럼 지정하세요.
+GPU가 있어도 원격 서버만 사용하려면 `Llama(backend="remote")`로 생성합니다. 이때는 로컬 모델 파일이 필요하지 않습니다.
+
+로컬 호출 시에는 보이는 적격 GPU 중 첫 번째를 골라 GPU 하나만 사용합니다. 직접 고르려면 `Llama(model_path="models/gemma.gguf", main_gpu=1)`처럼 지정하세요.
 `CUDA_VISIBLE_DEVICES`로 제한하면 보이는 순서의 논리 번호를 사용하므로 첫 장치는 `main_gpu=0`입니다. 필터는 설치·실행 모두 같은 값으로 Python 프로세스 시작 전에 적용하세요.
 기본 자동 모드에서 지정한 번호의 GPU가 존재하지 않거나 총 VRAM이 7GiB 미만이면 원격으로 실행합니다.
 
-`response`는 dict이며, 실제 서버 호출에서 다음 필드를 확인했습니다.
+`response`는 dict입니다. 주요 필드는 다음과 같습니다.
 
 | 접근 방법 | 의미 |
 | --- | --- |
-| `response["choices"][0]["message"].get("content")` | 최종 답변. 이번 응답: `대한민국의 수도는 서울입니다.` |
+| `response["choices"][0]["message"].get("content")` | 최종 답변 |
 | `response["choices"][0]["finish_reason"]` | 종료 이유. `stop`은 정상 종료, `length`는 생성 한도 도달 |
-| `response["usage"]` | `prompt_tokens` 입력 / `completion_tokens` 생성 / `total_tokens` 합계. 이번 호출: 28 / 9 / 37 |
+| `response["usage"]` | `prompt_tokens` 입력 / `completion_tokens` 생성 / `total_tokens` 합계 |
 | `response["model"]`, `response["id"]` | 모델 이름과 요청 ID |
 | `response.get("timings", {})` | 서버의 속도·캐시·MTP 통계. 원본 라이브러리에는 보장되지 않음 |
 
@@ -110,49 +108,4 @@ with closing(Llama(model_path="models/gemma.gguf", n_ctx=65536)) as llm:
 ```
 
 예제용 키는 `example/keys/`에 복사하세요. 기존 상위 `컴종설/keys/`는 자동 검색하지 않습니다.
-`example/example_chat.py`에서 실제 전체 응답과 최종 답변을 확인할 수 있습니다.
-
-최종 제품에서 원본 라이브러리로 교체할 때는 `from llama_cpp import Llama`로 가져오면 됩니다.
-공통 호출 코드는 원본 `llama_cpp.Llama`의 인자와 응답 구조를 사용합니다.
-
-## 코드 컨벤션과 호환성 범위
-
-[PR #9의 코드 컨벤션](https://github.com/Inha-zero-two/private-llm-pipeline/blob/de871642f8d8ab37701351fe2af1efe1c2513cb2/docs/convention-code.md)에 맞춰
-함수·변수는 `snake_case`, 클래스는 `PascalCase`, 상수는 대문자와 `_`를 사용합니다.
-모든 함수의 인자와 반환값에 타입 힌트를 붙이고, import 순서와 서식은 Ruff로 검사합니다.
-변경되는 내부 상태는 상수가 아니므로 `_last_native_diagnostic`처럼 소문자로 씁니다.
-
-이 모듈은 llama-cpp-python을 대체하는 개발용 어댑터이므로 다음은 호환성을 우선합니다.
-
-- `from llama_wrapper import Llama`, 기존 클래스·예외 이름, 메서드와 키워드 인자,
-  호출 규격을 유지합니다. HTTPS 전환으로 기본 서버 주소와 인증서 검증 정책은 변경했습니다.
-  특히 `create_embedding(input=...)`와 `embed(input=...)`의
-  `input`은 원본 API 이름이므로 `input_`으로 바꾸지 않습니다.
-- `create_chat_completion`의 dict 응답·스트리밍 청크는 서버의 추가 필드를 그대로 유지합니다.
-  `create_completion`은 응답·청크를 정해진 필드의 호환 dict로 재구성합니다.
-  `create_chat_completion_openai_v1`은 OpenAI SDK의 Pydantic 모델
-  (`ChatCompletion` / `ChatCompletionChunk`)로 검증·변환합니다. 기존 메서드별 동작을 유지합니다.
-- 공개된 `CudaDevice`, `RoutingInfo`와 설치기의 데이터 구조는 위치 인자 생성과
-  불변성을 유지하기 위해 기존 frozen dataclass를 사용합니다. 새로운 런타임 의존성은 없습니다.
-- 기존 설치 명령, 예제 실행 경로와 단일 파일 복사를 유지하기 위해
-  `src/localLLM_API_proxy/` 경로와 `llama_wrapper.py` 단일 파일 구성을 유지합니다.
-  서버의 `app/runtime/` 구조로 옮기는 작업은 이 어댑터의 호환성 변경과 별도로 다룹니다.
-- 네이티브 객체를 직접 반환하는 팩터리, 네이티브 도우미 전달, 확장 가능한 JSON 값과
-  `*args`/`**kwargs`에는 의도적으로 `Any`를 사용합니다. 타입 힌트가 런타임 검증을 추가하지는 않습니다.
-
-## 개발 검증
-
-이 폴더에서 가상환경의 Python으로 실행합니다.
-
-```bash
-python -m pip install -r requirements-dev.txt
-python -m ruff check .
-python -m ruff format --check .
-python -m pytest -q
-```
-
-`tests/test_llama_wrapper.py`와 `tests/test_install.py`는 HTTP·네이티브 백엔드를
-테스트 대역으로 바꿔 호출 규격, dict 응답, 스트리밍, GPU 선택과 설치 계획을 검사합니다.
-실제 인증키·서버·GPU 모델이나 네이티브 패키지 설치는 필요하지 않습니다.
-`tests/public_api.json`은 컨벤션 적용 전 커밋 `30a447f`의 호출 이름·인자·기본값을 기록합니다.
-이는 기존 어댑터와의 호환성 검사이며, llama-cpp-python의 모든 기능을 검증한다는 뜻은 아닙니다.
+`example/example_chat.py`는 전체 응답과 최종 답변을 출력합니다.
