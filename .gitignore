@@ -41,4 +41,5 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 .idea/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
