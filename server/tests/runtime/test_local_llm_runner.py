@@ -395,3 +395,87 @@ def test_stop_during_queue_wait_is_not_an_incomplete_stream_error(
     monkeypatch.setattr(runner_module, "Queue", StopAtEndQueue)
     result = runner.manual_request("input", "system")
     assert result == ("partial", False, None, None, "stopped")
+
+
+def test_token_callback_runs_before_completion_and_stop_preserves_emitted_text(
+    runner: LocalLLMRunner,
+) -> None:
+    release, emitted, cleaned = Event(), Event(), Event()
+    pieces: list[str] = []
+    results = []
+
+    def stream(_: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        try:
+            yield {"choices": [{"delta": {"content": "안녕"}}]}
+            release.wait(3)
+            yield {
+                "choices": [{"delta": {"content": "하세요"}, "finish_reason": "stop"}]
+            }
+        finally:
+            cleaned.set()
+
+    def show(piece: str) -> None:
+        pieces.append(piece)
+        emitted.set()
+
+    runner._llm.stream_factory = stream
+    call = Thread(
+        target=lambda: results.append(
+            runner.manual_request("input", "system", on_token=show)
+        )
+    )
+    call.start()
+    try:
+        assert emitted.wait(1)
+        assert not results  # 완료 전에 첫 본문이 전달되어야 한다.
+        runner.stop()
+        call.join(0.5)
+        assert not call.is_alive()
+        assert pieces == ["안녕"]
+        assert results[0][0] == "".join(pieces)
+        assert results[0][4] == "stopped"
+    finally:
+        release.set()
+        call.join(1)
+    assert cleaned.wait(1)
+
+
+def test_request_and_regen_forward_body_tokens_only(runner: LocalLLMRunner) -> None:
+    def stream(_: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        yield {"choices": [{"delta": {"role": "assistant"}}]}
+        yield {"choices": [{"delta": {"content": "A"}}]}
+        yield {"choices": [{"delta": {"content": "B"}, "finish_reason": "stop"}]}
+        yield {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 2}}
+
+    runner._llm.stream_factory = stream
+    pieces: list[str] = []
+    result = runner.request(
+        "run", "input", "ANSWER", "chat", system_prompt="system", on_token=pieces.append
+    )
+    assert pieces == ["A", "B"]
+    assert result == ("AB", True, 7, 2, "stop")
+    assert set(runner._llm.calls[-1]) == {"messages", "stream", "max_tokens"}
+    pieces.clear()
+    assert (
+        runner.regen("input", "old", "error", "system", on_token=pieces.append)[0]
+        == "AB"
+    )
+    assert pieces == ["A", "B"]
+
+
+def test_callback_exception_propagates_and_keeps_received_output_for_log(
+    runner: LocalLLMRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = OSError("synthetic display error")
+    logged = []
+    monkeypatch.setattr(
+        runner, "_log_call", lambda text, output: logged.append((text, output))
+    )
+
+    def show(_: str) -> None:
+        raise error
+
+    with pytest.raises(OSError) as raised:
+        runner.manual_request("input", "system", on_token=show)
+    assert raised.value is error
+    assert logged == [("input", "OK")]

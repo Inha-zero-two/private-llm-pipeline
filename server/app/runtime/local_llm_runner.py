@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import closing
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
@@ -79,11 +80,13 @@ class LocalLLMRunner:
         max_tokens: int = 2048,
         log_call: bool = True,
         new_input: str | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> RequestResult:
         """스트리밍 생성. 중지는 부분 답변을 반환하고 호출 오류는 그대로 던진다.
 
         수신 스레드가 응답을 기다려도 stop()은 별도 스레드에서 호출할 수 있다.
         중지 후 다음 청크/읽기 timeout으로 수신이 정리되기 전 새 생성은 거부한다.
+        on_token은 본문 청크를 받을 때 호출한다. 최종 반환 튜플은 그대로 유지한다.
         """
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
@@ -160,7 +163,11 @@ class LocalLLMRunner:
                 output_tokens = usage.get("completion_tokens", output_tokens)
                 choices = event.get("choices") or []
                 if choices:
-                    text.append(choices[0].get("delta", {}).get("content") or "")
+                    piece = choices[0].get("delta", {}).get("content") or ""
+                    if piece:
+                        text.append(piece)
+                        if on_token is not None:
+                            on_token(piece)
                     finish_reason = choices[0].get("finish_reason") or finish_reason
         finally:
             cancel.set()
@@ -178,6 +185,7 @@ class LocalLLMRunner:
         *,
         system_prompt: str | None = None,
         max_tokens: int = 2048,
+        on_token: Callable[[str], None] | None = None,
     ) -> RequestResult:
         """작업별 컨텍스트를 사용하는 호출. 현재는 파싱 전 원시 본문을 반환한다."""
         # TODO 6.1: system_prompt, version = self.prompt_manager.get_prompt(prompt_idx)
@@ -195,7 +203,11 @@ class LocalLLMRunner:
                     f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                 )
         result = self.manual_request(
-            model_input, system_prompt, max_tokens=max_tokens, new_input=input_
+            model_input,
+            system_prompt,
+            max_tokens=max_tokens,
+            new_input=input_,
+            on_token=on_token,
         )
         # TODO 5.2: valid, error = self.local_res_parser.check(result[0], prompt_idx)
         # TODO 5.2: for _ in range(MAX_REGEN):  # 출력 형식 실패만 재시도
@@ -219,6 +231,7 @@ class LocalLLMRunner:
         system_prompt: str,
         *,
         max_tokens: int = 2048,
+        on_token: Callable[[str], None] | None = None,
     ) -> RequestResult:
         """원래 입력 뒤에 직전 출력·형식 오류를 붙여 동일한 설정으로 재생성한다."""
         revised = (
@@ -230,6 +243,7 @@ class LocalLLMRunner:
             system_prompt,
             max_tokens=max_tokens,
             new_input=f"Previous output:\n{previous_output}\nFormat error:\n{error}",
+            on_token=on_token,
         )
 
     def _log_call(self, new_input: str, output: str) -> None:
