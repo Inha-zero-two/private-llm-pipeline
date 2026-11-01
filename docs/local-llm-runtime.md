@@ -29,6 +29,7 @@ uv run python
 - 키보드 Enter는 전송하고, Ctrl+J 또는 Alt+Enter는 줄바꿈을 추가한다.
 - `/stats`, `/compact` 같은 명령은 한 줄 입력일 때만 처리한다.
 - 생성·압축 중 Ctrl+C는 기존 `stop()`을 호출한다.
+- 일반 답변의 출력 상한은 기본 7,000토큰이며 `--max-tokens`로 변경한다. 시작 화면에서 적용값을 확인한다.
 
 ## 인증키와 초기화
 
@@ -133,6 +134,7 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 - 기본 28K/5K 경계, 실패·중지·로그 분기는 대역 테스트로 확인했다.
 - 터미널 입력 테스트 4개로 붙여넣기의 전송 대기·줄바꿈 보존, 직접 줄바꿈과 EOF를 검사했다.
 - Windows 터미널과 실제 채팅기에서 여러 줄을 붙여넣은 뒤 Enter로 한 번 전송하고 `/context`에 빈 줄·들여쓰기가 유지되는 것을 확인했다.
+- 일반 답변 상한을 1,024에서 7,000으로 변경한 뒤 실서버에서 출력 2,292토큰·종료 사유 `stop`으로 정상 완료했다.
 
 ```powershell
 # server/ 폴더에서 실행
