@@ -4,6 +4,7 @@ import ast
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from queue import Queue
 from threading import Event, Thread
 from time import monotonic
 from types import ModuleType
@@ -375,3 +376,22 @@ def test_close_waits_for_receiver_before_freeing_model(
             closing_thread.join(1)
     assert not closing_thread.is_alive()
     assert freed.is_set()
+
+
+def test_stop_during_queue_wait_is_not_an_incomplete_stream_error(
+    runner: LocalLLMRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StopAtEndQueue(Queue[Any]):
+        def get(self, block: bool = True, timeout: float | None = None) -> Any:
+            value = super().get(block=block, timeout=timeout)
+            if value is None:
+                runner.stop()
+            return value
+
+    # 수신 대기 중 stop이 도착하고 정상 종료 청크 없이 수신이 끝나는 순서를 재현한다.
+    runner._llm.stream_factory = lambda _: iter(
+        [{"choices": [{"delta": {"content": "partial"}}]}]
+    )
+    monkeypatch.setattr(runner_module, "Queue", StopAtEndQueue)
+    result = runner.manual_request("input", "system")
+    assert result == ("partial", False, None, None, "stopped")

@@ -139,6 +139,9 @@ class LocalLLMRunner:
                     event = events.get(timeout=0.05)
                 except Empty:
                     continue
+                # 대기 중 stop이 오면 종료 표식이 먼저 도착할 수 있으므로 다시 확인한다.
+                if cancel.is_set():
+                    return "".join(text), False, input_tokens, output_tokens, "stopped"
                 if isinstance(event, Exception):
                     raise event
                 if event is None:

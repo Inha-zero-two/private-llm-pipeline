@@ -79,6 +79,7 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 **수신 스레드와 중지 신호를 분리해 다른 스레드에서도 `stop()`을 호출할 수 있다.**
 
 - `stop()`은 `Event`만 설정하며 네트워크 응답을 기다리지 않는다.
+- 수신 대기 중 신호가 도착해도 종료 표식 처리 전에 다시 확인해 `stopped`로 반환한다.
 - 호출자는 부분 본문과 `success=False`, `finish_reason="stopped"`를 받는다.
 - 수신 스레드는 다음 청크 또는 읽기 timeout에서 정리한다. 정리 전에는 새 생성을 거부한다.
 - 동시 생성은 1개다. 서버 추론 자체의 즉시 취소는 보장하지 않는다.
