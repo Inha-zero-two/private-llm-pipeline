@@ -1,7 +1,7 @@
 """내부 테스트용 단일 파일 Llama 어댑터.
 
 적격 로컬 CUDA에서는 원본 llama_cpp.Llama 인스턴스를 직접 반환한다.
-그 외 환경에서는 고정된 서버와 실행 파일 주변의 키 파일을 사용한다.
+그 외 환경에서는 고정된 서버와 실행 파일 또는 래퍼 주변의 키 파일을 사용한다.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def resolve_server_token(
     server_token: str | None = None,
     server_token_file: str | Path | None = None,
 ) -> tuple[str, Path | None]:
-    """명시한 토큰을 우선하고, 없으면 실행 코드 옆의 키 파일을 읽는다."""
+    """명시한 토큰을 우선하고, 없으면 실행 코드와 래퍼 폴더에서 키를 찾는다."""
     if server_token is not None:
         return _validate_token(server_token), None
     if server_token_file is not None:
@@ -117,9 +117,12 @@ def resolve_server_token(
     else:
         selected = find_token_file(execution_directory())
         if selected is None:
+            selected = find_token_file(Path(__file__).resolve().parent)
+        if selected is None:
             raise FileNotFoundError(
                 "No llama_api_key*.key file was found next to the executing Python script "
-                "or in its subdirectories. Add a key file or set server_token_file."
+                "or the wrapper, or in their subdirectories. Add a key file "
+                "or set server_token_file."
             )
     try:
         selected = selected.resolve(strict=True)
@@ -927,6 +930,11 @@ class AdaptiveLlama:
                 if isinstance(function_call, dict)
                 else function_call
             )
+        if values.get("stream"):
+            # 원격 전용 옵션은 Runner가 아니라 어댑터 내부에서 처리한다.
+            # 명시한 호출 옵션은 유지한다.
+            values.setdefault("stream_options", {"include_usage": True})
+            values.setdefault("chat_template_kwargs", {"enable_thinking": False})
         payload = self._sampling_params(values, chat=True)
         payload["messages"] = messages
         if payload.get("max_tokens", 1) <= 0:

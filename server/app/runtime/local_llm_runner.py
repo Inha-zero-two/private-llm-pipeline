@@ -1,10 +1,8 @@
-"""설계 5.1: 기존 Llama 프록시를 사용하는 실행·중지·재생성 모듈."""
+"""설계 5.1: 공통 Llama API를 사용하는 실행·중지·재생성 모듈."""
 
 from __future__ import annotations
 
-import re
 from contextlib import closing
-from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -26,26 +24,14 @@ class LocalLLMRunner:
     def __init__(
         self,
         *,
-        server_url: str = "https://satisshin.top:4000",
-        server_token_file: str | Path | None = None,
-        repository_root: str | Path | None = None,
+        model_path: str = "models/gemma.gguf",
         timeout: float = 120.0,
         context_tasks: frozenset[str | int] = CONTEXT_TASKS,
         context_manager: ContextManager | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
-        self._repository_root = (
-            Path(repository_root).resolve()
-            if repository_root is not None
-            else Path(__file__).resolve().parents[3]
-        )
-        self._server_token_file = (
-            Path(server_token_file).resolve()
-            if server_token_file is not None
-            else self._find_token_file()
-        )
-        self._server_url = server_url
+        self._model_path = model_path
         self._timeout = timeout
         self._busy = Lock()
         self._state_lock = Lock()
@@ -58,46 +44,27 @@ class LocalLLMRunner:
 
         self.context_manager = context_manager or ContextManager(self)
 
-    def _find_token_file(self) -> Path:
-        """저장소 내부의 번호 있는 키를 숫자순으로 고른다. 키 값은 기록하지 않는다."""
-        candidates = []
-        for path in self._repository_root.rglob("llama_api_key_*.key"):
-            match = re.fullmatch(r"llama_api_key_(\d+)\.key", path.name)
-            if (
-                match
-                and path.is_file()
-                and not path.is_symlink()
-                and path.resolve().is_relative_to(self._repository_root)
-            ):
-                candidates.append((int(match[1]), str(path), path))
-        if not candidates:
-            raise FileNotFoundError(
-                "Place llama_api_key_<number>.key inside the repository's ignored keys/"
-            )
-        return min(candidates)[2]
-
     def model_load(self) -> bool:
-        """프록시 초기화와 실제 생성 응답을 확인한다. 원격 GPU 적재는 서버 담당."""
+        """공통 Llama 생성자로 모델을 준비하고 실제 생성 응답을 확인한다."""
         if self._closed:
             raise RuntimeError("Runner is closed")
         if self._llm is not None:
             return True
-        # llama_cpp 대신 저장소에 이미 있는 프록시를 사용한다.
+        # 네이티브 전환 시 이 임포트만 `from llama_cpp import Llama`로 바꾼다.
+        # 키 탐색·원격 주소·원격 호출 옵션은 래퍼에서만 처리한다.
         from src.localLLM_API_proxy.llama_wrapper import Llama
 
         self._llm = Llama(
-            backend="remote",
-            server_url=self._server_url,
-            server_token_file=self._server_token_file,
-            timeout=self._timeout,
+            model_path=self._model_path,
             n_ctx=N_CTX,
+            n_gpu_layers=-1,
         )
         try:
             result = self.manual_request(
                 "Reply OK only.", "Answer briefly.", max_tokens=32
             )
             if not result[1]:
-                raise ConnectionError(f"Proxy response check failed: {result[4]}")
+                raise ConnectionError(f"Model response check failed: {result[4]}")
         except BaseException:
             # 초기화 실패 시 연결만 정리하고 원래 예외를 그대로 전파한다.
             self.close()
@@ -113,7 +80,7 @@ class LocalLLMRunner:
         log_call: bool = True,
         new_input: str | None = None,
     ) -> RequestResult:
-        """스트리밍 생성. 중지는 부분 답변을 반환하고 프록시 오류는 그대로 던진다.
+        """스트리밍 생성. 중지는 부분 답변을 반환하고 호출 오류는 그대로 던진다.
 
         수신 스레드가 응답을 기다려도 stop()은 별도 스레드에서 호출할 수 있다.
         중지 후 다음 청크/읽기 timeout으로 수신이 정리되기 전 새 생성은 거부한다.
@@ -138,8 +105,6 @@ class LocalLLMRunner:
                         {"role": "user", "content": input_},
                     ],
                     stream=True,
-                    stream_options={"include_usage": True},
-                    chat_template_kwargs={"enable_thinking": False},
                     max_tokens=max_tokens,
                 )
                 with closing(stream):
@@ -272,10 +237,11 @@ class LocalLLMRunner:
         # 컨텍스트 전체/시스템 프롬프트/인증키를 이 payload에 추가하지 않는다.
 
     def tokenize(self, text: str) -> list[int]:
-        """5.4에서도 동일한 서버 모델의 실제 토크나이저를 사용한다."""
-        if self._closed:
-            raise RuntimeError("Runner is closed")
-        return self._llm.tokenize(text.encode("utf-8"), add_bos=False, special=True)
+        """5.4에서도 동일한 모델의 실제 토크나이저를 사용한다."""
+        with self._busy:
+            if self._closed:
+                raise RuntimeError("Runner is closed")
+            return self._llm.tokenize(text.encode("utf-8"), add_bos=False, special=True)
 
     def stop(self) -> None:
         """중지 신호만 설정하므로 수신 스레드의 네트워크 응답을 기다리지 않는다."""
@@ -286,8 +252,11 @@ class LocalLLMRunner:
         with self._state_lock:
             self._closed = True
             self._stop_event.set()
-        if self._llm is not None:
-            self._llm.close()
+        # 네이티브 엔진에서도 생성/토큰화 도중 모델 메모리를 해제하지 않는다.
+        # stop()은 즉시 반환하고, close()만 진행 중인 작업 정리를 기다린다.
+        with self._busy:
+            if self._llm is not None:
+                self._llm.close()
 
     def __enter__(self) -> LocalLLMRunner:
         return self

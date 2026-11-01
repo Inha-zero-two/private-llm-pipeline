@@ -1,13 +1,17 @@
 """프록시를 대역으로 바꾸어 키 탐색, 호출, 스레드 중지와 예외 전파를 검증한다."""
 
+import ast
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic
+from types import ModuleType
 from typing import Any
 
 import pytest
 
+from app.runtime import local_llm_runner as runner_module
 from app.runtime.local_llm_runner import LocalLLMRunner
 from src.localLLM_API_proxy import llama_wrapper
 
@@ -39,39 +43,38 @@ class FakeLlama:
 
 
 @pytest.fixture
-def runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[LocalLLMRunner]:
-    (tmp_path / "keys").mkdir()
-    (tmp_path / "keys/llama_api_key_07.key").write_text("test-only-token")
+def runner(monkeypatch: pytest.MonkeyPatch) -> Iterator[LocalLLMRunner]:
     monkeypatch.setattr(llama_wrapper, "Llama", FakeLlama)
-    instance = LocalLLMRunner(repository_root=tmp_path)
+    instance = LocalLLMRunner()
     yield instance
     instance.close()
 
 
-def test_constructor_probes_remote_and_finds_numbered_key(
+def test_constructor_uses_only_common_llama_arguments(
     runner: LocalLLMRunner,
 ) -> None:
-    assert runner._llm.options["backend"] == "remote"
-    assert runner._llm.options["n_ctx"] == 32768
-    assert runner._llm.options["server_token_file"].name == "llama_api_key_07.key"
+    assert runner._llm.options == {
+        "model_path": "models/gemma.gguf",
+        "n_ctx": 32768,
+        "n_gpu_layers": -1,
+    }
     assert len(runner._llm.calls) == 1
     assert runner.model_load() is True
     assert len(runner._llm.calls) == 1
 
 
-def test_key_search_is_numeric_and_does_not_search_parent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_runner_leaves_key_errors_to_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(llama_wrapper, "Llama", FakeLlama)
-    repository = tmp_path / "repo"
-    repository.mkdir()
-    (tmp_path / "llama_api_key_01.key").write_text("test-outside")
-    with pytest.raises(FileNotFoundError):
-        LocalLLMRunner(repository_root=repository)
-    for number in (10, 2):
-        (repository / f"llama_api_key_{number}.key").write_text("test-inside")
-    with LocalLLMRunner(repository_root=repository) as instance:
-        assert instance._llm.options["server_token_file"].name == "llama_api_key_2.key"
+    error = FileNotFoundError("synthetic wrapper key error")
+
+    def fail(**_: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(llama_wrapper, "Llama", fail)
+    with pytest.raises(FileNotFoundError) as raised:
+        LocalLLMRunner()
+    assert raised.value is error
 
 
 def test_manual_request_uses_explicit_messages_and_collects_final_usage(
@@ -89,8 +92,7 @@ def test_manual_request_uses_explicit_messages_and_collects_final_usage(
         {"role": "system", "content": "system"},
         {"role": "user", "content": "hello"},
     ]
-    assert call["stream_options"] == {"include_usage": True}
-    assert call["chat_template_kwargs"] == {"enable_thinking": False}
+    assert set(call) == {"messages", "stream", "max_tokens"}
     assert call["max_tokens"] == 12
 
 
@@ -129,7 +131,7 @@ def test_proxy_exception_is_propagated_without_replacement(
 
 
 def test_constructor_failure_closes_proxy_and_propagates(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = FakeLlama()
     error = ConnectionError("synthetic connection failure")
@@ -140,19 +142,19 @@ def test_constructor_failure_closes_proxy_and_propagates(
     backend.stream_factory = fail
     monkeypatch.setattr(llama_wrapper, "Llama", lambda **_: backend)
     with pytest.raises(ConnectionError) as raised:
-        LocalLLMRunner(server_token_file=tmp_path / "explicit.key")
+        LocalLLMRunner()
     assert raised.value is error
     assert backend.closed
 
 
 def test_constructor_rejects_empty_response(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = FakeLlama()
     backend.stream_factory = lambda _: iter(())
     monkeypatch.setattr(llama_wrapper, "Llama", lambda **_: backend)
     with pytest.raises(RuntimeError, match="no response"):
-        LocalLLMRunner(server_token_file=tmp_path / "explicit.key")
+        LocalLLMRunner()
     assert backend.closed
 
 
@@ -286,3 +288,90 @@ def test_failed_wrapper_call_still_reaches_log_hook_without_swallowing_error(
         runner.manual_request("new input", "system")
     assert raised.value is error
     assert logged == [("new input", "partial")]
+
+
+def test_only_import_change_accepts_native_llama_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """임포트 한 줄만 바꾼 모듈을, 전용 인자를 거부하는 네이티브 규격 대역으로 실행."""
+
+    class NativeLlama:
+        def __init__(self, model_path: str, *, n_ctx: int, n_gpu_layers: int) -> None:
+            assert model_path == "test-model.gguf"
+            assert n_ctx == 32768 and n_gpu_layers == -1
+
+        def create_chat_completion(
+            self, messages: list[dict[str, str]], *, stream: bool, max_tokens: int
+        ) -> Iterator[dict[str, Any]]:
+            assert messages and stream and max_tokens > 0
+            # 원본 스트림이 usage를 제공하지 않을 때도 정상 응답을 처리한다.
+            yield {"choices": [{"delta": {"content": "OK"}, "finish_reason": "stop"}]}
+
+        def tokenize(self, text: bytes, add_bos: bool, special: bool) -> list[int]:
+            assert not add_bos and special
+            return list(text)
+
+        def close(self) -> None:
+            pass
+
+    native_module = ModuleType("llama_cpp")
+    native_module.Llama = NativeLlama
+    monkeypatch.setitem(sys.modules, "llama_cpp", native_module)
+    tree = ast.parse(Path(runner_module.__file__).read_text(encoding="utf-8"))
+    imports = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "src.localLLM_API_proxy.llama_wrapper"
+    ]
+    assert len(imports) == 1
+    imports[0].module = "llama_cpp"
+    swapped = ModuleType("app.runtime.native_import_test")
+    swapped.__package__ = "app.runtime"
+    exec(compile(tree, runner_module.__file__, "exec"), swapped.__dict__)
+    with swapped.LocalLLMRunner(
+        model_path="test-model.gguf", context_tasks=frozenset({"ANSWER"})
+    ) as instance:
+        assert instance.manual_request("input", "system") == (
+            "OK",
+            True,
+            None,
+            None,
+            "stop",
+        )
+        instance.request("run", "new input", "ANSWER", "chat", system_prompt="system")
+        assert instance.context_manager.get_context_length(0) > 0
+        assert instance.regen("input", "old", "error", "system")[1]
+
+
+def test_close_waits_for_receiver_before_freeing_model(
+    runner: LocalLLMRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered, release, freed = Event(), Event(), Event()
+
+    def blocked(_: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        entered.set()
+        release.wait(3)
+        yield {"choices": [{"delta": {"content": "late"}, "finish_reason": "stop"}]}
+
+    runner._llm.stream_factory = blocked
+    monkeypatch.setattr(runner._llm, "close", freed.set)
+    results = []
+    call = Thread(
+        target=lambda: results.append(runner.manual_request("input", "system"))
+    )
+    closing_thread = Thread(target=runner.close)
+    call.start()
+    try:
+        assert entered.wait(1)
+        closing_thread.start()
+        call.join(0.5)
+        assert not call.is_alive() and results[0][4] == "stopped"
+        assert not freed.wait(0.1)
+    finally:
+        release.set()
+        call.join(1)
+        if closing_thread.ident is not None:
+            closing_thread.join(1)
+    assert not closing_thread.is_alive()
+    assert freed.is_set()

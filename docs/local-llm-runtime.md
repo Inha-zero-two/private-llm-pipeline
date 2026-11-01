@@ -4,7 +4,7 @@
 
 - **설계 5.1 LocalLLMRunner**: 모델 호출·재생성·중지를 담당한다. 구현 파일은 [server/app/runtime/local_llm_runner.py](../server/app/runtime/local_llm_runner.py)다.
 - **설계 5.4 ContextManager**: 채팅·작업별 컨텍스트 보관과 압축을 담당한다. 구현 파일은 [server/app/runtime/context_manager.py](../server/app/runtime/context_manager.py)다.
-- **공통 호출 대상**: 기존 [llama_wrapper.py](../src/localLLM_API_proxy/llama_wrapper.py)의 원격 프록시를 사용한다.
+- **공통 호출 대상**: 기존 [llama_wrapper.py](../src/localLLM_API_proxy/llama_wrapper.py)를 사용한다. 원격·로컬 선택과 인증은 래퍼가 담당한다.
 
 ## 실행 환경
 
@@ -22,13 +22,25 @@ uv run python
 
 ## 인증키와 초기화
 
-**생성자는 키를 찾고 짧은 실제 요청으로 연결·인증·응답을 검사한다.**
+**키 탐색은 래퍼가 담당하며 Runner에는 키 위치나 원격 접속 설정이 없다.**
 
-- 키는 저장소 내부의 `keys/llama_api_key_01.key`와 같은 이름으로 둔다.
-- 파일 번호가 작은 키부터 선택한다. 특정 키는 `server_token_file`로 지정한다.
-- 키 누락이나 프록시 오류는 예외로 전달한다.
-- `model_load()`는 원격 연결을 초기화한다. GPU 가중치 적재는 서버가 담당한다.
-- 키·가상환경은 Git에서 제외한다. 키 내용은 출력하거나 로그에 남기지 않는다.
+- 테스트 키는 `src/localLLM_API_proxy/`에 `llama_api_key_01.key`처럼 파일만 둔다.
+- 래퍼는 실행 파일 주변을 먼저 찾고, 키가 없으면 래퍼 자체 폴더에서 찾는다.
+- 저장소 루트의 `keys/` 폴더와 Runner의 키 탐색 코드는 제거했다.
+- 생성자는 공통 Llama 생성자와 짧은 생성으로 모델·응답을 검사한다. 오류는 그대로 전파한다.
+- 키는 Git에서 제외한다. 테스트 후 키 파일을 정리하며 내용은 출력·로그·커밋에 남기지 않는다.
+
+## 원본 Llama로 전환
+
+**Runner의 Llama 임포트 한 줄을 바꾸고 동일한 코드를 사용한다.**
+
+- 현재: `from src.localLLM_API_proxy.llama_wrapper import Llama`
+- 전환: `from llama_cpp import Llama`
+- Runner는 `model_path`, `n_ctx`, `n_gpu_layers` 등 공통 인자만 사용한다.
+- 원격 사용량 요청과 추론 옵션은 래퍼 내부에서만 처리한다.
+- 원본 사용 시 해당 환경에 llama-cpp-python과 실제 GGUF 모델을 준비한다. 모델 경로는 `LocalLLMRunner(model_path="...")`로 지정한다.
+- 임포트만 바꾼 코드의 호출·컨텍스트·재생성을 원본 규격 대역으로 검사한다. 실제 GPU 모델 실행은 별도 검증 대상이다.
+- 공통 호출 규격은 [llama-cpp-python 0.3.36의 Llama 구현](https://github.com/abetlen/llama-cpp-python/blob/v0.3.36/llama_cpp/llama.py)을 기준으로 확인했다.
 
 ## 5.1 모델 호출
 
@@ -57,7 +69,7 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 
 **호출 결과는 `(본문, 성공, 입력 토큰, 출력 토큰, 종료 사유)` 튜플이다.**
 
-- 토큰 수는 마지막 usage 청크에서 읽는다. 서버가 제공하지 않으면 `None`이다.
+- 토큰 수는 usage 청크에서 읽는다. 해당 실행 엔진의 스트림이 제공하지 않으면 `None`이다.
 - `length`는 답변 토큰 상한에 도달했다는 종료 사유다.
 - 프록시 오류·무응답·불완전 수신·전체 대기시간 초과는 예외로 전달한다.
 - 오류 응답을 임의로 대체하거나 자동 재시도하지 않는다.
@@ -70,7 +82,7 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 - 호출자는 부분 본문과 `success=False`, `finish_reason="stopped"`를 받는다.
 - 수신 스레드는 다음 청크 또는 읽기 timeout에서 정리한다. 정리 전에는 새 생성을 거부한다.
 - 동시 생성은 1개다. 서버 추론 자체의 즉시 취소는 보장하지 않는다.
-- 사용 후 `close()` 또는 `with`로 HTTP 연결을 정리한다.
+- 사용 후 `close()` 또는 `with`로 모델과 연결 자원을 정리한다. `close()`는 진행 중인 작업이 끝날 때까지 기다려 네이티브 모델의 사용 중 해제를 막는다.
 
 ## 5.4 컨텍스트 관리와 압축
 
@@ -100,9 +112,9 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 
 **자동 테스트와 실서버에서 호출·컨텍스트·압축 동작을 확인했다.**
 
-- 자동 테스트: 새 테스트 29개, 기존 프록시 테스트 87개 통과.
+- 자동 테스트: 두 모듈과 프록시의 중지·예외 전파·로그·인증·호출 규격을 검사한다.
 - 실서버 확인일: 2026년 11월 1일.
-- 확인 범위: 키 자동 탐색, 토큰 사용량, 대화 기억, 실제 토크나이저와 요약 호출.
+- 확인 범위: 래퍼 내부 키 탐색, 토큰 사용량, 대화 기억, 실제 토크나이저와 요약 호출.
 - 작은 시험 임계값에서 원문 211토큰이 새 입력 포함 64토큰으로 줄고 지정 코드가 유지됐다.
 - 기본 28K/5K 경계, 실패·중지·로그 분기는 대역 테스트로 확인했다.
 
