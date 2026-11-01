@@ -12,6 +12,7 @@
 
 - 저장소 루트를 `PYTHONPATH`에 지정해 기존 프록시를 import한다.
 - `server/pyproject.toml`, `.python-version`, `uv.lock`으로 환경을 고정한다.
+- 저장소 밖 터미널 채팅기의 입력기는 개발 의존성 `prompt-toolkit`을 사용한다.
 
 ```powershell
 # server/ 폴더에서 실행
@@ -19,6 +20,15 @@ uv sync --locked
 $env:PYTHONPATH = (Resolve-Path '..').Path
 uv run python
 ```
+
+## 개발용 터미널 채팅기 입력
+
+**여러 줄을 붙여넣은 뒤 Enter를 누르면 하나의 요청으로 전송한다.**
+
+- 붙여넣기의 줄바꿈·빈 줄·들여쓰기를 본문에 유지한다.
+- 키보드 Enter는 전송하고, Ctrl+J 또는 Alt+Enter는 줄바꿈을 추가한다.
+- `/stats`, `/compact` 같은 명령은 한 줄 입력일 때만 처리한다.
+- 생성·압축 중 Ctrl+C는 기존 `stop()`을 호출한다.
 
 ## 인증키와 초기화
 
@@ -121,6 +131,8 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 - 확인 범위: 래퍼 내부 키 탐색, 토큰 사용량, 대화 기억, 실제 토크나이저와 요약 호출.
 - 작은 시험 임계값에서 원문 211토큰이 새 입력 포함 64토큰으로 줄고 지정 코드가 유지됐다.
 - 기본 28K/5K 경계, 실패·중지·로그 분기는 대역 테스트로 확인했다.
+- 터미널 입력 테스트 4개로 붙여넣기의 전송 대기·줄바꿈 보존, 직접 줄바꿈과 EOF를 검사했다.
+- Windows 터미널과 실제 채팅기에서 여러 줄을 붙여넣은 뒤 Enter로 한 번 전송하고 `/context`에 빈 줄·들여쓰기가 유지되는 것을 확인했다.
 
 ```powershell
 # server/ 폴더에서 실행

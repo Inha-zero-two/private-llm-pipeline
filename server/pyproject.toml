@@ -5,7 +5,11 @@ requires-python = ">=3.12"
 dependencies = ["httpx==0.28.1"]
 
 [dependency-groups]
-dev = ["pytest==9.2.0", "ruff==0.17.3"]
+dev = [
+    "prompt-toolkit==3.0.52",
+    "pytest==9.2.0",
+    "ruff==0.17.3",
+]
 
 [tool.ruff]
 target-version = "py312"
