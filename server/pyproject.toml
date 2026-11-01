@@ -1,0 +1,23 @@
+[project]
+name = "private-llm-runtime"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["httpx==0.28.1"]
+
+[dependency-groups]
+dev = ["pytest==9.2.0", "ruff==0.17.3"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "N", "ANN"]
+ignore = ["ANN401"]  # 프록시의 확장 가능한 JSON 청크는 Any를 사용한다.
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", ".."]
