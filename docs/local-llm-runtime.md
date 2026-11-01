@@ -95,7 +95,8 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 - `get_context()`, `append()`, `get_context_length()`, `compact_context()`로 내용을 관리한다.
 - 길이는 동일 모델의 실제 토크나이저로 계산한다.
 - 새 내용을 붙이면 28,000토큰에 도달하는 경우, 기존 내용을 요약한 뒤 새 내용을 추가한다.
-- 요약 목표는 5,000토큰이다. 압축은 `manual_request()`로 수행한다.
+- 요약 목표는 5,000토큰, 압축 요청의 출력 상한은 7,000토큰이다. 압축은 `manual_request()`로 수행한다.
+- 출력 상한은 `COMPACTION_MAX_TOKENS`로 지정하며 실제 생성 길이는 실행 엔진의 남은 컨텍스트 공간에도 제한된다.
 - 새 입력 과다·요약 실패·중지·목표 초과 시 예외를 내고 기존 내용을 보존한다.
 - 저장은 현재 메모리 방식이다. DB 복원은 연결하지 않았다.
 

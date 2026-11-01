@@ -63,7 +63,7 @@ def test_append_compacts_before_reaching_limit(
     manager.append(context_id, original)
     manager.append(context_id, " nine ten")
     assert runner.calls[0][0] == original
-    assert runner.calls[0][2] == 3
+    assert runner.calls[0][2] == 7000
     assert manager.get_context(context_id) == "short nine ten"
 
 
@@ -152,5 +152,6 @@ def test_default_28k_boundary_and_5k_target() -> None:
     assert not runner.calls
     manager.append(context_id, " final")
     assert len(runner.calls) == 1
-    assert runner.calls[0][2] == 5000
+    assert "at most 5000 tokens" in runner.calls[0][1]
+    assert runner.calls[0][2] == 7000
     assert manager.get_context(context_id) == "short final"

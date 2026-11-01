@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 
 COMPACTION_LIMIT = 28000
 COMPACTION_TARGET = 5000
+# 요약 목표와 생성 상한은 구분해 모델이 요약을 마칠 여유를 둔다.
+COMPACTION_MAX_TOKENS = 7000
 
 
 class ContextManager:
@@ -92,7 +94,7 @@ class ContextManager:
             "Return only the summary."
         )
         summary, success, _, _, reason = self._runner.manual_request(
-            text, system_prompt, max_tokens=self._target, log_call=False
+            text, system_prompt, max_tokens=COMPACTION_MAX_TOKENS, log_call=False
         )
         # 생성 실패나 요약 초과를 임의 절단으로 감추지 않는다. 프록시 예외도 전파한다.
         if not success or not summary.strip():
