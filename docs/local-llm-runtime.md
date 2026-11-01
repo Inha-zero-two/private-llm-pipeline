@@ -2,12 +2,13 @@
 
 상세 설계서 5.1과 5.4의 로컬 개발 구현이다. 실제 모델 호출은 기존
 `src/localLLM_API_proxy/llama_wrapper.py`의 원격 프록시를 사용한다.
-각 모듈은 `app/runtime/local_llm_runner.py`의 `LocalLLMRunner` 클래스와
-`app/runtime/context_manager.py`의 `ContextManager` 클래스로 분리했다.
+각 모듈은 [local_llm_runner.py](../server/app/runtime/local_llm_runner.py)의
+`LocalLLMRunner` 클래스와 [context_manager.py](../server/app/runtime/context_manager.py)의
+`ContextManager` 클래스로 분리했다.
 
 ## 실행 환경
 
-Python 3.12와 uv를 사용한다. 이 폴더에서 실행하며, 기존 프록시를 import할 수
+Python 3.12와 uv를 사용한다. 저장소의 `server/` 폴더에서 실행하며, 기존 프록시를 import할 수
 있도록 저장소 루트를 `PYTHONPATH`에 둔다. 새 FastAPI 서버는 필요하지 않다.
 
 ```powershell
@@ -17,8 +18,8 @@ $env:PYTHONPATH = (Resolve-Path '..').Path
 uv run python
 ```
 
-`pyproject.toml`, `.python-version`, `uv.lock`이 실행 환경을 고정한다.
-개발 검사도 이 폴더에서 실행한다.
+`server/pyproject.toml`, `server/.python-version`, `server/uv.lock`이 실행 환경을 고정한다.
+개발 검사도 `server/` 폴더에서 실행한다.
 
 ```powershell
 uv run ruff check app tests
