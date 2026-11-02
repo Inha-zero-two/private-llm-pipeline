@@ -58,6 +58,7 @@ class _RunState:
     task: asyncio.Task[Any]  # run_pipeline()을 돌리고 있는 asyncio 작업
     answer_parts: list[str] = field(default_factory=list)  # 7)에서 나온 토큰들
     stopping: bool = False  # stop()이 이미 불렸는지
+    finishing: bool = False  # 이 시점 이후로는 취소하지 않는다 (답변 완료 또는 정리 시작)
 
 
 class Main:
@@ -200,6 +201,9 @@ class Main:
         finally:
             # 정상 종료 · 중지 · 오류 모두 같은 정리 절차를 거친다.
             if run_id is not None:
+                state = self._runs.get(run_id)
+                if state is not None:
+                    state.finishing = True
                 await self._finish(run_id, pd_table, end_reason, answer_message_id)
 
     def check_end(
@@ -234,12 +238,14 @@ class Main:
             return  # 이미 끝났거나 중지 중인 실행
         state.stopping = True
 
-        # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
-        await self._call(self.local_llm_runner.stop)
-        # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
-        await self._call(self.consent_manager.cancel, run_id)
-        # run_pipeline 작업을 취소하고, 정리가 끝날 때까지 기다린다.
-        state.task.cancel()
+        if not state.finishing:  # 이미 끝나는 중이면 모델 중지·동의 취소도 하지 않는다
+            await self._call(self.local_llm_runner.stop) # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
+            await self._call(self.consent_manager.cancel, run_id) # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
+
+        if not state.finishing: # await 뒤에 다시 확인. 이 줄과 cancel() 사이엔 await 없음
+            # run_pipeline 작업을 취소하고, 정리가 끝날 때까지 기다린다.
+            state.task.cancel()
+        
         await asyncio.gather(state.task, return_exceptions=True)
 
     # run_pipeline()을 단계별로 나눈 내부 함수 
@@ -364,6 +370,8 @@ class Main:
         while (token := await self._call(next, tokens, None)) is not None:
             state.answer_parts.append(token)
             await self._emit("token", {"run_id": run_id, "text": token})
+
+        state.finishing = True  # 답변이 다 나왔으니 이후로는 끊지 않는다
 
         # 정상 종료가 아니면 어떤 이유로 제한된 답인지 답변 아래에 안내한다.
         if end_reason != EndReason.INFO_ENOUGH:
