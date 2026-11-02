@@ -17,6 +17,7 @@ deploy/https/private/
 
 # 로컬 LLM 모델 파일
 models/
+!server/app/models/
 *.gguf
 *.bin
 *.safetensors

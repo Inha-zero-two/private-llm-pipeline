@@ -1,8 +1,9 @@
-# LocalLLMRunner와 ContextManager 사용 안내
+# LocalLLMRunner와 결과 파서 및 ContextManager 사용 안내
 
-이 문서는 다음 두 모듈의 역할, 호출 방법과 현재 구현 범위를 설명한다.
+이 문서는 다음 세 모듈의 역할, 호출 방법과 현재 구현 범위를 설명한다.
 
 - **설계 5.1 LocalLLMRunner**: 모델 호출·재생성·중지를 담당한다. 구현 파일은 [server/app/runtime/local_llm_runner.py](../server/app/runtime/local_llm_runner.py)다.
+- **설계 5.2 결과 파서**: 상태 없는 `parser()` 함수가 출력 형식 검사와 변환을 담당한다. 구현 파일은 [server/app/runtime/local_res_parser.py](../server/app/runtime/local_res_parser.py)다.
 - **설계 5.4 ContextManager**: 채팅·작업별 컨텍스트 보관과 압축을 담당한다. 구현 파일은 [server/app/runtime/context_manager.py](../server/app/runtime/context_manager.py)다.
 - **공통 호출 대상**: 기존 [llama_wrapper.py](../src/localLLM_API_proxy/llama_wrapper.py)를 사용한다. 원격·로컬 선택과 인증은 래퍼가 담당한다.
 
@@ -61,7 +62,7 @@ uv run python
 - `on_token`: 수동·작업 호출·재생성에서 본문 청크를 받는 즉시 전달하는 선택 콜백이다. 최종 반환 튜플은 그대로 유지한다.
 - `request()`: `context_tasks`에 지정한 작업만 컨텍스트를 읽고 갱신한다. 기본값은 빈 집합이다.
 - `regen()`: 원래 입력 뒤에 직전 출력·형식 오류를 붙여 한 번 재생성한다.
-- `MAX_REGEN=3`: 파서 연결 후 사용할 형식 재시도 설정이다. 요청문 누출 재작성 상한과 구분한다.
+- `MAX_FORMAT_FAILURES=3`: 최초 응답을 포함해 형식 불일치가 3회면 예외를 낸다. 최초 생성 후 최대 2회 재생성하며, 요청문 누출 재작성 상한과 구분한다.
 - PromptManager가 없으므로 현재 `request()`에는 `system_prompt`를 명시한다.
 
 ```python
@@ -79,12 +80,46 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 
 ## 반환과 오류
 
-**호출 결과는 `(본문, 성공, 입력 토큰, 출력 토큰, 종료 사유)` 튜플이다.**
+**수동 호출은 `(본문, 성공, 입력 토큰, 출력 토큰, 종료 사유)`, 작업 호출은 `(파싱 결과, 성공, 입력 토큰, 출력 토큰, 종료 사유)`를 반환한다.**
 
-- 토큰 수는 usage 청크에서 읽는다. 해당 실행 엔진의 스트림이 제공하지 않으면 `None`이다.
+- `manual_request()`와 `regen()`의 첫 값은 원문 문자열이다. `request()` 성공 시에는 작업별 파싱 결과이며, 성공은 생성과 출력 형식 검사 통과를 뜻한다.
+- 토큰 수는 usage 청크에서 읽는다. `request()`는 최초 생성과 재생성 사용량을 합산하며, 한 번이라도 해당 사용량을 받지 못하면 그 합계는 `None`이다.
 - `length`는 답변 토큰 상한에 도달했다는 종료 사유다.
 - 프록시 오류·무응답·불완전 수신·전체 대기시간 초과는 예외로 전달한다.
-- 오류 응답을 임의로 대체하거나 자동 재시도하지 않는다.
+- `request()`는 파서의 `OutputFormatError`만 잡아 재생성한다. 3번째 형식 불일치에서는 `생성문 형식 불일치` 메시지의 `OutputFormatError`를 상위로 올린다.
+- 프록시·통신·코드 오류를 형식 재시도로 감추거나 대체 응답으로 바꾸지 않는다.
+
+## 5.2 결과 파싱
+
+**`parser(raw_output, prompt_idx)`는 검사·변환을 한 번 수행하고 결과만 반환한다. 별도 `check()`나 파서 클래스는 없다.**
+
+- JSON을 한 번 읽고 필수 필드·자료형·허용값을 검사한다. 문자열이나 bool을 정수로 자동 보정하지 않는다.
+- JSON 전체를 감싼 코드 블록만 제거한다. 모델 설명문에서 JSON을 추측해서 꺼내거나 잘못된 출력을 복구하지 않는다.
+- 텍스트는 공백뿐인 출력을 거부하고, 정상 문자열의 줄바꿈·들여쓰기를 보존한다.
+- JSON·필드·타입 오류는 `OutputFormatError`다. 알 수 없는 작업과 외부 모델용 `FRONTIER`는 설정 오류인 `ValueError`다.
+- 공유 객체는 `app/models/local_llm_outputs.py`, 작업 열거형은 `app/models/enums.py`에 둔다.
+
+| 작업 | 반환 타입 |
+| --- | --- |
+| `DETECT` | `list[DetectedItem]`: `text`, `category`(정수 0~2) |
+| `NEEDS` | `list[str]` |
+| `JUDGE` | `Plan`: `enough`, `need_consent`, `consent_items`, `need` |
+| `GUARD` | `list[int]`: 입력 금지 목록의 0부터 시작하는 번호 |
+| `PARSE_RULES` | `list[Rule]`: `target`, `scope`(item/category), `action`(allow/deny) |
+| `MATCH_RULES` | `list[RuleMatch]`: `item`, `rules`(각각 입력 목록의 번호) |
+| `CONSENT` | `ConsentText`: `purpose`, `benefit`, `risk` |
+| `DECIDE_CONTEXT` | `keep` 또는 `reset` 문자열 |
+| `WRITE`, `REWRITE`, `ANSWER`, `MEMO_SUMMARY` | `str` |
+
+- 정상 빈 목록은 그대로 반환한다. `GUARD` 번호를 실제 개인정보 ID로 바꾸는 작업, 번호의 입력 목록 범위 검사, 판단 보정과 규칙 충돌 처리는 호출 모듈의 책임이다.
+- DB ID나 실행 중 허용 상태는 모델 검출 결과에 붙이지 않는다. 최신 DB 스키마의 전송 당시 허용 여부·근거는 `query_items`에서 관리한다.
+- 형식 검사를 통과한 마지막 응답만 컨텍스트에 원문으로 추가한다. 각 생성의 호출 로그 연결점은 유지한다.
+
+```python
+from app.runtime.local_res_parser import parser
+
+hits = parser('{"hits":[0,2]}', "GUARD")  # [0, 2]
+```
 
 ## 중지와 연결 정리
 
@@ -93,6 +128,7 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 - `stop()`은 `Event`만 설정하며 네트워크 응답을 기다리지 않는다.
 - 수신 대기 중 신호가 도착해도 종료 표식 처리 전에 다시 확인해 `stopped`로 반환한다.
 - 호출자는 부분 본문과 `success=False`, `finish_reason="stopped"`를 받는다.
+- 작업 호출도 중지 시에는 부분 원문을 반환하며 파싱·재생성·컨텍스트 추가를 하지 않는다.
 - 이미 `on_token`으로 전달한 본문은 최종 부분 본문에 그대로 남는다. 화면에서는 재출력 없이 보존할 수 있다.
 - 수신 스레드는 다음 청크 또는 읽기 timeout에서 정리한다. 정리 전에는 새 생성을 거부한다.
 - 동시 생성은 1개다. 서버 추론 자체의 즉시 취소는 보장하지 않는다.
@@ -115,8 +151,7 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 
 **외부 모듈 연결과 로그 저장은 아직 주석·스켈레톤 상태다.**
 
-- PromptManager·LocalResParser·ChatManager의 예상 호출 위치를 주석으로 남겼다.
-- `request()`는 파싱 전 원시 본문을 반환한다. 성공은 생성 완료를 뜻한다.
+- PromptManager·ChatManager의 예상 호출 위치를 주석으로 남겼다. 결과 파서와 형식 재시도는 연결했다.
 - `_log_call()`: 새 입력·출력만 전달한다. 이전 컨텍스트 전체는 반복 저장하지 않는다.
 - 호출 오류 시에도 이미 받은 부분 출력을 로그 연결 지점에 넘기고 원래 예외를 전파한다.
 - 압축 호출은 `log_call=False`로 일반 호출 로그를 생략한다.
@@ -127,7 +162,8 @@ with LocalLLMRunner(context_tasks=frozenset({"ANSWER"})) as runner:
 
 **자동 테스트와 실서버에서 호출·컨텍스트·압축 동작을 확인했다.**
 
-- 자동 테스트: 두 모듈과 프록시의 중지·예외 전파·로그·인증·호출 규격을 검사한다.
+- 자동 테스트: Runner·파서·ContextManager와 프록시의 중지·예외 전파·로그·인증·호출 규격을 검사한다.
+- 2026년 11월 3일 파서 연결 검증: 서버 테스트 92개와 Ruff 검사 통과. 작업별 타입·필수 필드·엄격한 정수 검사·정상 빈 목록, 3회 실패 상한·재생성 사용량 합산·중지·원본 예외 전파를 대역으로 검증했다. 실모델 호출은 추가하지 않았다.
 - 실서버 확인일: 2026년 11월 1일.
 - 확인 범위: 래퍼 내부 키 탐색, 토큰 사용량, 대화 기억, 실제 토크나이저와 요약 호출.
 - 작은 시험 임계값에서 원문 211토큰이 새 입력 포함 64토큰으로 줄고 지정 코드가 유지됐다.

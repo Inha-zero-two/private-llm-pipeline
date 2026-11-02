@@ -9,13 +9,19 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+from app.models.enums import PromptIdx
+from app.models.local_llm_outputs import ParsedResult
+
+from .local_res_parser import OutputFormatError, parser
+
 if TYPE_CHECKING:
     from .context_manager import ContextManager
 
 RequestResult = tuple[str, bool, int | None, int | None, str]
-# 반환 순서: 본문, 성공, 입력 토큰, 출력 토큰, 종료 사유.
-# 파싱 실패용 상한이며 요청문 누출에 의한 재작성 상한과는 별개다.
-MAX_REGEN = 3
+# 수동 호출은 본문, 작업 호출은 파싱 결과가 첫 값이다. 나머지 순서는 같다.
+ParsedRequestResult = tuple[ParsedResult, bool, int | None, int | None, str]
+# 최초 응답을 포함한 형식 불일치 횟수. 요청문 누출 재작성 상한과는 별개다.
+MAX_FORMAT_FAILURES = 3
 N_CTX = 32768
 CONTEXT_TASKS: frozenset[str | int] = frozenset()
 # 작업별 PromptIdx 정책은 아직 없으므로 호출자가 context_tasks로 지정한다.
@@ -178,16 +184,17 @@ class LocalLLMRunner:
 
     def request(
         self,
-        run_id: str,
+        run_id: str | None,
         input_: str,
-        prompt_idx: str | int,
-        chat_id: str,
+        prompt_idx: PromptIdx | str,
+        chat_id: str | None,
         *,
         system_prompt: str | None = None,
         max_tokens: int = 2048,
         on_token: Callable[[str], None] | None = None,
-    ) -> RequestResult:
-        """작업별 컨텍스트를 사용하는 호출. 현재는 파싱 전 원시 본문을 반환한다."""
+    ) -> ParsedRequestResult:
+        """파싱 결과와 사용량을 반환한다. 형식 불일치가 3회면 예외를 전파한다."""
+        prompt_idx = PromptIdx(prompt_idx)
         # TODO 6.1: system_prompt, version = self.prompt_manager.get_prompt(prompt_idx)
         if system_prompt is None:
             raise NotImplementedError(
@@ -196,6 +203,8 @@ class LocalLLMRunner:
         context_id = None
         model_input = input_
         if prompt_idx in self.context_tasks:
+            if chat_id is None:
+                raise ValueError("컨텍스트를 사용하는 작업에는 chat_id가 필요함")
             context_id = self.context_manager.get_id(chat_id, prompt_idx)
             context = self.context_manager.get_context(context_id)
             if context:
@@ -209,19 +218,48 @@ class LocalLLMRunner:
             new_input=input_,
             on_token=on_token,
         )
-        # TODO 5.2: valid, error = self.local_res_parser.check(result[0], prompt_idx)
-        # TODO 5.2: for _ in range(MAX_REGEN):  # 출력 형식 실패만 재시도
-        #     if valid or not result[1]: break
-        #     result = self.regen(model_input, result[0], error, system_prompt)
-        #     valid, error = self.local_res_parser.check(result[0], prompt_idx)
-        # 일반 호출 로그는 manual_request의 _log_call 한 곳에서만 연결한다.
-        # 이전 컨텍스트나 model_input 전체를 다시 로그로 넘기지 않는다.
-        # success는 생성 완료이며 5.2 스키마 검증 통과를 의미하지 않는다.
-        if result[1] and context_id is not None:
-            self.context_manager.append(
-                context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
+        failures = 0
+        input_tokens: int | None = 0
+        output_tokens: int | None = 0
+        while True:
+            # 재생성 사용량도 합산한다. 하나라도 모르면 합계도 None으로 둔다.
+            input_tokens = (
+                input_tokens + result[2]
+                if input_tokens is not None and result[2] is not None
+                else None
             )
-        return result
+            output_tokens = (
+                output_tokens + result[3]
+                if output_tokens is not None and result[3] is not None
+                else None
+            )
+            if not result[1]:
+                # 중지된 부분 응답은 파싱·재생성하거나 컨텍스트에 추가하지 않는다.
+                return result[0], False, input_tokens, output_tokens, result[4]
+            try:
+                parsed = parser(result[0], prompt_idx)
+            except OutputFormatError as exc:
+                failures += 1
+                if failures >= MAX_FORMAT_FAILURES:
+                    raise OutputFormatError(
+                        f"생성문 형식 불일치: {prompt_idx}에서 {failures}회 실패. {exc}"
+                    ) from exc
+                # 파서의 형식 오류만 재시도한다. 래퍼·통신·코드 오류는 잡지 않는다.
+                result = self.regen(
+                    model_input,
+                    result[0],
+                    str(exc),
+                    system_prompt,
+                    max_tokens=max_tokens,
+                    on_token=on_token,
+                )
+                continue
+            if context_id is not None:
+                # 유효한 최종 응답만 원문으로 남긴다. 실패한 생성문은 호출 로그에만 남는다.
+                self.context_manager.append(
+                    context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
+                )
+            return parsed, True, input_tokens, output_tokens, result[4]
 
     def regen(
         self,

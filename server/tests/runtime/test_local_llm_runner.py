@@ -12,8 +12,10 @@ from typing import Any
 
 import pytest
 
+from app.models.local_llm_outputs import Plan
 from app.runtime import local_llm_runner as runner_module
 from app.runtime.local_llm_runner import LocalLLMRunner
+from app.runtime.local_res_parser import OutputFormatError
 from src.localLLM_API_proxy import llama_wrapper
 
 
@@ -226,7 +228,7 @@ def test_request_context_is_opt_in_and_failed_generation_does_not_append(
         runner.request("r3", "failed", "ANSWER", "chat", system_prompt="system")
     assert runner.context_manager.get_context(context_id) == original
     runner._llm.stream_factory = normal_stream
-    runner.request("r4", "stateless", "GUARD", "chat", system_prompt="system")
+    runner.request("r4", "stateless", "WRITE", "chat", system_prompt="system")
     assert runner._llm.calls[-1]["messages"][1]["content"] == "stateless"
 
 
@@ -479,3 +481,145 @@ def test_callback_exception_propagates_and_keeps_received_output_for_log(
         runner.manual_request("input", "system", on_token=show)
     assert raised.value is error
     assert logged == [("input", "OK")]
+
+
+@pytest.fixture
+def generated_outputs(runner: LocalLLMRunner) -> list[str | Exception]:
+    outputs: list[str | Exception] = []
+
+    def stream(_: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        output = outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        yield {"choices": [{"delta": {"content": output}, "finish_reason": "stop"}]}
+        yield {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 2}}
+
+    runner._llm.stream_factory = stream
+    return outputs
+
+
+@pytest.mark.parametrize("failures", [0, 1, 2])
+def test_request_retries_only_invalid_outputs_and_sums_usage(
+    runner: LocalLLMRunner, generated_outputs: list[str | Exception], failures: int
+) -> None:
+    generated_outputs.extend(["not json"] * failures + ['{"hits":[0,2]}'])
+    result = runner.request(
+        "run", "original", "GUARD", "chat", system_prompt="system", max_tokens=55
+    )
+    assert result == ([0, 2], True, 7 * (failures + 1), 2 * (failures + 1), "stop")
+    assert len(runner._llm.calls) == failures + 2  # 생성자 검사 1회는 별도다.
+    assert not generated_outputs
+    for call in runner._llm.calls[1:]:
+        assert call["messages"][0]["content"] == "system"
+        assert call["messages"][1]["content"].startswith("original")
+        assert call["max_tokens"] == 55
+    if failures:
+        assert "not json" in runner._llm.calls[-1]["messages"][1]["content"]
+        assert "Format error:" in runner._llm.calls[-1]["messages"][1]["content"]
+
+
+def test_third_format_failure_raises_without_fourth_generation_or_context_change(
+    runner: LocalLLMRunner, generated_outputs: list[str | Exception]
+) -> None:
+    runner.context_tasks = frozenset({"JUDGE"})
+    context_id = runner.context_manager.get_id("chat", "JUDGE")
+    runner.context_manager.append(context_id, "original history")
+    generated_outputs.extend(["not json", "{}", '{"enough":true}', "unused"])
+    with pytest.raises(OutputFormatError, match="생성문 형식 불일치.*3회") as raised:
+        runner.request("run", "new input", "JUDGE", "chat", system_prompt="system")
+    assert isinstance(raised.value.__cause__, OutputFormatError)
+    assert len(runner._llm.calls) == 4
+    assert generated_outputs == ["unused"]
+    assert runner.context_manager.get_context(context_id) == "original history"
+
+
+def test_context_receives_only_valid_final_raw_response(
+    runner: LocalLLMRunner, generated_outputs: list[str | Exception]
+) -> None:
+    runner.context_tasks = frozenset({"JUDGE"})
+    valid = '{"enough":true,"needConsent":false,"consentItems":[],"need":[]}'
+    generated_outputs.extend(["bad output", valid])
+    result = runner.request("run", "input", "JUDGE", "chat", system_prompt="system")
+    assert isinstance(result[0], Plan)
+    assert result[0].enough is True
+    assert (
+        runner.context_manager.get_context(0) == f"\nUser: input\nAssistant: {valid}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionError("proxy"),
+        ValueError("wrapper"),
+        OutputFormatError("raised by wrapper"),
+    ],
+)
+def test_request_does_not_catch_wrapper_errors_even_of_matching_type(
+    runner: LocalLLMRunner, generated_outputs: list[str | Exception], error: Exception
+) -> None:
+    generated_outputs.append(error)
+    with pytest.raises(type(error)) as raised:
+        runner.request("run", "input", "GUARD", "chat", system_prompt="system")
+    assert raised.value is error
+    assert len(runner._llm.calls) == 2
+
+
+def test_parser_programming_error_is_not_retried(
+    runner: LocalLLMRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = TypeError("parser programming error")
+
+    def fail(*_: object) -> None:
+        raise error
+
+    monkeypatch.setattr(runner_module, "parser", fail)
+    with pytest.raises(TypeError) as raised:
+        runner.request("run", "input", "ANSWER", "chat", system_prompt="system")
+    assert raised.value is error
+    assert len(runner._llm.calls) == 2
+
+
+def test_stop_during_format_retry_does_not_parse_retry_or_append(
+    runner: LocalLLMRunner,
+) -> None:
+    emitted, release, cleaned = Event(), Event(), Event()
+    results = []
+    runner.context_tasks = frozenset({"GUARD"})
+
+    def stream(_: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        if len(runner._llm.calls) == 2:
+            yield {"choices": [{"delta": {"content": "bad"}, "finish_reason": "stop"}]}
+            return
+        try:
+            yield {"choices": [{"delta": {"content": '{"hits":['}}]}
+            release.wait(3)
+            yield {"choices": [{"delta": {"content": "0]}"}, "finish_reason": "stop"}]}
+        finally:
+            cleaned.set()
+
+    def show(piece: str) -> None:
+        if piece == '{"hits":[':
+            emitted.set()
+
+    runner._llm.stream_factory = stream
+    call = Thread(
+        target=lambda: results.append(
+            runner.request(
+                "run", "input", "GUARD", "chat", system_prompt="system", on_token=show
+            )
+        )
+    )
+    call.start()
+    try:
+        assert emitted.wait(1)
+        runner.stop()
+        call.join(0.5)
+        assert not call.is_alive()
+        assert results == [('{"hits":[', False, None, None, "stopped")]
+        assert len(runner._llm.calls) == 3
+        assert runner.context_manager.get_context(0) == ""
+    finally:
+        release.set()
+        call.join(1)
+    assert cleaned.wait(1)

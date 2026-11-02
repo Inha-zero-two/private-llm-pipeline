@@ -100,11 +100,16 @@ class PrivacySettings:
 | 설계서 모듈 | 파일 · 클래스 | 함수 | 변수 |
 | --- | --- | --- | --- |
 | 5.1 `LocalLLMRunner` | `local_llm_runner.py` · `LocalLLMRunner` | `request()`, `manualRequest()` → `manual_request()`, `reGen()` → `regen()`, `stop()`, `modelLoad()` → `model_load()` | `Input` → `input_`, `stopFlag` → `stop_flag` |
-| 5.2 `LocalResParser` | `local_res_parser.py` · `LocalResParser` | `check()`, `parser()` | `rawOutput` → `raw_output` |
+| 5.2 `LocalResParser` | `local_res_parser.py` · 상태 없는 함수 | `parser()` | `rawOutput` → `raw_output` |
 | 5.3 `FrontierClient` | `frontier_client.py` · `FrontierClient` | `checkConnection()` → `check_connection()`, `send()`, `decideContext()` → `decide_context()` | `lastRequest` → `last_request`, `frontierSysPromIdx` → `frontier_sys_prom_idx`, `contextRecognizeSysPromIdx` → `context_recognize_sys_prom_idx` |
 | 5.4 `ContextManager` | `context_manager.py` · `ContextManager` | `getId()` → `get_id()`, `newId()` → `new_id()`, `getContext()` → `get_context()`, `append()`, `getContextLength()` → `get_context_length()`, `compactContext()` → `compact_context()` | |
 
-`reGen()`은 `regenLimit`, `MAX_REGEN`과 맞춰 `regen`을 한 단어로 봅니다.
+`reGen()`은 요청문 재작성의 `regenLimit`과 맞춰 `regen`을 한 단어로 봅니다.
+
+2026년 11월 3일 사용자 결정으로 5.2는 클래스와 `check()` 없이 모듈 함수 `parser()` 하나로 구현합니다.
+정상 결과만 반환하고 형식 오류는 `OutputFormatError`로 올립니다. Runner는 이 오류만 잡으며,
+`MAX_FORMAT_FAILURES=3`에 따라 최초 응답 포함 3회 형식 불일치면 예외를 전파합니다.
+원본 PDF의 `MAX_REGEN` 재시도와 최종 실패 반환 설명은 이 결정으로 대체합니다.
 
 ### 6. 데이터 관리 (`app/data/`)
 
