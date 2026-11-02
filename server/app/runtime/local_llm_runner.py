@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 RequestResult = tuple[str, bool, int | None, int | None, str]
 # 수동 호출은 본문, 작업 호출은 파싱 결과가 첫 값이다. 나머지 순서는 같다.
-ParsedRequestResult = tuple[ParsedResult, bool, int | None, int | None, str]
+ParsedRequestResult = tuple[ParsedResult | None, bool, int | None, int | None, str]
 # 최초 응답을 포함한 형식 불일치 횟수. 요청문 누출 재작성 상한과는 별개다.
 MAX_FORMAT_FAILURES = 3
 N_CTX = 32768
@@ -87,6 +87,7 @@ class LocalLLMRunner:
         log_call: bool = True,
         new_input: str | None = None,
         on_token: Callable[[str], None] | None = None,
+        _stop_signal: Event | None = None,
     ) -> RequestResult:
         """스트리밍 생성. 중지는 부분 답변을 반환하고 호출 오류는 그대로 던진다.
 
@@ -102,12 +103,19 @@ class LocalLLMRunner:
             if self._closed:
                 self._busy.release()
                 raise RuntimeError("Runner is closed")
-            cancel = Event()
-            self._stop_event = cancel
+            stop_signal = _stop_signal if _stop_signal is not None else Event()
+            self._stop_event = stop_signal
+            if stop_signal.is_set():
+                self._busy.release()
+                return "", False, 0, 0, "stopped"
+        # 수신 정리 신호가 정상 응답 후에도 요청 전체를 중지시키지 않도록 분리한다.
+        cancel = Event()
         events: Queue[dict[str, Any] | Exception | None] = Queue()
 
         def receive() -> None:
             try:
+                if stop_signal.is_set():
+                    return
                 stream = self._llm.create_chat_completion(
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -118,7 +126,7 @@ class LocalLLMRunner:
                 )
                 with closing(stream):
                     for chunk in stream:
-                        if cancel.is_set():
+                        if cancel.is_set() or stop_signal.is_set():
                             break
                         events.put(chunk)
             except Exception as exc:
@@ -140,7 +148,7 @@ class LocalLLMRunner:
         finish_reason = None
         try:
             while True:
-                if cancel.is_set():
+                if stop_signal.is_set():
                     return "".join(text), False, input_tokens, output_tokens, "stopped"
                 if monotonic() >= deadline:
                     raise TimeoutError("Local LLM request exceeded its time limit")
@@ -149,7 +157,7 @@ class LocalLLMRunner:
                 except Empty:
                     continue
                 # 대기 중 stop이 오면 종료 표식이 먼저 도착할 수 있으므로 다시 확인한다.
-                if cancel.is_set():
+                if stop_signal.is_set():
                     return "".join(text), False, input_tokens, output_tokens, "stopped"
                 if isinstance(event, Exception):
                     raise event
@@ -193,7 +201,7 @@ class LocalLLMRunner:
         max_tokens: int = 2048,
         on_token: Callable[[str], None] | None = None,
     ) -> ParsedRequestResult:
-        """파싱 결과와 사용량을 반환한다. 형식 불일치가 3회면 예외를 전파한다."""
+        """파싱 결과와 사용량을 반환한다. 형식 불일치가 3회면 실패값을 반환한다."""
         prompt_idx = PromptIdx(prompt_idx)
         # TODO 6.1: system_prompt, version = self.prompt_manager.get_prompt(prompt_idx)
         if system_prompt is None:
@@ -211,12 +219,15 @@ class LocalLLMRunner:
                 model_input = (
                     f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                 )
+        # 최초 생성·파싱·재생성이 같은 중지 신호를 사용한다.
+        stop_signal = Event()
         result = self.manual_request(
             model_input,
             system_prompt,
             max_tokens=max_tokens,
             new_input=input_,
             on_token=on_token,
+            _stop_signal=stop_signal,
         )
         failures = 0
         input_tokens: int | None = 0
@@ -233,27 +244,40 @@ class LocalLLMRunner:
                 if output_tokens is not None and result[3] is not None
                 else None
             )
-            if not result[1]:
+            if not result[1] or stop_signal.is_set():
                 # 중지된 부분 응답은 파싱·재생성하거나 컨텍스트에 추가하지 않는다.
-                return result[0], False, input_tokens, output_tokens, result[4]
+                return (
+                    result[0],
+                    False,
+                    input_tokens,
+                    output_tokens,
+                    "stopped" if stop_signal.is_set() else result[4],
+                )
             try:
                 parsed = parser(result[0], prompt_idx)
             except OutputFormatError as exc:
+                if stop_signal.is_set():
+                    return result[0], False, input_tokens, output_tokens, "stopped"
                 failures += 1
                 if failures >= MAX_FORMAT_FAILURES:
-                    raise OutputFormatError(
-                        f"생성문 형식 불일치: {prompt_idx}에서 {failures}회 실패. {exc}"
-                    ) from exc
+                    return None, False, input_tokens, output_tokens, "parse_failed"
                 # 파서의 형식 오류만 재시도한다. 래퍼·통신·코드 오류는 잡지 않는다.
-                result = self.regen(
+                regenerated = self.regen(
                     model_input,
                     result[0],
                     str(exc),
                     system_prompt,
                     max_tokens=max_tokens,
                     on_token=on_token,
+                    _stop_signal=stop_signal,
                 )
+                # 새 본문이 나오기 전에 중지되면 이미 받은 직전 본문을 보존한다.
+                if regenerated[4] == "stopped" and not regenerated[0]:
+                    regenerated = (result[0], *regenerated[1:])
+                result = regenerated
                 continue
+            if stop_signal.is_set():
+                return result[0], False, input_tokens, output_tokens, "stopped"
             if context_id is not None:
                 # 유효한 최종 응답만 원문으로 남긴다. 실패한 생성문은 호출 로그에만 남는다.
                 self.context_manager.append(
@@ -270,6 +294,7 @@ class LocalLLMRunner:
         *,
         max_tokens: int = 2048,
         on_token: Callable[[str], None] | None = None,
+        _stop_signal: Event | None = None,
     ) -> RequestResult:
         """원래 입력 뒤에 직전 출력·형식 오류를 붙여 동일한 설정으로 재생성한다."""
         revised = (
@@ -282,6 +307,7 @@ class LocalLLMRunner:
             max_tokens=max_tokens,
             new_input=f"Previous output:\n{previous_output}\nFormat error:\n{error}",
             on_token=on_token,
+            _stop_signal=_stop_signal,
         )
 
     def _log_call(self, new_input: str, output: str) -> None:

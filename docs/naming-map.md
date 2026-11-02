@@ -108,8 +108,9 @@ class PrivacySettings:
 
 2026년 11월 3일 사용자 결정으로 5.2는 클래스와 `check()` 없이 모듈 함수 `parser()` 하나로 구현합니다.
 정상 결과만 반환하고 형식 오류는 `OutputFormatError`로 올립니다. Runner는 이 오류만 잡으며,
-`MAX_FORMAT_FAILURES=3`에 따라 최초 응답 포함 3회 형식 불일치면 예외를 전파합니다.
-원본 PDF의 `MAX_REGEN` 재시도와 최종 실패 반환 설명은 이 결정으로 대체합니다.
+`MAX_FORMAT_FAILURES=3`에 따라 최초 응답 포함 3회 형식 불일치면
+`(None, False, 입력 토큰 합계, 출력 토큰 합계, "parse_failed")`를 반환합니다.
+최종 실패는 원본 PDF 5.1의 실패 반환 방식을 따릅니다. `MAX_REGEN` 횟수 설명은 위 3회 기준으로 대체합니다.
 
 ### 6. 데이터 관리 (`app/data/`)
 

@@ -52,20 +52,30 @@ def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
         return raw_output  # 텍스트의 줄바꿈·들여쓰기는 그대로 보존한다.
 
     source = raw_output.strip()
-    lines = source.splitlines()
-    if len(lines) >= 3 and lines[0] in {"```", "```json"} and lines[-1] == "```":
+    # JSON 문자열 안의 U+0085/U+2028/U+2029를 줄바꿈으로 바꾸지 않는다.
+    lines = source.split("\n")
+    if (
+        len(lines) >= 3
+        and lines[0].rstrip("\r") in {"```", "```json"}
+        and lines[-1] == "```"
+    ):
         source = "\n".join(lines[1:-1])
 
     try:
         data = json.loads(source)
-        if not isinstance(data, dict):
-            raise OutputFormatError("JSON 최상위 값은 객체여야 함")
-        adapter, field = output_format
-        if field is not None:
-            if field not in data:
-                raise OutputFormatError(f"{field} 항목이 없음")
-            data = data[field]
+    except (ValueError, RecursionError) as exc:
+        # JSON 문법뿐 아니라 정수 자릿수·중첩 제한도 이 입력의 형식 오류다.
+        # 이 범위 밖의 코드나 래퍼에서 발생한 ValueError는 처리하지 않는다.
+        raise OutputFormatError(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise OutputFormatError("JSON 최상위 값은 객체여야 함")
+    adapter, field = output_format
+    if field is not None:
+        if field not in data:
+            raise OutputFormatError(f"{field} 항목이 없음")
+        data = data[field]
+    try:
         # '1'·true를 정수로 바꾸는 등의 자동 타입 보정은 하지 않는다.
         return adapter.validate_python(data, strict=True)
-    except (json.JSONDecodeError, ValidationError) as exc:
+    except ValidationError as exc:
         raise OutputFormatError(str(exc)) from exc

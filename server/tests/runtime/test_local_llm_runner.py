@@ -518,16 +518,15 @@ def test_request_retries_only_invalid_outputs_and_sums_usage(
         assert "Format error:" in runner._llm.calls[-1]["messages"][1]["content"]
 
 
-def test_third_format_failure_raises_without_fourth_generation_or_context_change(
+def test_third_format_failure_returns_failure_without_fourth_generation_or_context_change(
     runner: LocalLLMRunner, generated_outputs: list[str | Exception]
 ) -> None:
     runner.context_tasks = frozenset({"JUDGE"})
     context_id = runner.context_manager.get_id("chat", "JUDGE")
     runner.context_manager.append(context_id, "original history")
     generated_outputs.extend(["not json", "{}", '{"enough":true}', "unused"])
-    with pytest.raises(OutputFormatError, match="생성문 형식 불일치.*3회") as raised:
-        runner.request("run", "new input", "JUDGE", "chat", system_prompt="system")
-    assert isinstance(raised.value.__cause__, OutputFormatError)
+    result = runner.request("run", "new input", "JUDGE", "chat", system_prompt="system")
+    assert result == (None, False, 21, 6, "parse_failed")
     assert len(runner._llm.calls) == 4
     assert generated_outputs == ["unused"]
     assert runner.context_manager.get_context(context_id) == "original history"
