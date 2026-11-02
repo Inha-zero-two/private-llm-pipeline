@@ -1,6 +1,7 @@
 """Main 흐름 테스트. 다른 모듈은 아직 없으므로 정해진 값을 돌려주는 가짜 모듈을 넣는다."""
 
 import asyncio
+import threading
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -388,3 +389,118 @@ def test_stop_during_answer_keeps_partial_answer() -> None:
 
     assert ("save_message", "assistant", "최종" + STOPPED_MARK) in log
     assert finished_with(log) == EndReason.STOPPED
+
+
+def test_unexpected_error_still_cleans_up() -> None:
+    log: list[tuple[Any, ...]] = []
+    planner = FakePlanner(log, enough_after=99)
+
+    def boom(*args: Any) -> None:
+        raise RuntimeError("boom")
+
+    planner.judge = boom  # type: ignore[method-assign]
+    main = make_main(log, planner=planner)
+    events: list[str] = []
+
+    async def emit(event: str, data: dict[str, Any]) -> None:
+        events.append(event)
+
+    main._emit = emit
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(main.run_pipeline("chat-1", "질문"))
+
+    assert "error" in events
+    assert names(log)[-3:] == ["consent_release", "memo_clear", "finish_run"]
+    assert main._runs == {}
+
+
+class FailingReleaseConsentManager(FakeConsentManager):
+    def release(self, run_id: str, pd_table: list[Any]) -> None:
+        self.record("consent_release")
+        raise RuntimeError("release 실패")
+
+
+def test_cleanup_continues_after_release_failure() -> None:
+    log: list[tuple[Any, ...]] = []
+    main = make_main(log, consent_manager=FailingReleaseConsentManager(log))
+
+    # 본 흐름은 성공했으므로 정리 오류가 호출자에게 올라간다.
+    with pytest.raises(RuntimeError, match="release 실패"):
+        asyncio.run(main.run_pipeline("chat-1", "질문"))
+
+    assert "memo_clear" in names(log)
+    assert finished_with(log) == EndReason.INFO_ENOUGH
+    assert main._runs == {}
+
+
+class SlowReleaseConsentManager(FakeConsentManager):
+    """release()가 go 신호를 받을 때까지 멈춰 있다. 정리 도중에 stop()을 부르기 위함."""
+
+    def __init__(self, log: list[tuple[Any, ...]]) -> None:
+        super().__init__(log)
+        self.go = threading.Event()
+
+    def release(self, run_id: str, pd_table: list[Any]) -> None:
+        self.record("consent_release")
+        self.go.wait(timeout=5)
+
+
+def test_stop_during_cleanup_does_not_interrupt() -> None:
+    log: list[tuple[Any, ...]] = []
+    consent = SlowReleaseConsentManager(log)
+    main = make_main(log, consent_manager=consent)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(main.run_pipeline("chat-1", "질문"))
+        while "consent_release" not in names(log):
+            await asyncio.sleep(0.01)
+        stopping = asyncio.create_task(main.stop("run-1"))
+        await asyncio.sleep(0.05)
+        consent.go.set()
+        await stopping
+        await task  # 취소되지 않고 정상 종료해야 한다
+        assert not task.cancelled()
+
+    asyncio.run(scenario())
+
+    assert "local_stop" not in names(log)  # 끝나는 중인 실행은 모델을 멈추지 않는다
+    assert names(log)[-2:] == ["memo_clear", "finish_run"]
+    assert finished_with(log) == EndReason.INFO_ENOUGH
+
+
+class SlowAnswerChatManager(FakeChatManager):
+    """최종 답변 저장이 go 신호를 받을 때까지 멈춰 있다. 저장 도중에 stop()을 부르기 위함."""
+
+    def __init__(self, log: list[tuple[Any, ...]]) -> None:
+        super().__init__(log)
+        self.go = threading.Event()
+
+    def save_message(self, chat_id: str, role: str, content: str) -> str:
+        message_id = super().save_message(chat_id, role, content)
+        if role == "assistant":
+            self.go.wait(timeout=5)
+        return message_id
+
+
+def test_stop_after_answer_completes_saves_once() -> None:
+    log: list[tuple[Any, ...]] = []
+    chat = SlowAnswerChatManager(log)
+    main = make_main(log, chat_manager=chat)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(main.run_pipeline("chat-1", "질문"))
+        while ("save_message", "assistant", "최종 답변") not in log:
+            await asyncio.sleep(0.01)
+        stopping = asyncio.create_task(main.stop("run-1"))
+        await asyncio.sleep(0.05)
+        chat.go.set()
+        await stopping
+        await task
+        assert not task.cancelled()
+
+    asyncio.run(scenario())
+
+    saved = [call for call in log if call[:2] == ("save_message", "assistant")]
+    assert saved == [("save_message", "assistant", "최종 답변")]
+    assert finished_with(log) == EndReason.INFO_ENOUGH

@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from app.models.enums import EndReason
 
 if TYPE_CHECKING:
-    # 타입 표시용으로만 import한다. 
-    # 현재 개발되지 않아서 연결하지 않음. 
+    # 타입 표시용으로만 import한다.
+    # 현재 개발되지 않아서 연결하지 않음.
     # 실제 객체는 생성자로 넘겨받으므로 모듈이 생겨도 이 import는 그대로.
     from app.data.chat_manager import ChatManager
     from app.data.memo_manager import MemoManager
@@ -47,8 +47,10 @@ EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 # 7) 답변 도중 중지했을 때 저장하는 부분 답변 뒤에 붙이는 표시
 STOPPED_MARK = "\n\n(중지됨)"
 
+
 async def _no_emit(event: str, data: dict[str, Any]) -> None:
     """Chat API가 연결되기 전의 기본값. 아무것도 보내지 않는다."""
+
 
 @dataclass
 class _RunState:
@@ -58,7 +60,8 @@ class _RunState:
     task: asyncio.Task[Any]  # run_pipeline()을 돌리고 있는 asyncio 작업
     answer_parts: list[str] = field(default_factory=list)  # 7)에서 나온 토큰들
     stopping: bool = False  # stop()이 이미 불렸는지
-    finishing: bool = False  # 이 시점 이후로는 취소하지 않는다 (답변 완료 또는 정리 시작)
+    # 이 시점 이후로는 취소하지 않는다 (답변 완료 또는 정리 시작)
+    finishing: bool = False
 
 
 class Main:
@@ -183,7 +186,8 @@ class Main:
 
         except asyncio.CancelledError as error:
             # stop()이 이 작업을 취소하면 여기로 온다. 7)은 새로 시작하지 않는다.
-            original = error # 원래 오류가 뭔지 기록해 두고, finally에서 다시 raise한다.
+            # 원래 오류가 뭔지 기록해 두고, finally에서 다시 raise한다.
+            original = error
             end_reason = EndReason.STOPPED
             state = self._runs.get(run_id) if run_id is not None else None
             if state is not None and state.answer_parts:
@@ -197,7 +201,8 @@ class Main:
 
         except Exception as error:
             # 예상하지 못한 오류: 화면에 알리고, 아래 finally에서 같은 정리를 한다.
-            original = error # 원래 오류가 뭔지 기록해 두고, finally에서 다시 raise한다.
+            # 원래 오류가 뭔지 기록해 두고, finally에서 다시 raise한다.
+            original = error
             await self._emit("error", {"run_id": run_id, "message": str(error)})
             raise
 
@@ -207,14 +212,17 @@ class Main:
                 state = self._runs.get(run_id)
                 if state is not None:
                     state.finishing = True
-                await self._finish(run_id, pd_table, end_reason, answer_message_id)
 
-                # 정리 중에 오류가 생기면 원래 오류가 없을 때만 그 오류를 올린다. 
+                # 정리 중에 오류가 생기면 원래 오류가 없을 때만 그 오류를 올린다.
                 # (원래 오류가 있으면 그것을 살리고, 정리 오류는 메모로 붙인다)
-                cleanup_errors = await self._finish(...)
+                cleanup_errors = await self._finish(
+                    run_id, pd_table, end_reason, answer_message_id
+                )
                 if cleanup_errors and original is None:
-                    raise cleanup_errors[0] # 본 흐름은 성공했는데 정리가 실패한 경우만 정리 오류를 올린다
-                for e in cleanup_errors: # 원래 오류가 있으면 그것을 살리고, 정리 오류는 메모로 붙인다
+                    # 본 흐름은 성공했는데 정리가 실패한 경우만 정리 오류를 올린다
+                    raise cleanup_errors[0]
+                # 원래 오류가 있으면 그것을 살리고, 정리 오류는 메모로 붙인다
+                for e in cleanup_errors:
                     if original is not None:
                         original.add_note(f"정리 중 오류: {e!r}")
 
@@ -251,16 +259,19 @@ class Main:
         state.stopping = True
 
         if not state.finishing:  # 이미 끝나는 중이면 모델 중지·동의 취소도 하지 않는다
-            await self._call(self.local_llm_runner.stop) # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
-            await self._call(self.consent_manager.cancel, run_id) # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
+            # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
+            await self._call(self.local_llm_runner.stop)
+            # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
+            await self._call(self.consent_manager.cancel, run_id)
 
-        if not state.finishing: # await 뒤에 다시 확인. 이 줄과 cancel() 사이엔 await 없음
+        # await 뒤에 다시 확인. 이 줄과 cancel() 사이엔 await 없음
+        if not state.finishing:
             # run_pipeline 작업을 취소하고, 정리가 끝날 때까지 기다린다.
             state.task.cancel()
-        
+
         await asyncio.gather(state.task, return_exceptions=True)
 
-    # run_pipeline()을 단계별로 나눈 내부 함수 
+    # run_pipeline()을 단계별로 나눈 내부 함수
 
     async def _collect(
         self, run_id: str, question: str, pd_table: PDTable
@@ -400,26 +411,34 @@ class Main:
         pd_table: PDTable | None,
         end_reason: EndReason | None,
         answer_message_id: str | None,
-    ) -> None:
+    ) -> list[Exception]:
         """실행 정리. 한 단계가 실패해도 나머지 단계는 모두 시도하고, 생긴 오류를 돌려준다."""
         errors: list[Exception] = []
         try:
             if pd_table is not None:
-                # 개인정보와 직결되므로 가장 먼저, 무조건 시도한다. (설계서 3.2)
-                await self._call(errors, self.consent_manager.release, run_id, pd_table)
-            memo_final = await self._call(self.memo_manager.read_all) # 최종 메모를 읽는다. (설계서 3.2), 실패하면 None
-            # 이번 실행에서 동의로 허용한 항목을 다시 금지로 되돌린다.
+                # 이번 실행에서 동의로 허용한 항목을 다시 금지로 되돌린다.
+                # 개인정보와 직결되므로 가장 먼저, 무조건 시도한다.
+                await self._try(errors, self.consent_manager.release, run_id, pd_table)
+            # 최종 메모를 읽는다. 실패하면 None으로 기록한다.
+            memo_final = await self._try(errors, self.memo_manager.read_all)
             await self._try(errors, self.memo_manager.clear)
             await self._try(
-                errors, self.chat_manager.finish_run,
-                run_id, end_reason, answer_message_id, memo_final,
+                errors,
+                self.chat_manager.finish_run,
+                run_id,
+                end_reason,
+                answer_message_id,
+                memo_final,
             )
 
         finally:
-            self._runs.pop(run_id, None) # 무슨 일이 있어도 진행 중 실행 목록에서 제거한다.
+            # 무슨 일이 있어도 진행 중 실행 목록에서 제거한다.
+            self._runs.pop(run_id, None)
         return errors
 
-    async def _try(self, errors: list[Exception], func, *args):
+    async def _try(
+        self, errors: list[Exception], func: Callable[..., T], *args: Any
+    ) -> T | None:
         """_call과 같지만 예외를 errors에 모으고 None을 돌려준다. (정리 단계 전용)"""
         try:
             return await self._call(func, *args)
