@@ -136,9 +136,10 @@ class Main:
         pd_table: PDTable | None = None
         end_reason: EndReason | None = None
         answer_message_id: str | None = None
+        original: BaseException | None = None
 
         try:
-            # ── 1) 실행 준비 ─────────────────────────────────────────────
+            # 1) 실행 준비
             # 질문을 대화 기록에 저장하고, 이번 실행의 기록(run)을 만든다. run_id는 여기서 생긴다.
             user_message_id = await self._call(
                 self.chat_manager.save_message, chat_id, "user", question
@@ -180,8 +181,9 @@ class Main:
                 run_id, chat_id, question, end_reason
             )
 
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
             # stop()이 이 작업을 취소하면 여기로 온다. 7)은 새로 시작하지 않는다.
+            original = error # 원래 오류가 뭔지 기록해 두고, finally에서 다시 raise한다.
             end_reason = EndReason.STOPPED
             state = self._runs.get(run_id) if run_id is not None else None
             if state is not None and state.answer_parts:
@@ -195,6 +197,7 @@ class Main:
 
         except Exception as error:
             # 예상하지 못한 오류: 화면에 알리고, 아래 finally에서 같은 정리를 한다.
+            original = error # 원래 오류가 뭔지 기록해 두고, finally에서 다시 raise한다.
             await self._emit("error", {"run_id": run_id, "message": str(error)})
             raise
 
@@ -205,6 +208,15 @@ class Main:
                 if state is not None:
                     state.finishing = True
                 await self._finish(run_id, pd_table, end_reason, answer_message_id)
+
+                # 정리 중에 오류가 생기면 원래 오류가 없을 때만 그 오류를 올린다. 
+                # (원래 오류가 있으면 그것을 살리고, 정리 오류는 메모로 붙인다)
+                cleanup_errors = await self._finish(...)
+                if cleanup_errors and original is None:
+                    raise cleanup_errors[0] # 본 흐름은 성공했는데 정리가 실패한 경우만 정리 오류를 올린다
+                for e in cleanup_errors: # 원래 오류가 있으면 그것을 살리고, 정리 오류는 메모로 붙인다
+                    if original is not None:
+                        original.add_note(f"정리 중 오류: {e!r}")
 
     def check_end(
         self,
@@ -389,20 +401,31 @@ class Main:
         end_reason: EndReason | None,
         answer_message_id: str | None,
     ) -> None:
-        """실행 정리: 동의 되돌리기 → 메모 정리 → 실행 기록 마감."""
-        memo_final = await self._call(self.memo_manager.read_all)
-        if pd_table is not None:
+        """실행 정리. 한 단계가 실패해도 나머지 단계는 모두 시도하고, 생긴 오류를 돌려준다."""
+        errors: list[Exception] = []
+        try:
+            if pd_table is not None:
+                # 개인정보와 직결되므로 가장 먼저, 무조건 시도한다. (설계서 3.2)
+                await self._call(errors, self.consent_manager.release, run_id, pd_table)
+            memo_final = await self._call(self.memo_manager.read_all) # 최종 메모를 읽는다. (설계서 3.2), 실패하면 None
             # 이번 실행에서 동의로 허용한 항목을 다시 금지로 되돌린다.
-            await self._call(self.consent_manager.release, run_id, pd_table)
-        await self._call(self.memo_manager.clear)
-        await self._call(
-            self.chat_manager.finish_run,
-            run_id,
-            end_reason,
-            answer_message_id,
-            memo_final,
-        )
-        self._runs.pop(run_id, None)
+            await self._try(errors, self.memo_manager.clear)
+            await self._try(
+                errors, self.chat_manager.finish_run,
+                run_id, end_reason, answer_message_id, memo_final,
+            )
+
+        finally:
+            self._runs.pop(run_id, None) # 무슨 일이 있어도 진행 중 실행 목록에서 제거한다.
+        return errors
+
+    async def _try(self, errors: list[Exception], func, *args):
+        """_call과 같지만 예외를 errors에 모으고 None을 돌려준다. (정리 단계 전용)"""
+        try:
+            return await self._call(func, *args)
+        except Exception as error:
+            errors.append(error)
+            return None
 
     def _run_config(self) -> dict[str, Any]:
         """startRun()에 함께 저장할 이번 실행의 설정값."""
