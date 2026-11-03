@@ -7,6 +7,18 @@
 - **설계 5.4 ContextManager**: 실행별 인스턴스 안에서 채팅·작업별 컨텍스트 보관과 압축을 담당한다. 구현 파일은 [server/app/runtime/context_manager.py](../server/app/runtime/context_manager.py)다.
 - **공통 호출 대상**: 기존 [llama_wrapper.py](../src/localLLM_API_proxy/llama_wrapper.py)를 사용한다. 원격·로컬 선택과 인증은 래퍼가 담당한다.
 
+## 모듈별 사용 문서
+
+각 문서는 처리 흐름·호출 방법·설계서 대비 변경 사항을 설명한다.
+
+| 대상 | 인스턴스 기준 | 문서 |
+| --- | --- | --- |
+| 5.1 LocalLLMRunner | 프로그램당 1개 공유 | [모델 호출과 중지](local-llm-runner.md) |
+| 5.2 parser | 인스턴스 없이 함수 호출 | [결과 파싱](local-res-parser.md) |
+| 5.4 ContextManager | 사용하는 run_id마다 1개 | [컨텍스트 보관과 압축](context-manager.md) |
+| 공유 결과 타입 | 결과·항목마다 데이터 객체 생성 | [결과 모델](local-llm-outputs.md) |
+| PromptIdx | 공통 열거형 공유 | [작업 이름](enums.md) |
+
 ## 실행 환경
 
 **Python 3.12와 uv를 사용하고, 명령은 `server/`에서 실행한다.**
