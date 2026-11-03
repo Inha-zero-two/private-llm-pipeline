@@ -110,6 +110,11 @@ class PrivacySettings:
 `request(..., use_context=False)`의 bool 인자로 호출마다 지정합니다. True인 경우에만
 채팅·작업별 컨텍스트를 조회하고 정상 결과를 누적하며, 생성자 `context_tasks`는 사용하지 않습니다.
 
+같은 날 추가 결정으로 `regen(input_, system_prompt, use_context=False, context_id=None)`은
+기존 출력을 고치라는 지시를 붙이지 않고 같은 입력을 다시 생성합니다. 컨텍스트를 사용할 때는
+해당 ID의 이력을 읽기만 하며, 누적은 `request()`가 최종 성공 시 한 번만 수행합니다.
+원본 PDF의 `reGen()`에 이전 출력·오류 안내를 덧붙이는 설명은 이 결정으로 대체합니다.
+
 2026년 11월 3일 사용자 결정으로 5.2는 클래스와 `check()` 없이 모듈 함수 `parser()` 하나로 구현합니다.
 정상 결과만 반환하고 형식 오류는 `OutputFormatError`로 올립니다. Runner는 이 오류만 잡으며,
 `MAX_FORMAT_FAILURES=3`에 따라 최초 응답 포함 3회 형식 불일치면

@@ -252,7 +252,7 @@ class LocalLLMRunner:
                 )
             try:
                 parsed = parser(result[0], prompt_idx)
-            except OutputFormatError as exc:
+            except OutputFormatError:
                 if stop_signal.is_set():
                     return result[0], False, input_tokens, output_tokens, "stopped"
                 failures += 1
@@ -260,10 +260,10 @@ class LocalLLMRunner:
                     return None, False, input_tokens, output_tokens, "parse_failed"
                 # 파서의 형식 오류만 재시도한다. 래퍼·통신·코드 오류는 잡지 않는다.
                 regenerated = self.regen(
-                    model_input,
-                    result[0],
-                    str(exc),
+                    input_,
                     system_prompt,
+                    use_context=use_context,
+                    context_id=context_id,
                     max_tokens=max_tokens,
                     on_token=on_token,
                     _stop_signal=stop_signal,
@@ -276,7 +276,7 @@ class LocalLLMRunner:
             if stop_signal.is_set():
                 return result[0], False, input_tokens, output_tokens, "stopped"
             if context_id is not None:
-                # 유효한 최종 응답만 원문으로 남긴다. 실패한 생성문은 호출 로그에만 남는다.
+                # 입력과 유효한 최종 응답을 여기서 한 번만 누적한다. 재시도 중에는 추가하지 않는다.
                 self.context_manager.append(
                     context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
                 )
@@ -285,24 +285,29 @@ class LocalLLMRunner:
     def regen(
         self,
         input_: str,
-        previous_output: str,
-        error: str,
         system_prompt: str,
         *,
+        use_context: bool = False,
+        context_id: int | None = None,
         max_tokens: int = 2048,
         on_token: Callable[[str], None] | None = None,
         _stop_signal: Event | None = None,
     ) -> RequestResult:
-        """원래 입력 뒤에 직전 출력·형식 오류를 붙여 동일한 설정으로 재생성한다."""
-        revised = (
-            f"{input_}\n\nPrevious output:\n{previous_output}\n"
-            f"Format error:\n{error}\nRegenerate the output in the required format."
-        )
+        """기존 컨텍스트 사용 여부에 따라 같은 입력을 다시 생성한다. 이력은 추가하지 않는다."""
+        model_input = input_
+        if use_context:
+            if context_id is None:
+                raise ValueError("컨텍스트를 사용하는 재생성에는 context_id가 필요함")
+            context = self.context_manager.get_context(context_id)
+            if context:
+                model_input = (
+                    f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
+                )
         return self.manual_request(
-            revised,
+            model_input,
             system_prompt,
             max_tokens=max_tokens,
-            new_input=f"Previous output:\n{previous_output}\nFormat error:\n{error}",
+            new_input=input_,
             on_token=on_token,
             _stop_signal=_stop_signal,
         )

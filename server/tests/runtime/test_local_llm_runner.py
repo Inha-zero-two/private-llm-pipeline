@@ -288,13 +288,31 @@ def test_missing_prompt_dependency_fails_explicitly(runner: LocalLLMRunner) -> N
 
 
 def test_regen_keeps_original_input_and_system_prompt(runner: LocalLLMRunner) -> None:
-    runner.regen("original", "bad output", "schema error", "system", max_tokens=55)
+    runner.regen("original", "system", use_context=False, max_tokens=55)
     call = runner._llm.calls[-1]
     assert call["messages"][0]["content"] == "system"
     body = call["messages"][1]["content"]
-    assert body.startswith("original")
-    assert "bad output" in body and "schema error" in body
+    assert body == "original"
     assert call["max_tokens"] == 55
+
+
+def test_regen_reads_context_without_appending_or_adding_instructions(
+    runner: LocalLLMRunner,
+) -> None:
+    context_id = runner.context_manager.get_id("chat", "ANSWER")
+    runner.context_manager.append(context_id, "previous history")
+    runner.regen("original", "system", use_context=True, context_id=context_id)
+    assert runner._llm.calls[-1]["messages"][1]["content"] == (
+        "Previous context:\nprevious history\n\nCurrent input:\noriginal"
+    )
+    assert runner.context_manager.get_context(context_id) == "previous history"
+
+
+def test_regen_context_requires_id_before_generation(runner: LocalLLMRunner) -> None:
+    before = len(runner._llm.calls)
+    with pytest.raises(ValueError, match="context_id"):
+        runner.regen("original", "system", use_context=True)
+    assert len(runner._llm.calls) == before
 
 
 def test_close_and_invalid_generation_parameters(runner: LocalLLMRunner) -> None:
@@ -407,7 +425,7 @@ def test_only_import_change_accepts_native_llama_interface(
             system_prompt="system",
         )
         assert instance.context_manager.get_context_length(0) > 0
-        assert instance.regen("input", "old", "error", "system")[1]
+        assert instance.regen("input", "system")[1]
 
 
 def test_close_waits_for_receiver_before_freeing_model(
@@ -521,10 +539,7 @@ def test_request_and_regen_forward_body_tokens_only(runner: LocalLLMRunner) -> N
     assert result == ("AB", True, 7, 2, "stop")
     assert set(runner._llm.calls[-1]) == {"messages", "stream", "max_tokens"}
     pieces.clear()
-    assert (
-        runner.regen("input", "old", "error", "system", on_token=pieces.append)[0]
-        == "AB"
-    )
+    assert runner.regen("input", "system", on_token=pieces.append)[0] == "AB"
     assert pieces == ["A", "B"]
 
 
@@ -574,11 +589,61 @@ def test_request_retries_only_invalid_outputs_and_sums_usage(
     assert not generated_outputs
     for call in runner._llm.calls[1:]:
         assert call["messages"][0]["content"] == "system"
-        assert call["messages"][1]["content"].startswith("original")
+        assert call["messages"][1]["content"] == "original"
         assert call["max_tokens"] == 55
-    if failures:
-        assert "not json" in runner._llm.calls[-1]["messages"][1]["content"]
-        assert "Format error:" in runner._llm.calls[-1]["messages"][1]["content"]
+
+
+@pytest.mark.parametrize("use_context", [False, True])
+def test_retries_repeat_identical_input_and_commit_context_once(
+    runner: LocalLLMRunner,
+    generated_outputs: list[str | Exception],
+    use_context: bool,
+) -> None:
+    context_id = runner.context_manager.get_id("chat", "JUDGE")
+    previous = "\nUser: old question\nAssistant: old answer\n"
+    runner.context_manager.append(context_id, previous)
+    valid = '{"enough":true,"needConsent":false,"consentItems":[],"need":[]}'
+    generated_outputs.extend(
+        ["first invalid response", "second invalid response", valid]
+    )
+    original_stream = runner._llm.stream_factory
+
+    def check_context(call: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        assert runner.context_manager.get_context(context_id) == previous
+        yield from original_stream(call)
+
+    runner._llm.stream_factory = check_context
+    result = runner.request(
+        "run",
+        "new question",
+        "JUDGE",
+        "chat",
+        use_context=use_context,
+        system_prompt="same system",
+        max_tokens=55,
+    )
+    expected = (
+        f"Previous context:\n{previous}\n\nCurrent input:\nnew question"
+        if use_context
+        else "new question"
+    )
+    calls = runner._llm.calls[1:]
+    assert len(calls) == 3
+    assert all(
+        call["messages"]
+        == [
+            {"role": "system", "content": "same system"},
+            {"role": "user", "content": expected},
+        ]
+        for call in calls
+    )
+    assert result[1:] == (True, 21, 6, "stop")
+    context = runner.context_manager.get_context(context_id)
+    assert context == (
+        previous + f"\nUser: new question\nAssistant: {valid}\n"
+        if use_context
+        else previous
+    )
 
 
 def test_third_format_failure_returns_failure_without_fourth_generation_or_context_change(
