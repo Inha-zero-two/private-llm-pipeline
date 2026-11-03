@@ -126,22 +126,71 @@ def test_unknown_id_and_invalid_thresholds(
         ContextManager(runner, compaction_limit=3, compaction_target=3)
 
 
-def test_compaction_log_contains_time_and_summary_only(
+def test_compaction_log_receives_context_id_and_summary_after_commit(
     setup_context: tuple[ContextManager, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager, _ = setup_context
-    logged: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        manager, "_log_compaction", lambda time, result: logged.append((time, result))
-    )
+    logged: list[tuple[int, str]] = []
+
+    def log(context_id: int, result: str) -> None:
+        assert manager.get_context(context_id) == "short nine ten"
+        logged.append((context_id, result))
+
+    monkeypatch.setattr(manager, "_log_compaction", log)
     context_id = manager.new_id()
     manager.append(context_id, "one two three four five six seven eight")
     manager.append(context_id, " nine ten")
-    assert len(logged) == 1
-    occurred_at, result = logged[0]
-    assert occurred_at.endswith("+00:00")
-    assert result == "short"
-    assert "one two" not in str(logged)
+    assert logged == [(context_id, "short")]
+
+
+def test_record_only_once_for_nonempty_explicit_compaction(
+    setup_context: tuple[ContextManager, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, _ = setup_context
+    logged: list[tuple[int, str]] = []
+    context_id = manager.new_id()
+
+    def log(saved_id: int, result: str) -> None:
+        assert manager.get_context(saved_id) == result
+        logged.append((saved_id, result))
+
+    monkeypatch.setattr(manager, "_log_compaction", log)
+    manager.compact_context(context_id)
+    manager.append(context_id, "one two")
+    assert logged == []  # 빈 컨텍스트와 일반 append는 저장 연결점을 부르지 않는다.
+    manager.compact_context(context_id)
+    assert logged == [(context_id, "short")]
+
+
+@pytest.mark.parametrize(
+    "failure", ["exception", "stopped", "oversized", "empty", "still_too_large"]
+)
+def test_failed_compaction_does_not_record(
+    setup_context: tuple[ContextManager, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    manager, runner = setup_context
+    logged = []
+    monkeypatch.setattr(manager, "_log_compaction", lambda *args: logged.append(args))
+    context_id = manager.new_id()
+    original = "one two three four five six seven eight"
+    manager.append(context_id, original)
+    addition = " nine ten"
+    if failure == "exception":
+        runner.error = OSError("synthetic model failure")
+    elif failure == "stopped":
+        runner.success = False
+    elif failure == "oversized":
+        runner.summary = "one two three four"
+    elif failure == "empty":
+        runner.summary = ""
+    else:
+        addition = " a b c d e f g h i"
+    with pytest.raises((OSError, RuntimeError, ValueError)):
+        manager.append(context_id, addition)
+    assert manager.get_context(context_id) == original
+    assert logged == []
 
 
 def test_default_28k_boundary_and_5k_target() -> None:

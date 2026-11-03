@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from threading import RLock
 from typing import TYPE_CHECKING
 
@@ -32,8 +31,8 @@ class ContextManager:
         self._ids: dict[tuple[str, str | int], int] = {}
         self._next_id = 0
         self._lock = RLock()
-        # TODO 6.3: contexts = self.chat_manager.load_contexts()
-        # DB 모듈 미구현: 현재는 인스턴스 메모리에만 보존한다.
+        # 대화 컨텍스트는 인스턴스 메모리에만 보존한다.
+        # DB 기록 연결점은 압축 결과가 실제로 반영된 때에만 호출한다.
 
     def new_id(self) -> int:
         with self._lock:
@@ -73,8 +72,7 @@ class ContextManager:
                     raise ValueError("New context is too large even after compaction")
             self._contexts[context_id] = candidate
             if summary is not None:
-                self._log_compaction(datetime.now(UTC).isoformat(), summary)
-            # TODO 6.3: self.chat_manager.save_context(context_id, candidate)
+                self._log_compaction(context_id, summary)
 
     def compact_context(self, context_id: int) -> None:
         with self._lock:
@@ -83,8 +81,7 @@ class ContextManager:
                 return
             summary = self._compact_text(current)
             self._contexts[context_id] = summary
-            self._log_compaction(datetime.now(UTC).isoformat(), summary)
-            # TODO 6.3: self.chat_manager.save_context(context_id, self._contexts[context_id])
+            self._log_compaction(context_id, summary)
 
     def _compact_text(self, text: str) -> str:
         system_prompt = (
@@ -103,9 +100,13 @@ class ContextManager:
             raise RuntimeError("Context summary exceeds its token target")
         return summary
 
-    def _log_compaction(self, occurred_at: str, result: str) -> None:
-        """압축이 반영된 시점과 결과만 전달할 로그 저장 스켈레톤."""
-        # TODO: self.chat_manager.log_event(
-        #     None, "context_compacted", {"occurred_at": occurred_at, "result": result}
+    def _log_compaction(self, context_id: int, result: str) -> None:
+        """압축 반영 후 messages에 결과 한 건을 남길 연결점. 실제 저장은 미구현이다."""
+        # TODO 6.3: get_id()로 채팅에 연결된 컨텍스트의 chat_id를 찾는다.
+        # chat_id = next(
+        #     chat for (chat, _), saved_id in self._ids.items() if saved_id == context_id
         # )
-        # 압축 대상 원문은 저장하지 않는다. 압축용 manual_request의 일반 로그도 끈다.
+        # self.chat_manager.save_message(chat_id, "context_compacted", result)
+        # role로 압축 기록을 구분하고, content에는 압축 결과만 넣는다.
+        # createdAt은 ChatManager가 기록한다. 독립 new_id()는 먼저 채팅 귀속이 필요하다.
+        # 압축 원문은 저장하지 않는다. 일반 LLM 호출 로그도 log_call=False로 생략한다.

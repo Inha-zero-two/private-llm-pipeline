@@ -115,6 +115,11 @@ class PrivacySettings:
 해당 ID의 이력을 읽기만 하며, 누적은 `request()`가 최종 성공 시 한 번만 수행합니다.
 원본 PDF의 `reGen()`에 이전 출력·오류 안내를 덧붙이는 설명은 이 결정으로 대체합니다.
 
+같은 날 5.4의 압축 기록은 전용 컨텍스트 테이블 대신 `messages`를 사용하기로 결정했습니다.
+성공한 압축 결과를 반영한 뒤에만 `ChatManager.save_message(chat_id, "context_compacted", result)`를
+한 번 호출할 예정이며, `role`로 구분하고 `content`에는 요약만 넣습니다. 시각은 ChatManager가
+`createdAt`에 기록합니다. 현재 호출은 주석 상태이며 일반 추가의 DB 저장·복원은 하지 않습니다.
+
 2026년 11월 3일 사용자 결정으로 5.2는 클래스와 `check()` 없이 모듈 함수 `parser()` 하나로 구현합니다.
 정상 결과만 반환하고 형식 오류는 `OutputFormatError`로 올립니다. Runner는 이 오류만 잡으며,
 `MAX_FORMAT_FAILURES=3`에 따라 최초 응답 포함 3회 형식 불일치면
