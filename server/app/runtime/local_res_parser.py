@@ -97,7 +97,14 @@ OUTPUT_FORMAT: dict[PromptIdx, tuple[TypeAdapter[ParsedResult], str | None] | No
 
 
 def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
-    """정상이면 결과만 반환하고, JSON·필드·타입 오류는 OutputFormatError로 올린다."""
+    """모델 원문을 작업별 형식으로 검사하고 텍스트·객체·목록 중 해당 값을 반환한다.
+
+    텍스트 작업은 빈 출력만 검사해 원문을 유지하고, JSON 작업은 바깥 코드 블록을
+    제거한 뒤 한 번 읽어 필수 필드와 자료형을 엄격하게 검사한다.
+    출력 형식 오류는 OutputFormatError, 알 수 없거나 외부 모델용인 작업은 ValueError다.
+    재생성·로그·컨텍스트 누적은 이 함수를 호출하는 Runner가 담당한다.
+    """
+    # 1. 작업을 확인하고 텍스트 응답은 원문 그대로 반환한다.
     prompt_idx = PromptIdx(prompt_idx)
     if prompt_idx not in OUTPUT_FORMAT:
         # FRONTIER는 외부 모델용 프롬프트다. 설정 오류를 재생성으로 감추지 않는다.
@@ -108,6 +115,7 @@ def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
     if output_format is None:
         return raw_output  # 텍스트의 줄바꿈·들여쓰기는 그대로 보존한다.
 
+    # 2. JSON 전체를 감싼 코드 블록만 제거한다. 설명문 속 JSON은 추출하지 않는다.
     source = raw_output.strip()
     # JSON 문자열 안의 U+0085/U+2028/U+2029를 줄바꿈으로 바꾸지 않는다.
     lines = source.split("\n")
@@ -118,6 +126,7 @@ def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
     ):
         source = "\n".join(lines[1:-1])
 
+    # 3. JSON을 한 번 읽고 작업별 반환값이 들어 있는 필드를 꺼낸다.
     try:
         data = json.loads(source)
     except (ValueError, RecursionError) as exc:
@@ -131,6 +140,7 @@ def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
         if field not in data:
             raise OutputFormatError(f"{field} 항목이 없음")
         data = data[field]
+    # 4. 작업별 타입으로 검증하고 검증된 값만 반환한다.
     try:
         # '1'·true를 정수로 바꾸는 등의 자동 타입 보정은 하지 않는다.
         return adapter.validate_python(data, strict=True)

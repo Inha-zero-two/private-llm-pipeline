@@ -29,6 +29,11 @@ class LocalLLMRunner:
         model_path: str = "models/gemma.gguf",
         timeout: float = 120.0,
     ) -> None:
+        """프로그램에서 공유할 모델 하나와 실행별 컨텍스트 보관소를 준비한다.
+
+        timeout은 생성 한 번의 전체 대기시간이다. 초기화 중 짧은 생성 요청으로
+        실제 응답을 확인하며, 모델 준비나 응답 확인 실패는 호출자에게 전파한다.
+        """
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self._model_path = model_path
@@ -43,7 +48,11 @@ class LocalLLMRunner:
         self.model_load()
 
     def get_context_manager(self, run_id: str) -> ContextManager:
-        """같은 실행에는 같은 관리자, 다른 실행에는 별도 관리자를 반환한다."""
+        """run_id에 연결된 ContextManager를 조회하고 없으면 생성한다.
+
+        같은 실행은 같은 인스턴스를 재사용하며, 실행별 관리자는 이 Runner의
+        모델을 공유한다. 잠금 안에서 조회·생성해 같은 실행의 중복 생성을 막는다.
+        """
         from .context_manager import ContextManager
 
         with self._state_lock:
@@ -52,7 +61,11 @@ class LocalLLMRunner:
             return self.context_managers[run_id]
 
     def model_load(self) -> bool:
-        """공통 Llama 생성자로 모델을 준비하고 실제 생성 응답을 확인한다."""
+        """공통 Llama 생성자로 모델을 준비하고 짧은 응답을 확인한 뒤 True를 반환한다.
+
+        이미 준비된 모델은 재사용한다. 새 모델은 최대 32토큰의 요청으로 확인하고,
+        이 확인이 실패하면 자원을 닫고 원래 예외를 다시 던진다.
+        """
         if self._closed:
             raise RuntimeError("Runner is closed")
         if self._llm is not None:
@@ -89,9 +102,12 @@ class LocalLLMRunner:
         on_token: Callable[[str], None] | None = None,
         interruptible: bool = True,
     ) -> RequestResult:
-        """직접 받은 입력·시스템 프롬프트로 생성하고 일반 호출 로그를 남긴다.
+        """입력과 시스템 프롬프트를 그대로 사용해 한 번 생성하고 원문을 반환한다.
 
-        압축 호출은 log_call=False, interruptible=False로 끝까지 수신한다.
+        반환은 (원문, 성공 여부, 입력 토큰, 출력 토큰, 종료 사유)이며,
+        알 수 없는 토큰 수는 None이다. 컨텍스트 조회·누적과 결과 파싱은 수행하지 않는다.
+        일반 호출은 오류·중지를 포함해 로그 연결점을 거친다. 압축 호출은
+        log_call=False로 일반 로그를 끄고 interruptible=False로 stop을 보류한다.
         """
         output: list[str] = []
         started = monotonic()
@@ -127,7 +143,13 @@ class LocalLLMRunner:
         stop_signal: Event | None = None,
         interruptible: bool = True,
     ) -> RequestResult:
-        """공통 스트리밍 수신. 파싱·컨텍스트·로그는 호출한 공개 함수가 처리한다."""
+        """별도 스레드로 스트림을 수신하고 본문·사용량·종료 사유를 모은다.
+
+        output에 받은 본문을 누적하고 on_token에는 본문 청크를 즉시 전달한다.
+        중지하면 수신한 부분 원문과 stopped를 반환하며, 수신 오류는 다시 던진다.
+        interruptible=False는 stop만 보류하고 호출 시간 제한은 유지한다.
+        파싱·컨텍스트 누적·로그 기록은 이 함수를 호출한 공개 함수가 담당한다.
+        """
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
         if not self._busy.acquire(blocking=False):
@@ -148,6 +170,11 @@ class LocalLLMRunner:
         events: Queue[dict[str, Any] | Exception | None] = Queue()
 
         def receive() -> None:
+            """모델의 청크와 예외를 큐로 전달하고, 스트림 정리 후 None으로 끝을 알린다.
+
+            네트워크 수신을 별도 스레드에서 수행해 호출 측이 stop을 확인할 수 있게 한다.
+            모델 접근 잠금은 이 스레드가 실제 수신을 마친 뒤 해제한다.
+            """
             try:
                 if interruptible and stop_signal.is_set():
                     return
@@ -216,6 +243,7 @@ class LocalLLMRunner:
                     if piece:
                         text.append(piece)
                         if on_token is not None:
+                            # 한 청크에는 여러 토큰이 들어갈 수 있다.
                             on_token(piece)
                     finish_reason = choices[0].get("finish_reason") or finish_reason
         finally:
@@ -234,7 +262,14 @@ class LocalLLMRunner:
         max_tokens: int = 2048,
         on_token: Callable[[str], None] | None = None,
     ) -> ParsedRequestResult:
-        """파싱 결과와 사용량을 반환한다. 형식 불일치가 3회면 실패값을 반환한다."""
+        """작업별로 생성·파싱하고 선택한 실행의 컨텍스트에 최종 대화를 누적한다.
+
+        use_context=True이면 run_id와 채팅·작업으로 기존 이력을 찾는다.
+        형식 오류는 같은 입력으로 최초 포함 3회까지 생성하고 각 시도를 로그 연결점에 전달한다.
+        성공하면 (파싱 결과, True, 누적 입력 토큰, 누적 출력 토큰, 종료 사유),
+        3회 형식 실패면 (None, False, 누적 입력 토큰, 누적 출력 토큰, parse_failed)를 반환한다.
+        중지는 부분 원문을 반환하고, 파싱 형식 오류 이외의 호출 오류는 전파한다.
+        """
         prompt_idx = PromptIdx(prompt_idx)
         # TODO 6.1: system_prompt, prompt_version = self.prompt_manager.get_prompt(prompt_idx)
         # PromptManager는 (프롬프트 본문, 버전)을 함께 반환한다. 현재는 인자로 전달한다.
@@ -255,6 +290,7 @@ class LocalLLMRunner:
                 model_input = (
                     f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                 )
+        # 재시도에서도 이 입력을 재사용해 같은 요청이 이력에 여러 번 쌓이지 않게 한다.
         # 최초 생성·파싱·재생성이 같은 중지 신호를 사용한다.
         stop_signal = Event()
         input_tokens: int | None = 0
@@ -338,7 +374,12 @@ class LocalLLMRunner:
         max_tokens: int = 2048,
         on_token: Callable[[str], None] | None = None,
     ) -> RequestResult:
-        """기존 컨텍스트 사용 여부에 따라 같은 입력을 다시 생성한다. 이력은 추가하지 않는다."""
+        """같은 입력·시스템 프롬프트로 한 번 더 생성하고 수동 호출과 같은 튜플을 반환한다.
+
+        use_context=True이면 run_id의 context_id에 저장된 이력을 입력 앞에 붙인다.
+        이전 출력이나 수정 지시를 추가하지 않으며, 파싱과 이력 누적도 수행하지 않는다.
+        로그에는 기존 이력을 제외한 이번 입력과 새 원문 응답만 전달한다.
+        """
         model_input = input_
         if use_context:
             if context_id is None:
@@ -382,7 +423,11 @@ class LocalLLMRunner:
         elapsed_ms: float,
         format_valid: bool | None,
     ) -> None:
-        """호출 메타데이터와 새 입력·출력의 저장 연결점. 실제 DB 모듈은 미구현이다."""
+        """생성 한 번의 메타데이터와 새 입력·출력을 저장할 연결점이다.
+
+        실행·작업·프롬프트 버전·소요 시간·형식 검사 결과를 llm_call에 전달할 자리다.
+        아직 ChatManager 호출은 주석 상태이므로 실제 DB 저장은 수행하지 않는다.
+        """
         # TODO: self.chat_manager.log_event(
         #     run_id, "llm_call", {
         #         "prompt_idx": prompt_idx, "prompt_version": prompt_version,
@@ -394,18 +439,31 @@ class LocalLLMRunner:
         # 컨텍스트 전체/시스템 프롬프트/인증키를 이 payload에 추가하지 않는다.
 
     def tokenize(self, text: str) -> list[int]:
-        """5.4에서도 동일한 모델의 실제 토크나이저를 사용한다."""
+        """문자열을 생성 모델과 같은 토크나이저로 변환해 토큰 ID 목록을 반환한다.
+
+        ContextManager는 이 목록의 길이로 컨텍스트 사용량을 계산한다.
+        모델 접근 잠금을 사용하므로 진행 중인 수신이 정리될 때까지 기다릴 수 있다.
+        """
         with self._busy:
             if self._closed:
                 raise RuntimeError("Runner is closed")
             return self._llm.tokenize(text.encode("utf-8"), add_bos=False, special=True)
 
     def stop(self) -> None:
-        """중지 신호만 설정하므로 수신 스레드의 네트워크 응답을 기다리지 않는다."""
+        """다른 스레드에서도 현재 요청의 중지 신호를 설정하고 즉시 반환한다.
+
+        생성 함수가 신호를 확인하면 받은 부분 원문을 반환한다. 진행 중인 압축은
+        완료 후 반영하며, 원격 서버의 추론 자체를 취소하는 기능은 아니다.
+        """
         with self._state_lock:
             self._stop_event.set()
 
     def close(self) -> None:
+        """Runner를 닫힌 상태로 바꾸고 진행 중인 수신 정리 후 모델 자원을 해제한다.
+
+        중지 신호를 먼저 보내며, 모델 접근 잠금을 얻을 때까지 기다린다.
+        프로그램 종료 시 호출하고 이후에는 이 인스턴스로 새 요청을 시작하지 않는다.
+        """
         with self._state_lock:
             self._closed = True
             self._stop_event.set()
@@ -416,7 +474,9 @@ class LocalLLMRunner:
                 self._llm.close()
 
     def __enter__(self) -> LocalLLMRunner:
+        """with 문에서 사용할 Runner 자신을 반환한다. 모델 준비는 생성자가 수행한다."""
         return self
 
     def __exit__(self, *_: object) -> None:
+        """with 블록을 나갈 때 close를 호출한다. 블록에서 발생한 예외는 억제하지 않는다."""
         self.close()
