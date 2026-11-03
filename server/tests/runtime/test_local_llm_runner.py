@@ -217,19 +217,69 @@ def test_total_wait_has_timeout_even_without_chunks(runner: LocalLLMRunner) -> N
 def test_request_context_is_opt_in_and_failed_generation_does_not_append(
     runner: LocalLLMRunner,
 ) -> None:
-    runner.context_tasks = frozenset({"ANSWER"})
-    runner.request("r1", "first", "ANSWER", "chat", system_prompt="system")
-    runner.request("r2", "second", "ANSWER", "chat", system_prompt="system")
+    runner.request(
+        "r1", "first", "ANSWER", "chat", use_context=True, system_prompt="system"
+    )
+    runner.request(
+        "r2", "second", "ANSWER", "chat", use_context=True, system_prompt="system"
+    )
     assert "first" in runner._llm.calls[-1]["messages"][1]["content"]
     context_id = runner.context_manager.get_id("chat", "ANSWER")
     original = runner.context_manager.get_context(context_id)
     runner._llm.stream_factory = lambda _: iter(())
     with pytest.raises(RuntimeError):
-        runner.request("r3", "failed", "ANSWER", "chat", system_prompt="system")
+        runner.request(
+            "r3", "failed", "ANSWER", "chat", use_context=True, system_prompt="system"
+        )
     assert runner.context_manager.get_context(context_id) == original
     runner._llm.stream_factory = normal_stream
-    runner.request("r4", "stateless", "WRITE", "chat", system_prompt="system")
+    runner.request(
+        "r4", "stateless", "ANSWER", "chat", use_context=False, system_prompt="system"
+    )
     assert runner._llm.calls[-1]["messages"][1]["content"] == "stateless"
+    assert runner.context_manager.get_context(context_id) == original
+    runner.request(
+        "r5", "again", "ANSWER", "chat", use_context=True, system_prompt="system"
+    )
+    model_input = runner._llm.calls[-1]["messages"][1]["content"]
+    assert "first" in model_input and "stateless" not in model_input
+
+
+def test_context_is_unused_by_default_even_when_history_exists(
+    runner: LocalLLMRunner,
+) -> None:
+    context_id = runner.context_manager.get_id("chat", "ANSWER")
+    runner.context_manager.append(context_id, "existing history")
+    runner.request("run", "new", "ANSWER", "chat", system_prompt="system")
+    assert runner._llm.calls[-1]["messages"][1]["content"] == "new"
+    assert runner.context_manager.get_context(context_id) == "existing history"
+
+
+def test_context_free_call_does_not_access_context_manager(
+    runner: LocalLLMRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected(*_: object) -> None:
+        pytest.fail("use_context=False must not read or append context")
+
+    monkeypatch.setattr(runner.context_manager, "get_id", unexpected)
+    monkeypatch.setattr(runner.context_manager, "append", unexpected)
+    assert (
+        runner.request(
+            None, "one shot", "ANSWER", None, use_context=False, system_prompt="system"
+        )[0]
+        == "OK"
+    )
+
+
+def test_context_enabled_call_requires_chat_before_generation(
+    runner: LocalLLMRunner,
+) -> None:
+    before = len(runner._llm.calls)
+    with pytest.raises(ValueError, match="chat_id"):
+        runner.request(
+            "run", "input", "ANSWER", None, use_context=True, system_prompt="system"
+        )
+    assert len(runner._llm.calls) == before
 
 
 def test_missing_prompt_dependency_fails_explicitly(runner: LocalLLMRunner) -> None:
@@ -264,9 +314,17 @@ def test_log_hook_gets_only_new_input_and_can_be_disabled(
     monkeypatch.setattr(
         runner, "_log_call", lambda text, output: logged.append((text, output))
     )
-    runner.context_tasks = frozenset({"ANSWER"})
-    runner.request("r1", "old secret context", "ANSWER", "chat", system_prompt="system")
-    runner.request("r2", "new question", "ANSWER", "chat", system_prompt="system")
+    runner.request(
+        "r1",
+        "old secret context",
+        "ANSWER",
+        "chat",
+        use_context=True,
+        system_prompt="system",
+    )
+    runner.request(
+        "r2", "new question", "ANSWER", "chat", use_context=True, system_prompt="system"
+    )
     assert logged == [("old secret context", "OK"), ("new question", "OK")]
     assert "old secret context" in runner._llm.calls[-1]["messages"][1]["content"]
     runner.manual_request("compression source", "system", log_call=False)
@@ -332,9 +390,7 @@ def test_only_import_change_accepts_native_llama_interface(
     swapped = ModuleType("app.runtime.native_import_test")
     swapped.__package__ = "app.runtime"
     exec(compile(tree, runner_module.__file__, "exec"), swapped.__dict__)
-    with swapped.LocalLLMRunner(
-        model_path="test-model.gguf", context_tasks=frozenset({"ANSWER"})
-    ) as instance:
+    with swapped.LocalLLMRunner(model_path="test-model.gguf") as instance:
         assert instance.manual_request("input", "system") == (
             "OK",
             True,
@@ -342,7 +398,14 @@ def test_only_import_change_accepts_native_llama_interface(
             None,
             "stop",
         )
-        instance.request("run", "new input", "ANSWER", "chat", system_prompt="system")
+        instance.request(
+            "run",
+            "new input",
+            "ANSWER",
+            "chat",
+            use_context=True,
+            system_prompt="system",
+        )
         assert instance.context_manager.get_context_length(0) > 0
         assert instance.regen("input", "old", "error", "system")[1]
 
@@ -521,11 +584,12 @@ def test_request_retries_only_invalid_outputs_and_sums_usage(
 def test_third_format_failure_returns_failure_without_fourth_generation_or_context_change(
     runner: LocalLLMRunner, generated_outputs: list[str | Exception]
 ) -> None:
-    runner.context_tasks = frozenset({"JUDGE"})
     context_id = runner.context_manager.get_id("chat", "JUDGE")
     runner.context_manager.append(context_id, "original history")
     generated_outputs.extend(["not json", "{}", '{"enough":true}', "unused"])
-    result = runner.request("run", "new input", "JUDGE", "chat", system_prompt="system")
+    result = runner.request(
+        "run", "new input", "JUDGE", "chat", use_context=True, system_prompt="system"
+    )
     assert result == (None, False, 21, 6, "parse_failed")
     assert len(runner._llm.calls) == 4
     assert generated_outputs == ["unused"]
@@ -535,10 +599,11 @@ def test_third_format_failure_returns_failure_without_fourth_generation_or_conte
 def test_context_receives_only_valid_final_raw_response(
     runner: LocalLLMRunner, generated_outputs: list[str | Exception]
 ) -> None:
-    runner.context_tasks = frozenset({"JUDGE"})
     valid = '{"enough":true,"needConsent":false,"consentItems":[],"need":[]}'
     generated_outputs.extend(["bad output", valid])
-    result = runner.request("run", "input", "JUDGE", "chat", system_prompt="system")
+    result = runner.request(
+        "run", "input", "JUDGE", "chat", use_context=True, system_prompt="system"
+    )
     assert isinstance(result[0], Plan)
     assert result[0].enough is True
     assert (
@@ -584,7 +649,6 @@ def test_stop_during_format_retry_does_not_parse_retry_or_append(
 ) -> None:
     emitted, release, cleaned = Event(), Event(), Event()
     results = []
-    runner.context_tasks = frozenset({"GUARD"})
 
     def stream(_: dict[str, Any]) -> Iterator[dict[str, Any]]:
         if len(runner._llm.calls) == 2:
@@ -605,7 +669,13 @@ def test_stop_during_format_retry_does_not_parse_retry_or_append(
     call = Thread(
         target=lambda: results.append(
             runner.request(
-                "run", "input", "GUARD", "chat", system_prompt="system", on_token=show
+                "run",
+                "input",
+                "GUARD",
+                "chat",
+                use_context=True,
+                system_prompt="system",
+                on_token=show,
             )
         )
     )

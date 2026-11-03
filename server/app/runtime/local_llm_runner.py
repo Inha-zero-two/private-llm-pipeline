@@ -23,8 +23,6 @@ ParsedRequestResult = tuple[ParsedResult | None, bool, int | None, int | None, s
 # 최초 응답을 포함한 형식 불일치 횟수. 요청문 누출 재작성 상한과는 별개다.
 MAX_FORMAT_FAILURES = 3
 N_CTX = 32768
-CONTEXT_TASKS: frozenset[str | int] = frozenset()
-# 작업별 PromptIdx 정책은 아직 없으므로 호출자가 context_tasks로 지정한다.
 
 
 class LocalLLMRunner:
@@ -33,7 +31,6 @@ class LocalLLMRunner:
         *,
         model_path: str = "models/gemma.gguf",
         timeout: float = 120.0,
-        context_tasks: frozenset[str | int] = CONTEXT_TASKS,
         context_manager: ContextManager | None = None,
     ) -> None:
         if timeout <= 0:
@@ -45,7 +42,6 @@ class LocalLLMRunner:
         self._stop_event = Event()
         self._closed = False
         self._llm: Any = None
-        self.context_tasks = context_tasks
         self.model_load()
         from .context_manager import ContextManager
 
@@ -197,6 +193,7 @@ class LocalLLMRunner:
         prompt_idx: PromptIdx | str,
         chat_id: str | None,
         *,
+        use_context: bool = False,
         system_prompt: str | None = None,
         max_tokens: int = 2048,
         on_token: Callable[[str], None] | None = None,
@@ -210,7 +207,7 @@ class LocalLLMRunner:
             )
         context_id = None
         model_input = input_
-        if prompt_idx in self.context_tasks:
+        if use_context:
             if chat_id is None:
                 raise ValueError("컨텍스트를 사용하는 작업에는 chat_id가 필요함")
             context_id = self.context_manager.get_id(chat_id, prompt_idx)

@@ -106,6 +106,10 @@ class PrivacySettings:
 
 `reGen()`은 요청문 재작성의 `regenLimit`과 맞춰 `regen`을 한 단어로 봅니다.
 
+2026년 11월 3일 사용자 결정으로 5.1의 컨텍스트 사용 여부는 작업 목록 대신
+`request(..., use_context=False)`의 bool 인자로 호출마다 지정합니다. True인 경우에만
+채팅·작업별 컨텍스트를 조회하고 정상 결과를 누적하며, 생성자 `context_tasks`는 사용하지 않습니다.
+
 2026년 11월 3일 사용자 결정으로 5.2는 클래스와 `check()` 없이 모듈 함수 `parser()` 하나로 구현합니다.
 정상 결과만 반환하고 형식 오류는 `OutputFormatError`로 올립니다. Runner는 이 오류만 잡으며,
 `MAX_FORMAT_FAILURES=3`에 따라 최초 응답 포함 3회 형식 불일치면
