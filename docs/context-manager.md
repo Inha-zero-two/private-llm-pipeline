@@ -29,7 +29,7 @@ flowchart TD
 - 요약 요청에도 이 객체의 run_id 전달. `runner.stop(run_id)`로 중지 신호를 받아도 요약 완료까지 수신
 - 일반 요청 로그를 생략하고 저장된 요약으로 별도 로그 함수 호출. 실제 데이터베이스 저장 코드는 미구현
 - length 종료는 같은 입력으로 최초 포함 최대 3회 요청. 모두 잘리면 False 반환, 기존 대화 유지 및 요약 로그 생략. 요청 오류·나머지 생성 실패·빈 요약은 예외 전달
-- 새 내용만으로 입력 한도에 도달하거나 요약 후 합산 내용도 한도 이상인 경우 예외 발생. 기존 대화 유지
+- 새 입력·답변만으로 저장 한도에 도달하거나 요약 후에도 한도 이상이면 append에서 False 반환. 기존 대화 유지 및 요약 로그 생략. Runner는 기존 length_failed 실패 튜플로 전달
 
 ## 사용법과 입출력
 
@@ -50,7 +50,7 @@ summary = manager.get_context(context_id)
 | `new_id()` | 채팅·작업에 연결하지 않은 새 대화 번호 발급 |
 | `get_context(context_id)` | 해당 대화 번호에 저장된 문자열 반환 |
 | `get_context_length(context_id)` | 저장된 대화를 응답 생성 모델 기준으로 토큰화해 토큰 수 반환 |
-| `append(context_id, text)` | 새 내용 추가 후 토큰 한도에 따라 기존 대화 요약. 성공 시 True, length로 3회 실패 시 False |
+| `append(context_id, text)` | 새 내용 추가 후 토큰 한도에 따라 기존 대화 요약. 성공 시 True, 새 내용의 길이 초과 또는 length로 3회 실패 시 False |
 | `compact_context(context_id)` | 저장된 대화를 바로 요약. 성공 또는 빈 대화는 True, length로 3회 실패 시 False. 결과는 get_context로 조회 |
 
 - `ContextManager(runner, run_id, ...)`로 객체를 직접 만들 경우 request 호출 전에 `runner.context_managers[run_id]`에 등록. 기본 설정으로 사용할 때는 get_context_manager로 조회
@@ -63,5 +63,5 @@ summary = manager.get_context(context_id)
 - **자동 요약 시점:** 설계 37쪽의 기존 대화 길이만 검사하는 방식에서 새 내용과 요약 출력 예산도 포함하는 방식으로 변경. 실제 요약 요청은 `_compact_text()`에서 처리
 - **요약 길이:** 목표와 최대 응답은 모두 5,000토큰. length로 잘린 요약은 저장하지 않고 최대 3회 요청
 - **중지 처리:** `runner.stop(manager.run_id)`로 해당 실행에 중지 요청. 요약이 정상 완료되면 메모리에 반영하고 이미 완성된 입력·답변 유지. 자동 요약은 이후 request에서 stopped 반환하며, 직접 호출한 compact_context는 처리 결과를 bool로 반환
-- **반환값:** 설계서의 반환값 없음에서 성공 여부를 bool로 반환하도록 변경. length 재시도 실패 시 False로 구분하고 요약 결과는 get_context로 조회
+- **반환값:** 설계서의 반환값 없음에서 성공 여부를 bool로 반환하도록 변경. 새 내용의 길이 초과 또는 length 재시도 실패 시 False로 구분하고 요약 결과는 get_context로 조회
 - **데이터베이스 기록:** 최신 [테이블 구조](db-schema.md)에 따라 별도 컨텍스트 테이블은 사용하지 않음. 요약 반영 후 `messages.role="context_compacted"`, `content=요약`으로 한 번 저장할 코드를 주석 처리. 저장 시각은 ChatManager에서 createdAt에 기록할 예정. 요약 전 원문은 저장하지 않으며, new_id로 직접 발급한 대화 번호는 먼저 채팅과 연결 필요

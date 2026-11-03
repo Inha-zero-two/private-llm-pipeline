@@ -94,7 +94,8 @@ class ContextManager:
 
         새 내용은 요약하지 않고 유지. 요약 결과와 새 내용을 합쳐 토큰 수 다시 확인.
         검사 통과 후 메모리의 대화를 교체하고 요약 로그 함수 한 번 호출.
-        성공 시 True. 요약이 출력 상한으로 3회 잘리면 기존 대화를 유지하고 False 반환.
+        성공 시 True. 새 내용이 너무 길거나 요약이 출력 상한으로 3회 잘리면
+        기존 대화를 유지하고 False 반환.
         요청 오류는 예외 전달. 교체 전 오류 발생 시 기존 대화 유지.
         """
         with self._lock:
@@ -104,13 +105,13 @@ class ContextManager:
             # 새 내용을 포함한 토큰 수 확인
             if len(self._runner.tokenize(candidate)) >= self._limit:
                 if not current:
-                    raise ValueError("New context alone reaches the compaction limit")
+                    return False
                 summary = self._compact_text(current)
                 if summary is None:
                     return False
                 candidate = summary + additional_context
                 if len(self._runner.tokenize(candidate)) >= self._limit:
-                    raise ValueError("New context is too large even after compaction")
+                    return False
             self._contexts[context_id] = candidate
             if summary is not None:
                 self._log_compaction(context_id, summary)
