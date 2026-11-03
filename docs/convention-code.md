@@ -30,10 +30,9 @@ private-llm-pipeline/
 
 ```
 server/
-├── app/
+└── app/
 │   ├── main.py                 컨트롤러 (단계 순서 · 종료 조건)
 │   ├── api/                    화면 ↔ 서버 API · SSE
-│   ├── models/                 여러 모듈이 같이 쓰는 데이터 구조 · 열거형
 │   ├── pipeline/               파이프라인 핵심 모듈
 │   │   ├── planner.py
 │   │   ├── request_writer.py
@@ -52,14 +51,11 @@ server/
 │       ├── prompt_manager.py
 │       ├── memo_manager.py
 │       └── chat_manager.py
-└── tests/
-    ├── pipeline/
-    │   └── test_planner.py
-    └── ...
 ```
 
 - 모듈 하나는 파일 하나입니다. 파일 이름은 모듈 이름을 snake_case로 씁니다. (`LeakGuard` → `leak_guard.py`)
-- 테스트는 `tests/` 아래에 `app/`과 **같은 폴더 구조**로 두고, 파일 이름은 `test_` + 모듈 파일 이름입니다.
+- 각 모듈 문서는 `docs/`에 하나만 둡니다. 관련 타입·열거형은 담당 모듈 파일 안에 함께 정의합니다.
+- 요청받은 코드와 문서만 추가합니다. 이번 모듈의 테스트는 레포지토리 외부에서 작성·실행합니다.
 
 ## 모듈 사이 데이터 형식
 
@@ -82,12 +78,8 @@ class Rule(BaseModel):
 
 ### 각 모듈에서 주고받는 데이터 형식
 
-| 구분 | 위치 | 예시 |
-| --- | --- | --- |
-| 두 모듈 이상이 주고받는 것 | `app/models/` | `EndReason`, `PromptIdx` → `app/models/enums.py` |
-| 한 모듈 안에서만 쓰는 것 | 그 모듈 파일 안 | `Rule`을 PrivacySettings만 쓰면 `privacy_settings.py` 안 |
-
-처음엔 모듈 안에 뒀다가 다른 모듈도 쓰게 되면 `app/models/`로 옮깁니다.
+자료형은 담당 모듈 파일에 정의하고, 다른 모듈은 그 위치에서 가져옵니다.
+예를 들어 `PromptIdx`와 파싱 결과 타입은 `app/runtime/local_res_parser.py`에 함께 둡니다.
 
 ### 타입 힌트는 필수
 

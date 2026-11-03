@@ -9,10 +9,7 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from app.models.enums import PromptIdx
-from app.models.local_llm_outputs import ParsedResult
-
-from .local_res_parser import OutputFormatError, parser
+from .local_res_parser import OutputFormatError, ParsedResult, PromptIdx, parser
 
 if TYPE_CHECKING:
     from .context_manager import ContextManager

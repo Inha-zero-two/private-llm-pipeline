@@ -1,6 +1,6 @@
 # ContextManager 사용과 처리 흐름
 
-**대상:** [context_manager.py](../server/app/runtime/context_manager.py)의 `ContextManager`. 설계 5.4에 대응하며 로컬 모델의 대화 이력을 보관하고 압축한다. 코드 기준은 `7b0b2f8`이다.
+**대상:** [context_manager.py](../server/app/runtime/context_manager.py)의 `ContextManager`. 설계 5.4에 대응하며 로컬 모델의 대화 이력을 보관하고 압축한다.
 
 **인스턴스:** 컨텍스트를 사용하는 run_id마다 1개를 생성해 재사용한다. 프로그램 전체에는 여러 개가 존재할 수 있고, 모두 [Runner 1개](local-llm-runner.md)의 모델을 공유한다. 각 관리자 안에서 다시 `(chat_id, prompt_idx)`별 이력을 분리한다.
 

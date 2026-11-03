@@ -9,8 +9,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "prompt-toolkit==3.0.52",
-    "pytest==9.2.0",
     "ruff==0.17.3",
 ]
 
@@ -24,7 +22,3 @@ ignore = ["ANN401"]  # 프록시의 확장 가능한 JSON 청크는 Any를 사�
 
 [tool.ruff.lint.isort]
 known-first-party = ["app", "src"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = [".", ".."]

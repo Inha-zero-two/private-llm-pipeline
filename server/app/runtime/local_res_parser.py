@@ -1,19 +1,76 @@
 """설계 5.2: 상태 없는 parser() 하나로 출력 형식을 검사하고 결과를 반환한다."""
 
 import json
+from enum import StrEnum
+from typing import Annotated, Literal
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from app.models.enums import PromptIdx
-from app.models.local_llm_outputs import (
-    ConsentText,
-    ContextMode,
-    DetectedItem,
-    Index,
-    ParsedResult,
-    Plan,
-    Rule,
-    RuleMatch,
+
+# 작업 이름과 반환 타입은 이 파서 모듈에서 함께 정의한다.
+class PromptIdx(StrEnum):
+    DETECT = "DETECT"
+    NEEDS = "NEEDS"
+    JUDGE = "JUDGE"
+    WRITE = "WRITE"
+    REWRITE = "REWRITE"
+    GUARD = "GUARD"
+    ANSWER = "ANSWER"
+    PARSE_RULES = "PARSE_RULES"
+    MATCH_RULES = "MATCH_RULES"
+    CONSENT = "CONSENT"
+    DECIDE_CONTEXT = "DECIDE_CONTEXT"
+    FRONTIER = "FRONTIER"
+    MEMO_SUMMARY = "MEMO_SUMMARY"
+
+
+Index = Annotated[int, Field(ge=0)]
+ContextMode = Literal["keep", "reset"]
+
+
+class DetectedItem(BaseModel):
+    # DB ID와 실행 중 허용 상태는 호출 모듈이 붙인다.
+    text: str
+    category: Annotated[int, Field(ge=0, le=2)]
+
+
+class Plan(BaseModel):
+    # 모델의 camelCase 출력과 Python의 snake_case 필드를 대응한다.
+    model_config = ConfigDict(populate_by_name=True)
+
+    enough: bool
+    need_consent: bool = Field(alias="needConsent")
+    consent_items: list[int] = Field(alias="consentItems")
+    need: list[str]
+
+
+class Rule(BaseModel):
+    target: str
+    scope: Literal["item", "category"]
+    action: Literal["allow", "deny"]
+
+
+class RuleMatch(BaseModel):
+    # 입력 목록의 0부터 시작하는 번호이며 DB의 pdId가 아니다.
+    item: Index
+    rules: list[Index]
+
+
+class ConsentText(BaseModel):
+    purpose: str
+    benefit: str
+    risk: str
+
+
+ParsedResult = (
+    str
+    | list[DetectedItem]
+    | list[str]
+    | Plan
+    | list[int]
+    | list[Rule]
+    | list[RuleMatch]
+    | ConsentText
 )
 
 

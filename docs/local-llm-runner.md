@@ -1,6 +1,6 @@
 # LocalLLMRunner 사용과 처리 흐름
 
-**대상:** [local_llm_runner.py](../server/app/runtime/local_llm_runner.py)의 `LocalLLMRunner`. 설계 5.1에 대응하며 모델 생성·결과 파싱·재시도·중지를 묶는다. 코드 기준은 `7b0b2f8`이다.
+**대상:** [local_llm_runner.py](../server/app/runtime/local_llm_runner.py)의 `LocalLLMRunner`. 설계 5.1에 대응하며 모델 생성·결과 파싱·재시도·중지를 묶는다.
 
 **인스턴스:** 프로그램당 Runner 1개를 생성해 공유한다. `run_id`는 `request()`마다 전달하며, 컨텍스트는 [실행별 ContextManager](context-manager.md)로 분리한다. 생성자에서 짧은 응답으로 모델을 검사하고, 프로그램 종료 시 `close()`로 정리한다.
 
