@@ -4,7 +4,7 @@
 
 - **설계 5.1 LocalLLMRunner**: 모델 호출·재생성·중지를 담당한다. 구현 파일은 [server/app/runtime/local_llm_runner.py](../server/app/runtime/local_llm_runner.py)다.
 - **설계 5.2 결과 파서**: 상태 없는 `parser()` 함수가 출력 형식 검사와 변환을 담당한다. 구현 파일은 [server/app/runtime/local_res_parser.py](../server/app/runtime/local_res_parser.py)다.
-- **설계 5.4 ContextManager**: 채팅·작업별 컨텍스트 보관과 압축을 담당한다. 구현 파일은 [server/app/runtime/context_manager.py](../server/app/runtime/context_manager.py)다.
+- **설계 5.4 ContextManager**: 실행별 인스턴스 안에서 채팅·작업별 컨텍스트 보관과 압축을 담당한다. 구현 파일은 [server/app/runtime/context_manager.py](../server/app/runtime/context_manager.py)다.
 - **공통 호출 대상**: 기존 [llama_wrapper.py](../src/localLLM_API_proxy/llama_wrapper.py)를 사용한다. 원격·로컬 선택과 인증은 래퍼가 담당한다.
 
 ## 실행 환경
@@ -59,13 +59,15 @@ uv run python
 **LocalLLMRunner는 수동 호출과 컨텍스트를 사용하는 작업 호출을 제공한다.**
 
 - `manual_request()`: 입력과 시스템 프롬프트로 생성한다. 컨텍스트는 자동 변경하지 않는다.
+- 수동 호출·작업 호출·단독 재생성은 공통 `_generate()`를 사용한다. `request()`는 `manual_request()`나 `regen()`을 호출하지 않고 직접 생성·검사·재시도를 진행한다.
 - `on_token`: 수동·작업 호출·재생성에서 본문 청크를 받는 즉시 전달하는 선택 콜백이다. 최종 반환 튜플은 그대로 유지한다.
 - `request(..., use_context=False)`: 호출마다 기존 컨텍스트 사용 여부를 선택한다. True이면 해당 채팅·작업의 컨텍스트를 읽고 성공한 대화를 누적한다. False이면 조회·누적 없이 단발성으로 처리한다. 기본값은 False다.
 - 같은 `prompt_idx`도 호출마다 컨텍스트 사용 여부를 바꿀 수 있다. 파싱·형식 재생성은 두 경우 모두 적용하며, `use_context=True`에는 `chat_id`가 필요하다. 이 옵션은 프론티어 이력의 keep/reset 판단과 별개다.
-- `regen(input_, system_prompt, use_context=False, context_id=None)`: 보정 지시나 이전 출력을 붙이지 않고 같은 입력으로 한 번 더 생성한다. True이면 전달된 context_id의 기존 이력을 읽어 합치며, False이면 이번 입력만 보낸다. 이 함수는 컨텍스트에 아무것도 추가하지 않는다.
-- `request()`는 재시도마다 이번 입력 원문과 같은 컨텍스트 ID를 regen에 넘긴다. 재시도 중 입력·실패 응답을 이력에 넣지 않으며, 형식 검사를 통과한 최종 입력·응답 한 쌍만 한 번 누적한다.
+- `regen(input_, system_prompt, run_id=None, use_context=False, context_id=None)`: 보정 지시나 이전 출력을 붙이지 않고 같은 입력으로 한 번 더 생성한다. True이면 run_id와 context_id로 기존 이력을 읽어 합치며, False이면 이번 입력만 보낸다. 이 함수는 컨텍스트에 아무것도 추가하지 않는다.
+- `request()`는 최초 호출에서 만든 모델 입력을 모든 재시도에 그대로 사용한다. 재시도 중 입력·실패 응답을 이력에 넣지 않으며, 형식 검사를 통과한 최종 입력·응답 한 쌍만 한 번 누적한다.
 - `MAX_FORMAT_FAILURES=3`: 최초 응답을 포함해 형식 불일치가 3회면 실패값을 반환한다. 최초 생성 후 최대 2회 재생성하며, 요청문 누출 재작성 상한과 구분한다.
-- PromptManager가 없으므로 현재 `request()`에는 `system_prompt`를 명시한다.
+- `run_id`는 `request()`마다 전달한다. Runner의 모델은 하나이며, `get_context_manager(run_id)`가 실행별 관리자를 지연 생성·재사용한다. 다른 run_id에는 같은 채팅·작업도 별도 이력이 생긴다.
+- PromptManager가 없으므로 현재 `request()`에는 `system_prompt`를 명시하고 `prompt_version`도 직접 전달할 수 있다. 향후 `get_prompt()`가 `(본문, 버전)`을 반환할 예상 호출을 주석으로 남겼다.
 
 ```python
 from app.runtime.local_llm_runner import LocalLLMRunner
@@ -79,6 +81,9 @@ with LocalLLMRunner() as runner:
         use_context=True,
         system_prompt="최근 대화를 참고해 짧게 답하세요.",
     )
+    manager = runner.get_context_manager("run-1")
+    context_id = manager.get_id("chat-1", "ANSWER")
+    print(manager.get_context_length(context_id))
 ```
 
 ## 반환과 오류
@@ -90,6 +95,7 @@ with LocalLLMRunner() as runner:
 - `length`는 답변 토큰 상한에 도달했다는 종료 사유다.
 - 프록시 오류·무응답·불완전 수신·전체 대기시간 초과는 예외로 전달한다.
 - `request()`는 파서의 `OutputFormatError`만 잡아 재생성한다. 3번째 형식 불일치에서는 `(None, False, 입력 토큰 합계, 출력 토큰 합계, "parse_failed")`를 반환한다. 호출자는 성공 플래그와 종료 사유로 파싱 실패를 구분한다.
+- 정상 종료한 빈 문자열·공백 출력도 파서가 거부해 위 3회에 포함한다. 종료 표식도 없는 무응답·불완전 수신은 호출 오류로 전파한다. 생성자 응답 검사는 정상 종료하더라도 빈 본문이면 실패한다.
 - 프록시·통신·코드 오류를 형식 재시도로 감추거나 대체 응답으로 바꾸지 않는다.
 
 ## 5.2 결과 파싱
@@ -133,7 +139,8 @@ hits = parser('{"hits":[0,2]}', "GUARD")  # [0, 2]
 - 최초 생성·파싱·재생성에 같은 중지 신호를 사용한다. 수신 정리 신호는 따로 두며, 새 재생성 본문이 나오기 전 중지하면 이미 받은 직전 본문을 보존한다.
 - 수신 대기 중 신호가 도착해도 종료 표식 처리 전에 다시 확인해 `stopped`로 반환한다.
 - 호출자는 부분 본문과 `success=False`, `finish_reason="stopped"`를 받는다.
-- 작업 호출도 중지 시에는 부분 원문을 반환하며 파싱·재생성·컨텍스트 추가를 하지 않는다.
+- 일반 생성 중 중지하면 부분 원문을 반환하며 파싱·재생성·컨텍스트 추가를 하지 않는다.
+- 압축은 `interruptible=False`로 요청을 끝까지 처리한다. 자동 압축 중 stop이 오면 요약과 이미 완성된 대화를 반영한 뒤 바깥 `request()`가 `stopped`를 반환한다. 명시적 압축도 중지 신호와 관계없이 완료한다. 실제 호출 오류·시간 초과는 그대로 전파한다.
 - 이미 `on_token`으로 전달한 본문은 최종 부분 본문에 그대로 남는다. 화면에서는 재출력 없이 보존할 수 있다.
 - 수신 스레드는 다음 청크 또는 읽기 timeout에서 정리한다. 정리 전에는 새 생성을 거부한다.
 - 동시 생성은 1개다. 서버 추론 자체의 즉시 취소는 보장하지 않는다.
@@ -141,15 +148,16 @@ hits = parser('{"hits":[0,2]}', "GUARD")  # [0, 2]
 
 ## 5.4 컨텍스트 관리와 압축
 
-**ContextManager는 채팅·작업별 내용을 분리하고 28K에 도달하기 전에 5K 목표로 압축한다.**
+**ContextManager는 실행별로 생성하고, 그 안에서 채팅·작업별 내용을 분리해 28K에 도달하기 전에 5K 목표로 압축한다.**
 
 - `get_id(chat_id, prompt_idx)`는 조합별 ID를 조회·생성하고, `new_id()`는 독립 ID를 만든다.
+- 직접 구성할 때는 `ContextManager(runner, run_id)`를 사용한다. 기본 관리자는 `runner.get_context_manager(run_id)`로 얻는다. 컨텍스트 ID는 해당 관리자 안에서만 유효하다.
 - `get_context()`, `append()`, `get_context_length()`, `compact_context()`로 내용을 관리한다.
 - 길이는 동일 모델의 실제 토크나이저로 계산한다.
 - 새 내용을 붙이면 28,000토큰에 도달하는 경우, 기존 내용을 요약한 뒤 새 내용을 추가한다.
 - 요약 목표는 5,000토큰, 압축 요청의 출력 상한은 7,000토큰이다. 압축은 `manual_request()`로 수행한다.
 - 출력 상한은 `COMPACTION_MAX_TOKENS`로 지정하며 실제 생성 길이는 실행 엔진의 남은 컨텍스트 공간에도 제한된다.
-- 새 입력 과다·요약 실패·중지·목표 초과 시 예외를 내고 기존 내용을 보존한다.
+- 5K는 요약 목표이며 성공 조건이 아니다. 정상 요약이 목표를 넘어도 그대로 사용한다. 새 입력 과다·실제 요약 실패는 예외로 전파하고 기존 내용을 보존한다.
 - 컨텍스트는 인스턴스 메모리에 보관한다. 전용 컨텍스트 테이블 저장·복원은 사용하지 않는다.
 
 ## 미구현 모듈과 로그
@@ -157,7 +165,8 @@ hits = parser('{"hits":[0,2]}', "GUARD")  # [0, 2]
 **외부 모듈 연결과 로그 저장은 아직 주석·스켈레톤 상태다.**
 
 - PromptManager·ChatManager의 예상 호출 위치를 주석으로 남겼다. 결과 파서와 형식 재시도는 연결했다.
-- `_log_call()`: 새 입력·출력만 전달한다. 이전 컨텍스트 전체는 반복 저장하지 않는다.
+- `_log_call()`: 실행 ID와 새 입력·원시 출력, 작업 종류·프롬프트 버전·시도별 소요 시간(ms)·형식 검사 결과를 전달한다. 이전 컨텍스트 전체는 반복 저장하지 않는다.
+- `request()`는 파싱 결과가 결정된 뒤 각 시도를 한 번만 기록한다. 실패한 형식과 정상 종료한 빈 출력도 기록한다. 수동 호출·단독 regen은 형식 검사를 하지 않아 검사 결과와 작업·버전이 `None`이다. 두 함수에도 선택적으로 run_id를 전달할 수 있다.
 - 호출 오류 시에도 이미 받은 부분 출력을 로그 연결 지점에 넘기고 원래 예외를 전파한다.
 - 압축 호출은 `log_call=False`로 일반 호출 로그를 생략한다.
 - `_log_compaction(context_id, result)`: 압축 결과가 메모리에 반영된 뒤 한 번 호출한다. 일반 추가·빈 컨텍스트·실패한 압축에서는 호출하지 않는다.
@@ -175,6 +184,8 @@ hits = parser('{"hits":[0,2]}', "GUARD")  # [0, 2]
 - 호출별 `use_context` 옵션 변경 후 서버 테스트 95개와 Ruff 검사를 통과했다. 동일 작업에서 사용/미사용 전환, 기본 미사용, 컨텍스트 접근 생략, chat_id 검증 및 본문 콜백의 단일 전달을 확인했다. 기존 외부 검증 자료는 이전 인터페이스의 기록으로 유지한다.
 - 동일 입력 재생성 변경 후 서버 테스트 99개와 Ruff 검사를 통과했다. 컨텍스트 사용·미사용 두 경우 모두 모든 생성의 모델 메시지가 동일하고, 각 재시도 시점의 이력이 변하지 않으며, 최종 성공 한 쌍만 누적되는 것을 확인했다. 재생성의 context_id 검증과 원본 Llama 규격 대역도 통과했다.
 - 압축 기록 연결 변경 후 서버 테스트 105개와 Ruff 검사를 통과했다. 자동·명시적 압축은 결과 반영 후 연결점을 한 번만 호출하고, 일반 추가·빈 컨텍스트·압축 실패는 호출하지 않는 것을 확인했다. DB 저장은 스켈레톤이므로 실제 `messages` 삽입은 검증 대상이 아니다.
+- 실행별 컨텍스트·공통 생성 함수·로그 메타데이터 연결 후 서버 테스트 117개와 Ruff 검사를 통과했다. 완료된 빈 출력의 재시도, 생성 사이 중지 보존, 실행별 이력 분리와 단일 모델 재사용, 5K 초과 요약 수용, 자동·명시 압축 중 stop 후 결과 반영 및 중복 로그 방지를 대역으로 검증했다. 실서버·인증키는 사용하지 않았다.
+- 저장소 밖 터미널 채팅기도 대역 모델로 연속 대화·목표 초과 강제 압축·컨텍스트 조회·`/clear` 후 새 실행을 확인했다. 모델은 한 번만 생성했고 초기화 전 이력이 새 실행의 입력에 섞이지 않았다.
 - 실서버 확인일: 2026년 11월 1일.
 - 확인 범위: 래퍼 내부 키 탐색, 토큰 사용량, 대화 기억, 실제 토크나이저와 요약 호출.
 - 작은 시험 임계값에서 원문 211토큰이 새 입력 포함 64토큰으로 줄고 지정 코드가 유지됐다.
@@ -207,7 +218,7 @@ hits = parser('{"hits":[0,2]}', "GUARD")  # [0, 2]
 
 - 대화 3종(연속 번호·불규칙 번호·코드/다양한 상태), 각 약 27.5K토큰에 시드 4개를 적용해 프롬프트별 동일한 12조건을 비교했다. 목표 5K·출력 상한 7K·샘플링 설정은 고정했다.
 - 최초 타임아웃 6건은 같은 입력·프롬프트·시드로 모두 재시행했다. 대기 한도만 600초에서 1,800초로 늘렸고 Runner 6개를 병렬 실행했다. 최초 36회와 재시도 6회를 보존하며, 내용 평가에서 빠진 조건은 없다.
-- 응답 36개 중 33개는 `stop`으로 종료했다. A의 3개는 7K에서 `length`로 끝나 5K 목표 초과로 ContextManager가 저장을 거부했다. 이 결과도 내용 평가에 포함하고 길이 위반은 별도로 기록했다.
+- 응답 36개 중 33개는 `stop`으로 종료했다. A의 3개는 7K에서 `length`로 끝나 당시 5K 검증 정책으로 저장을 거부했다. 이 결과도 내용 평가에 포함했다. 이후 11월 3일 결정으로 목표 초과 거부는 제거했으며 생성 상한 7K는 유지한다.
 - B는 [OpenCode의 구조화된 인수인계 형식](https://github.com/anomalyco/opencode/blob/69269e4ebe309a08919b3c9be7948b9fd699c3a4/packages/core/src/session/compaction.ts)을, C의 추가 규칙은 [Cline의 사실·추정 구분 및 임의 작업 추가 금지 지침](https://github.com/cline/cline/blob/a6507a62a147db4a35e27f4294589742ccac5060/sdk/packages/core/src/extensions/context/summarize-conversation.ts)을 참고한 실험용 변형이다.
 - 서브에이전트 3개가 원문과 후보 전체를 읽고 검토했다. 후보는 익명화해 프롬프트 이름과 이전 점수를 숨겼고, 다른 검토자가 조건별 9개를 독립 교차 검토했다.
 

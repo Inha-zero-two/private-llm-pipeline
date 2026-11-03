@@ -18,6 +18,7 @@ class ContextManager:
     def __init__(
         self,
         runner: LocalLLMRunner,
+        run_id: str,
         *,
         compaction_limit: int = COMPACTION_LIMIT,
         compaction_target: int = COMPACTION_TARGET,
@@ -25,6 +26,7 @@ class ContextManager:
         if not 0 < compaction_target < compaction_limit:
             raise ValueError("Require 0 < compaction_target < compaction_limit")
         self._runner = runner
+        self.run_id = run_id
         self._limit = compaction_limit
         self._target = compaction_target
         self._contexts: dict[int, str] = {}
@@ -91,13 +93,17 @@ class ContextManager:
             "Return only the summary."
         )
         summary, success, _, _, reason = self._runner.manual_request(
-            text, system_prompt, max_tokens=COMPACTION_MAX_TOKENS, log_call=False
+            text,
+            system_prompt,
+            run_id=self.run_id,
+            max_tokens=COMPACTION_MAX_TOKENS,
+            log_call=False,
+            interruptible=False,
         )
-        # 생성 실패나 요약 초과를 임의 절단으로 감추지 않는다. 프록시 예외도 전파한다.
+        # 중지 요청이 와도 압축은 끝까지 받는다. 실제 호출 오류는 그대로 전파한다.
         if not success or not summary.strip():
             raise RuntimeError(f"Context compaction failed: {reason}")
-        if len(self._runner.tokenize(summary)) > self._target:
-            raise RuntimeError("Context summary exceeds its token target")
+        # 5K는 프롬프트의 목표다. 초과한 정상 결과도 수정·절단 없이 사용한다.
         return summary
 
     def _log_compaction(self, context_id: int, result: str) -> None:

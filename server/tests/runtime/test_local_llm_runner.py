@@ -14,6 +14,7 @@ import pytest
 
 from app.models.local_llm_outputs import Plan
 from app.runtime import local_llm_runner as runner_module
+from app.runtime.context_manager import ContextManager
 from app.runtime.local_llm_runner import LocalLLMRunner
 from app.runtime.local_res_parser import OutputFormatError
 from src.localLLM_API_proxy import llama_wrapper
@@ -218,28 +219,28 @@ def test_request_context_is_opt_in_and_failed_generation_does_not_append(
     runner: LocalLLMRunner,
 ) -> None:
     runner.request(
-        "r1", "first", "ANSWER", "chat", use_context=True, system_prompt="system"
+        "run", "first", "ANSWER", "chat", use_context=True, system_prompt="system"
     )
     runner.request(
-        "r2", "second", "ANSWER", "chat", use_context=True, system_prompt="system"
+        "run", "second", "ANSWER", "chat", use_context=True, system_prompt="system"
     )
     assert "first" in runner._llm.calls[-1]["messages"][1]["content"]
-    context_id = runner.context_manager.get_id("chat", "ANSWER")
-    original = runner.context_manager.get_context(context_id)
+    context_id = runner.get_context_manager("run").get_id("chat", "ANSWER")
+    original = runner.get_context_manager("run").get_context(context_id)
     runner._llm.stream_factory = lambda _: iter(())
     with pytest.raises(RuntimeError):
         runner.request(
-            "r3", "failed", "ANSWER", "chat", use_context=True, system_prompt="system"
+            "run", "failed", "ANSWER", "chat", use_context=True, system_prompt="system"
         )
-    assert runner.context_manager.get_context(context_id) == original
+    assert runner.get_context_manager("run").get_context(context_id) == original
     runner._llm.stream_factory = normal_stream
     runner.request(
-        "r4", "stateless", "ANSWER", "chat", use_context=False, system_prompt="system"
+        "run", "stateless", "ANSWER", "chat", use_context=False, system_prompt="system"
     )
     assert runner._llm.calls[-1]["messages"][1]["content"] == "stateless"
-    assert runner.context_manager.get_context(context_id) == original
+    assert runner.get_context_manager("run").get_context(context_id) == original
     runner.request(
-        "r5", "again", "ANSWER", "chat", use_context=True, system_prompt="system"
+        "run", "again", "ANSWER", "chat", use_context=True, system_prompt="system"
     )
     model_input = runner._llm.calls[-1]["messages"][1]["content"]
     assert "first" in model_input and "stateless" not in model_input
@@ -248,11 +249,13 @@ def test_request_context_is_opt_in_and_failed_generation_does_not_append(
 def test_context_is_unused_by_default_even_when_history_exists(
     runner: LocalLLMRunner,
 ) -> None:
-    context_id = runner.context_manager.get_id("chat", "ANSWER")
-    runner.context_manager.append(context_id, "existing history")
+    context_id = runner.get_context_manager("run").get_id("chat", "ANSWER")
+    runner.get_context_manager("run").append(context_id, "existing history")
     runner.request("run", "new", "ANSWER", "chat", system_prompt="system")
     assert runner._llm.calls[-1]["messages"][1]["content"] == "new"
-    assert runner.context_manager.get_context(context_id) == "existing history"
+    assert (
+        runner.get_context_manager("run").get_context(context_id) == "existing history"
+    )
 
 
 def test_context_free_call_does_not_access_context_manager(
@@ -261,11 +264,11 @@ def test_context_free_call_does_not_access_context_manager(
     def unexpected(*_: object) -> None:
         pytest.fail("use_context=False must not read or append context")
 
-    monkeypatch.setattr(runner.context_manager, "get_id", unexpected)
-    monkeypatch.setattr(runner.context_manager, "append", unexpected)
+    monkeypatch.setattr(runner.get_context_manager("run"), "get_id", unexpected)
+    monkeypatch.setattr(runner.get_context_manager("run"), "append", unexpected)
     assert (
         runner.request(
-            None, "one shot", "ANSWER", None, use_context=False, system_prompt="system"
+            "run", "one shot", "ANSWER", None, use_context=False, system_prompt="system"
         )[0]
         == "OK"
     )
@@ -299,13 +302,17 @@ def test_regen_keeps_original_input_and_system_prompt(runner: LocalLLMRunner) ->
 def test_regen_reads_context_without_appending_or_adding_instructions(
     runner: LocalLLMRunner,
 ) -> None:
-    context_id = runner.context_manager.get_id("chat", "ANSWER")
-    runner.context_manager.append(context_id, "previous history")
-    runner.regen("original", "system", use_context=True, context_id=context_id)
+    context_id = runner.get_context_manager("run").get_id("chat", "ANSWER")
+    runner.get_context_manager("run").append(context_id, "previous history")
+    runner.regen(
+        "original", "system", run_id="run", use_context=True, context_id=context_id
+    )
     assert runner._llm.calls[-1]["messages"][1]["content"] == (
         "Previous context:\nprevious history\n\nCurrent input:\noriginal"
     )
-    assert runner.context_manager.get_context(context_id) == "previous history"
+    assert (
+        runner.get_context_manager("run").get_context(context_id) == "previous history"
+    )
 
 
 def test_regen_context_requires_id_before_generation(runner: LocalLLMRunner) -> None:
@@ -330,10 +337,12 @@ def test_log_hook_gets_only_new_input_and_can_be_disabled(
 ) -> None:
     logged: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        runner, "_log_call", lambda text, output: logged.append((text, output))
+        runner,
+        "_log_call",
+        lambda run_id, text, output, **metadata: logged.append((text, output)),
     )
     runner.request(
-        "r1",
+        "run",
         "old secret context",
         "ANSWER",
         "chat",
@@ -341,7 +350,12 @@ def test_log_hook_gets_only_new_input_and_can_be_disabled(
         system_prompt="system",
     )
     runner.request(
-        "r2", "new question", "ANSWER", "chat", use_context=True, system_prompt="system"
+        "run",
+        "new question",
+        "ANSWER",
+        "chat",
+        use_context=True,
+        system_prompt="system",
     )
     assert logged == [("old secret context", "OK"), ("new question", "OK")]
     assert "old secret context" in runner._llm.calls[-1]["messages"][1]["content"]
@@ -354,7 +368,9 @@ def test_failed_wrapper_call_still_reaches_log_hook_without_swallowing_error(
 ) -> None:
     logged = []
     monkeypatch.setattr(
-        runner, "_log_call", lambda text, output: logged.append((text, output))
+        runner,
+        "_log_call",
+        lambda run_id, text, output, **metadata: logged.append((text, output)),
     )
     error = OSError("synthetic failure")
 
@@ -424,7 +440,7 @@ def test_only_import_change_accepts_native_llama_interface(
             use_context=True,
             system_prompt="system",
         )
-        assert instance.context_manager.get_context_length(0) > 0
+        assert instance.get_context_manager("run").get_context_length(0) > 0
         assert instance.regen("input", "system")[1]
 
 
@@ -549,7 +565,9 @@ def test_callback_exception_propagates_and_keeps_received_output_for_log(
     error = OSError("synthetic display error")
     logged = []
     monkeypatch.setattr(
-        runner, "_log_call", lambda text, output: logged.append((text, output))
+        runner,
+        "_log_call",
+        lambda run_id, text, output, **metadata: logged.append((text, output)),
     )
 
     def show(_: str) -> None:
@@ -599,9 +617,9 @@ def test_retries_repeat_identical_input_and_commit_context_once(
     generated_outputs: list[str | Exception],
     use_context: bool,
 ) -> None:
-    context_id = runner.context_manager.get_id("chat", "JUDGE")
+    context_id = runner.get_context_manager("run").get_id("chat", "JUDGE")
     previous = "\nUser: old question\nAssistant: old answer\n"
-    runner.context_manager.append(context_id, previous)
+    runner.get_context_manager("run").append(context_id, previous)
     valid = '{"enough":true,"needConsent":false,"consentItems":[],"need":[]}'
     generated_outputs.extend(
         ["first invalid response", "second invalid response", valid]
@@ -609,7 +627,7 @@ def test_retries_repeat_identical_input_and_commit_context_once(
     original_stream = runner._llm.stream_factory
 
     def check_context(call: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        assert runner.context_manager.get_context(context_id) == previous
+        assert runner.get_context_manager("run").get_context(context_id) == previous
         yield from original_stream(call)
 
     runner._llm.stream_factory = check_context
@@ -638,7 +656,7 @@ def test_retries_repeat_identical_input_and_commit_context_once(
         for call in calls
     )
     assert result[1:] == (True, 21, 6, "stop")
-    context = runner.context_manager.get_context(context_id)
+    context = runner.get_context_manager("run").get_context(context_id)
     assert context == (
         previous + f"\nUser: new question\nAssistant: {valid}\n"
         if use_context
@@ -649,8 +667,8 @@ def test_retries_repeat_identical_input_and_commit_context_once(
 def test_third_format_failure_returns_failure_without_fourth_generation_or_context_change(
     runner: LocalLLMRunner, generated_outputs: list[str | Exception]
 ) -> None:
-    context_id = runner.context_manager.get_id("chat", "JUDGE")
-    runner.context_manager.append(context_id, "original history")
+    context_id = runner.get_context_manager("run").get_id("chat", "JUDGE")
+    runner.get_context_manager("run").append(context_id, "original history")
     generated_outputs.extend(["not json", "{}", '{"enough":true}', "unused"])
     result = runner.request(
         "run", "new input", "JUDGE", "chat", use_context=True, system_prompt="system"
@@ -658,7 +676,9 @@ def test_third_format_failure_returns_failure_without_fourth_generation_or_conte
     assert result == (None, False, 21, 6, "parse_failed")
     assert len(runner._llm.calls) == 4
     assert generated_outputs == ["unused"]
-    assert runner.context_manager.get_context(context_id) == "original history"
+    assert (
+        runner.get_context_manager("run").get_context(context_id) == "original history"
+    )
 
 
 def test_context_receives_only_valid_final_raw_response(
@@ -672,7 +692,8 @@ def test_context_receives_only_valid_final_raw_response(
     assert isinstance(result[0], Plan)
     assert result[0].enough is True
     assert (
-        runner.context_manager.get_context(0) == f"\nUser: input\nAssistant: {valid}\n"
+        runner.get_context_manager("run").get_context(0)
+        == f"\nUser: input\nAssistant: {valid}\n"
     )
 
 
@@ -752,8 +773,206 @@ def test_stop_during_format_retry_does_not_parse_retry_or_append(
         assert not call.is_alive()
         assert results == [('{"hits":[', False, None, None, "stopped")]
         assert len(runner._llm.calls) == 3
-        assert runner.context_manager.get_context(0) == ""
+        assert runner.get_context_manager("run").get_context(0) == ""
     finally:
         release.set()
         call.join(1)
     assert cleaned.wait(1)
+
+
+@pytest.mark.parametrize("blank", ["", " \n\t"])
+@pytest.mark.parametrize(
+    "task, valid, expected", [("ANSWER", "done", "done"), ("GUARD", '{"hits":[]}', [])]
+)
+def test_completed_blank_output_is_retried_as_format_failure(
+    runner: LocalLLMRunner,
+    generated_outputs: list[str | Exception],
+    blank: str,
+    task: str,
+    valid: str,
+    expected: Any,
+) -> None:
+    generated_outputs.extend([blank, blank, valid])
+    assert runner.request("run", "input", task, "chat", system_prompt="system") == (
+        expected,
+        True,
+        21,
+        6,
+        "stop",
+    )
+    assert len(runner._llm.calls) == 4
+
+
+def test_three_completed_blank_outputs_return_parse_failure(
+    runner: LocalLLMRunner, generated_outputs: list[str | Exception]
+) -> None:
+    generated_outputs.extend(["", " ", "\n"])
+    assert runner.request("run", "input", "ANSWER", "chat", system_prompt="system") == (
+        None,
+        False,
+        21,
+        6,
+        "parse_failed",
+    )
+
+
+def test_constructor_rejects_completed_blank_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeLlama()
+    backend.stream_factory = lambda _: iter(
+        [{"choices": [{"delta": {"content": " "}, "finish_reason": "stop"}]}]
+    )
+    monkeypatch.setattr(llama_wrapper, "Llama", lambda **_: backend)
+    with pytest.raises(ConnectionError, match="response check failed"):
+        LocalLLMRunner()
+    assert backend.closed
+
+
+def test_request_uses_shared_generator_without_calling_public_manual_or_regen(
+    runner: LocalLLMRunner,
+    generated_outputs: list[str | Exception],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("request must call _generate directly")
+
+    monkeypatch.setattr(runner, "manual_request", unexpected)
+    monkeypatch.setattr(runner, "regen", unexpected)
+    generated_outputs.extend(["bad", '{"hits":[]}'])
+    assert runner.request("run", "input", "GUARD", "chat", system_prompt="system")[1]
+
+
+def test_attempt_logs_include_run_task_version_time_and_format_result_once(
+    runner: LocalLLMRunner,
+    generated_outputs: list[str | Exception],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged = []
+
+    def log(run_id: str | None, text: str, output: str, **metadata: Any) -> None:
+        logged.append((run_id, text, output, metadata))
+
+    monkeypatch.setattr(runner, "_log_call", log)
+    manager = runner.get_context_manager("run")
+    context_id = manager.get_id("chat", "GUARD")
+    manager.append(context_id, "old private history")
+    generated_outputs.extend([" ", "bad", '{"hits":[]}'])
+    runner.request(
+        "run",
+        "fresh input",
+        "GUARD",
+        "chat",
+        use_context=True,
+        system_prompt="system",
+        prompt_version="v3",
+    )
+    assert len(logged) == 3
+    assert [entry[2] for entry in logged] == [" ", "bad", '{"hits":[]}']
+    assert [entry[3]["format_valid"] for entry in logged] == [False, False, True]
+    for run_id, text, _, metadata in logged:
+        assert run_id == "run" and text == "fresh input"
+        assert metadata["prompt_idx"] == "GUARD"
+        assert metadata["prompt_version"] == "v3"
+        assert metadata["elapsed_ms"] >= 0
+    assert "old private history" not in str(logged)
+    generated_outputs.append("direct answer")
+    runner.manual_request("direct", "system", run_id="manual-run")
+    assert logged[-1][0] == "manual-run"
+    assert logged[-1][3]["format_valid"] is None
+
+
+def test_one_model_keeps_separate_context_managers_for_each_run(
+    runner: LocalLLMRunner,
+) -> None:
+    model = runner._llm
+    runner.request(
+        "a", "first chat", "ANSWER", "chat", use_context=True, system_prompt="system"
+    )
+    runner.request(
+        "b", "other chat", "ANSWER", "chat", use_context=True, system_prompt="system"
+    )
+    assert runner._llm.calls[-1]["messages"][1]["content"] == "other chat"
+    runner.request(
+        "a", "follow up", "ANSWER", "chat", use_context=True, system_prompt="system"
+    )
+    body = runner._llm.calls[-1]["messages"][1]["content"]
+    assert "first chat" in body and "other chat" not in body
+    assert runner.get_context_manager("a") is not runner.get_context_manager("b")
+    assert runner.get_context_manager("a") is runner.get_context_manager("a")
+    assert runner._llm is model and len(model.calls) == 4
+
+
+def test_context_regen_requires_run_id(runner: LocalLLMRunner) -> None:
+    with pytest.raises(ValueError, match="run_id"):
+        runner.regen("input", "system", use_context=True, context_id=0)
+    assert len(runner._llm.calls) == 1
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_stop_waits_for_compaction_result_and_records_it_once(
+    runner: LocalLLMRunner, monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
+    manager = ContextManager(runner, "run", compaction_limit=200, compaction_target=3)
+    runner.context_managers["run"] = manager
+    context_id = manager.get_id("chat", "ANSWER")
+    manager.append(context_id, "history " * 20)
+    entered, release = Event(), Event()
+    recorded, call_logs, results, errors = [], [], [], []
+    answer = "answer " * 8
+
+    def stream(_: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        if not explicit and len(runner._llm.calls) == 2:
+            yield {"choices": [{"delta": {"content": answer}, "finish_reason": "stop"}]}
+            yield {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 2}}
+            return
+        yield {"choices": [{"delta": {"content": "summary "}}]}
+        entered.set()
+        assert release.wait(3)
+        yield {
+            "choices": [
+                {"delta": {"content": "beyond target"}, "finish_reason": "stop"}
+            ]
+        }
+
+    def invoke() -> None:
+        try:
+            if explicit:
+                results.append(manager.compact_context(context_id))
+            else:
+                results.append(
+                    runner.request(
+                        "run",
+                        "new",
+                        "ANSWER",
+                        "chat",
+                        use_context=True,
+                        system_prompt="system",
+                    )
+                )
+        except Exception as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(manager, "_log_compaction", lambda *args: recorded.append(args))
+    monkeypatch.setattr(
+        runner, "_log_call", lambda *args, **kwargs: call_logs.append(args)
+    )
+    runner._llm.stream_factory = stream
+    call = Thread(target=invoke)
+    call.start()
+    try:
+        assert entered.wait(1)
+        runner.stop()
+        call.join(0.1)
+        assert call.is_alive() and not errors  # stop해도 압축 결과까지 기다린다.
+    finally:
+        release.set()
+        call.join(2)
+    assert not call.is_alive() and not errors
+    assert recorded == [(context_id, "summary beyond target")]
+    assert manager.get_context(context_id).startswith("summary beyond target")
+    if explicit:
+        assert results == [None] and call_logs == []
+    else:
+        assert results == [(answer, False, 7, 2, "stopped")]
+        assert len(call_logs) == 1

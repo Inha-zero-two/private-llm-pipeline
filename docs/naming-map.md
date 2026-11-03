@@ -115,6 +115,15 @@ class PrivacySettings:
 해당 ID의 이력을 읽기만 하며, 누적은 `request()`가 최종 성공 시 한 번만 수행합니다.
 원본 PDF의 `reGen()`에 이전 출력·오류 안내를 덧붙이는 설명은 이 결정으로 대체합니다.
 
+같은 날 후속 결정으로 `run_id`는 Runner 생성자 대신 `request()`마다 받습니다.
+모델은 한 번 생성하고 `get_context_manager(run_id)`로 실행별 ContextManager를 따로 보관합니다.
+직접 구성하는 관리자는 `ContextManager(runner, run_id)`이며, 컨텍스트를 읽는 단독 regen에도 run_id가 필요합니다.
+수동·작업·재생성은 `_generate()`를 공유하며 request 내부에서 다른 공개 생성 함수를 호출하지 않습니다.
+완료된 빈 출력도 형식 실패 3회에 포함합니다. 압축은 중지 신호가 와도 요청 완료까지 처리하고,
+5K 목표 초과를 실패 조건으로 사용하지 않습니다. 합산 길이로 28K 압축을 시작하는 조건은 유지합니다.
+일반 로그에는 실행·작업·버전·소요 시간·검사 결과와 새 입력·출력을 전달합니다.
+PromptManager는 향후 `(프롬프트 본문, 버전)`을 반환하며 미구현 조회·저장 호출은 주석으로 둡니다.
+
 같은 날 5.4의 압축 기록은 전용 컨텍스트 테이블 대신 `messages`를 사용하기로 결정했습니다.
 성공한 압축 결과를 반영한 뒤에만 `ChatManager.save_message(chat_id, "context_compacted", result)`를
 한 번 호출할 예정이며, `role`로 구분하고 `content`에는 요약만 넣습니다. 시각은 ChatManager가

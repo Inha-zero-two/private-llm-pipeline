@@ -19,8 +19,16 @@ class FakeRunner:
         return list(range(len(text.split())))
 
     def manual_request(
-        self, text: str, system: str, *, max_tokens: int, log_call: bool = True
+        self,
+        text: str,
+        system: str,
+        *,
+        run_id: str,
+        max_tokens: int,
+        log_call: bool = True,
+        interruptible: bool = True,
     ) -> tuple[str, bool, int, int, str]:
+        assert run_id == "run" and interruptible is False
         assert log_call is False  # 압축 원문이 일반 호출 로그로 나가지 않아야 한다.
         self.calls.append((text, system, max_tokens))
         if self.error:
@@ -31,7 +39,7 @@ class FakeRunner:
 @pytest.fixture
 def setup_context() -> tuple[ContextManager, Any]:
     runner = FakeRunner()
-    manager = ContextManager(runner, compaction_limit=10, compaction_target=3)
+    manager = ContextManager(runner, "run", compaction_limit=10, compaction_target=3)
     return manager, runner
 
 
@@ -67,7 +75,7 @@ def test_append_compacts_before_reaching_limit(
     assert manager.get_context(context_id) == "short nine ten"
 
 
-@pytest.mark.parametrize("failure", ["exception", "stopped", "oversized", "empty"])
+@pytest.mark.parametrize("failure", ["exception", "stopped", "empty"])
 def test_compaction_failure_preserves_original(
     setup_context: tuple[ContextManager, Any], failure: str
 ) -> None:
@@ -80,8 +88,6 @@ def test_compaction_failure_preserves_original(
         runner.error = error
     elif failure == "stopped":
         runner.success = False
-    elif failure == "oversized":
-        runner.summary = "one two three four"
     else:
         runner.summary = ""
     with pytest.raises((OSError, RuntimeError)) as raised:
@@ -123,7 +129,7 @@ def test_unknown_id_and_invalid_thresholds(
     with pytest.raises(KeyError):
         manager.get_context(999)
     with pytest.raises(ValueError):
-        ContextManager(runner, compaction_limit=3, compaction_target=3)
+        ContextManager(runner, "run", compaction_limit=3, compaction_target=3)
 
 
 def test_compaction_log_receives_context_id_and_summary_after_commit(
@@ -163,7 +169,7 @@ def test_record_only_once_for_nonempty_explicit_compaction(
 
 
 @pytest.mark.parametrize(
-    "failure", ["exception", "stopped", "oversized", "empty", "still_too_large"]
+    "failure", ["exception", "stopped", "empty", "still_too_large"]
 )
 def test_failed_compaction_does_not_record(
     setup_context: tuple[ContextManager, Any],
@@ -181,8 +187,6 @@ def test_failed_compaction_does_not_record(
         runner.error = OSError("synthetic model failure")
     elif failure == "stopped":
         runner.success = False
-    elif failure == "oversized":
-        runner.summary = "one two three four"
     elif failure == "empty":
         runner.summary = ""
     else:
@@ -195,7 +199,7 @@ def test_failed_compaction_does_not_record(
 
 def test_default_28k_boundary_and_5k_target() -> None:
     runner = FakeRunner()
-    manager = ContextManager(runner)
+    manager = ContextManager(runner, "run")
     context_id = manager.new_id()
     manager.append(context_id, " ".join(["word"] * 27999))
     assert not runner.calls
@@ -204,3 +208,19 @@ def test_default_28k_boundary_and_5k_target() -> None:
     assert "at most 5000 tokens" in runner.calls[0][1]
     assert runner.calls[0][2] == 7000
     assert manager.get_context(context_id) == "short final"
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_summary_above_target_is_used_without_truncation(
+    setup_context: tuple[ContextManager, Any], automatic: bool
+) -> None:
+    manager, runner = setup_context
+    runner.summary = "one two three four"  # 목표 3토큰을 넘지만 유효한 생성 결과다.
+    context_id = manager.new_id()
+    manager.append(context_id, "one two three four five six seven eight")
+    if automatic:
+        manager.append(context_id, " nine ten")
+        assert manager.get_context(context_id) == "one two three four nine ten"
+    else:
+        manager.compact_context(context_id)
+        assert manager.get_context(context_id) == runner.summary
