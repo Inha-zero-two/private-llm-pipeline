@@ -22,6 +22,7 @@ flowchart TD
 - 요청마다 `_log_call()` 호출. 실제 데이터베이스 저장 코드는 미구현으로 주석 처리
 - 일반 응답 생성 중 중지하면 중지 전까지 받은 답변 반환. 요청 중 발생한 오류는 로그 함수 호출 후 예외 전달
 - `manual_request()`와 `regen()`은 `_generate()`로 응답을 요청하고 결과 파싱과 이전 대화 저장은 생략
+- Runner는 파싱·재생성·대화 저장을 포함해 한 번에 요청 하나 처리. 진행 중 새 요청은 RuntimeError로 전달
 
 ## 사용법과 입출력
 
@@ -42,10 +43,10 @@ result = runner.request(
 | 호출 | 사용 방법 |
 | --- | --- |
 | `request(run_id, input_, prompt_idx, chat_id, ...)` | 작업별 응답을 요청하고 [파싱 결과](local-res-parser.md) 반환. 이전 대화 사용 여부는 기본 False. True일 때 chat_id 필요 |
-| `manual_request(input_, system_prompt, ...)` | 직접 지정한 프롬프트로 응답 요청 후 답변 문자열 반환. run_id는 선택 인자 |
-| `regen(input_, system_prompt, ...)` | 같은 입력으로 답변 재생성. 이전 대화를 사용하려면 use_context=True와 run_id·context_id 필요 |
+| `manual_request(input_, system_prompt, ...)` | 직접 지정한 프롬프트로 응답 요청 후 답변 문자열 반환. 중지할 요청은 run_id 전달 필요 |
+| `regen(input_, system_prompt, ...)` | 같은 입력으로 답변 재생성. 이전 대화 사용 시 use_context=True와 run_id·context_id 필요. 중지할 요청도 run_id 전달 필요 |
 | `get_context_manager(run_id)` | 해당 실행의 ContextManager 조회 또는 생성 |
-| `stop()` | 현재 요청에 중지 신호 전달. 다른 스레드에서 호출 가능 |
+| `stop(run_id)` | 실행 ID가 일치하는 요청에 중지 신호 전달. 다른 ID 또는 종료된 요청은 생략. 다른 스레드에서 호출 가능 |
 | `close()` | 진행 중인 수신이 끝날 때까지 기다린 뒤 모델 자원 해제. `with` 사용 시 자동 호출 |
 
 **반환 순서:** `(결과, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유)`
@@ -65,7 +66,7 @@ result = runner.request(
 - **응답 생성:** `manual_request()`, `request()`, `regen()`에서 `_generate()`를 공유. request 안에서 다른 공개 요청 함수를 호출하는 방식은 사용하지 않음
 - **재생성:** 설계 30쪽의 이전 출력·오류·수정 지시 추가 없이 같은 입력으로 요청. 최초 요청 포함 출력 형식 오류 3회까지 허용하고 최종 입력·답변만 한 번 저장
 - **이전 대화 사용:** 작업 종류에 따라 고정하지 않고 요청마다 use_context로 선택. Runner는 프로그램당 1개, ContextManager는 실행 ID마다 1개. run_id는 설계대로 요청마다 전달
-- **중지:** Event와 별도 수신 스레드로 중지 신호 처리. 답변 일부를 받을 때 실행할 함수 추가. 원격 서버에서 진행 중인 생성 작업 취소는 별도 기능
+- **중지:** `stop(run_id)`로 실행 ID가 일치하는 요청만 중지. 생성·파싱·재생성·대화 저장까지 같은 중지 신호를 공유하고 요청 종료 시 실행 ID 정리. Event와 별도 수신 스레드로 중지 처리. 원격 서버에서 진행 중인 생성 작업 취소는 별도 기능
 - **모델 실행:** 기존 로컬 모델 래퍼를 사용하고 인증키 검색도 래퍼에서 처리. llama-cpp-python 직접 사용 시 Llama import 변경. 설계 31쪽의 세부 그래픽카드 설정 중 일부만 현재 생성자에 지정
 - **연결 확인:** 생성자에서 실제 응답 확인 후 사용. 응답 대기 시간은 기본 120초. 요청 중 발생한 오류는 다른 답변으로 대체하지 않고 예외 전달
 - **프롬프트와 로그:** PromptManager의 반환값은 `(본문, 버전)`으로 예정. 현재는 인자로 전달하고 조회 코드는 주석 처리. 로그 항목은 실행 ID·작업 종류·버전·소요 시간·검사 결과·새 입력·생성된 답변. ChatManager의 저장 코드도 미구현으로 주석 처리

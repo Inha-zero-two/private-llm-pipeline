@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -42,12 +42,41 @@ class LocalLLMRunner:
         self._timeout = timeout
         self._busy = Lock()  # 모델 사용 중 중복 접근 방지용 잠금
         self._state_lock = Lock()  # 종료 상태와 중지 신호 변경용 잠금
-        self._stop_event = Event()  # 현재 요청의 중지 신호
+        self._stop_event: Event | None = None  # 진행 중인 요청의 중지 신호
+        self._active_run_id: str | None = None  # 진행 중인 요청의 실행 ID
         self._closed = False
         self._llm: Any = None
         # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
         self.context_managers: dict[str, ContextManager] = {}
         self.model_load()
+
+    @contextmanager
+    def _request_scope(
+        self, run_id: str | None, *, interruptible: bool = True
+    ) -> Iterator[Event]:
+        """요청의 실행 ID와 중지 신호 등록 후 요청 종료 시 정리.
+
+        파싱·재생성·대화 저장까지 같은 실행으로 관리.
+        같은 실행의 대화 압축은 기존 중지 신호를 공유하고 완료까지 처리.
+        """
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("Runner is closed")
+            stop_signal = self._stop_event
+            owns_request = stop_signal is None  # 실행 ID와 중지 신호 정리 담당 여부
+            if stop_signal is None:
+                stop_signal = Event()
+                self._stop_event = stop_signal
+                self._active_run_id = run_id
+            elif interruptible or self._active_run_id != run_id:
+                raise RuntimeError("A request is still running or being cleaned up")
+        try:
+            yield stop_signal
+        finally:
+            if owns_request:
+                with self._state_lock:
+                    self._stop_event = None
+                    self._active_run_id = None
 
     def get_context_manager(self, run_id: str) -> ContextManager:
         """실행 ID에 해당하는 ContextManager 조회 또는 생성.
@@ -108,41 +137,44 @@ class LocalLLMRunner:
 
         반환값: (답변, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유).
         사용량을 받지 못한 경우 토큰 수는 None. 이전 대화 추가와 결과 파싱은 생략.
+        run_id: 실행 ID. stop(run_id)로 중지할 요청은 같은 ID 전달 필요.
         log_call: 일반 요청 로그 함수 호출 여부. interruptible: stop으로 중지 가능 여부.
         대화 압축 시 두 설정 모두 False로 지정해 일반 로그를 생략하고 압축 완료까지 수신.
         """
-        output: list[str] = []
-        started = monotonic()
-        try:
-            return self._generate(
-                input_,
-                system_prompt,
-                output=output,
-                max_tokens=max_tokens,
-                on_token=on_token,
-                interruptible=interruptible,
-            )
-        finally:
-            if log_call:
-                self._log_call(
-                    run_id,
+        with self._request_scope(run_id, interruptible=interruptible) as stop_signal:
+            output: list[str] = []
+            started = monotonic()
+            try:
+                return self._generate(
                     input_,
-                    "".join(output),
-                    prompt_idx=None,
-                    prompt_version=None,
-                    elapsed_ms=(monotonic() - started) * 1000,
-                    format_valid=None,
+                    system_prompt,
+                    stop_signal=stop_signal,
+                    output=output,
+                    max_tokens=max_tokens,
+                    on_token=on_token,
+                    interruptible=interruptible,
                 )
+            finally:
+                if log_call:
+                    self._log_call(
+                        run_id,
+                        input_,
+                        "".join(output),
+                        prompt_idx=None,
+                        prompt_version=None,
+                        elapsed_ms=(monotonic() - started) * 1000,
+                        format_valid=None,
+                    )
 
     def _generate(
         self,
         input_: str,
         system_prompt: str,
         *,
+        stop_signal: Event,
         output: list[str],
         max_tokens: int,
         on_token: Callable[[str], None] | None = None,
-        stop_signal: Event | None = None,
         interruptible: bool = True,
     ) -> RequestResult:
         """별도 스레드에서 생성 중인 답변을 받아 본문, 사용량 및 종료 사유 반환.
@@ -160,10 +192,6 @@ class LocalLLMRunner:
             if self._closed:
                 self._busy.release()
                 raise RuntimeError("Runner is closed")
-            if stop_signal is None:
-                # 대화 압축 시 기존 중지 신호를 유지하고 압축 완료까지 수신
-                stop_signal = Event() if interruptible else self._stop_event
-            self._stop_event = stop_signal
             if interruptible and stop_signal.is_set():
                 self._busy.release()
                 return "", False, 0, 0, "stopped"
@@ -282,91 +310,96 @@ class LocalLLMRunner:
             raise NotImplementedError(
                 "PromptManager is not connected; pass system_prompt"
             )
-        context_id = None
-        manager = None
-        model_input = input_
-        if use_context:
-            if chat_id is None:
-                raise ValueError("컨텍스트를 사용하는 작업에는 chat_id가 필요함")
-            manager = self.get_context_manager(run_id)
-            context_id = manager.get_id(chat_id, prompt_idx)
-            context = manager.get_context(context_id)
-            if context:
-                model_input = (
-                    f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
-                )
-        # 재생성에도 같은 입력 사용. 최종 응답까지 이전 대화 내용은 유지
-        # 최초 생성부터 파싱·재생성까지 공유할 중지 신호
-        stop_signal = Event()
-        input_tokens: int | None = 0
-        output_tokens: int | None = 0
-        last_output = ""
-        for _ in range(MAX_FORMAT_FAILURES):
-            output: list[str] = []
-            format_valid = None
-            started = monotonic()
-            try:
-                result = self._generate(
-                    model_input,
-                    system_prompt,
-                    output=output,
-                    max_tokens=max_tokens,
-                    on_token=on_token,
-                    stop_signal=stop_signal,
-                )
-                # 재생성을 포함한 총 사용량. 사용량을 받지 못한 요청이 있으면 None
-                input_tokens = (
-                    input_tokens + result[2]
-                    if input_tokens is not None and result[2] is not None
-                    else None
-                )
-                output_tokens = (
-                    output_tokens + result[3]
-                    if output_tokens is not None and result[3] is not None
-                    else None
-                )
-                if not result[1] or stop_signal.is_set():
-                    # 중지 시 지금까지 받은 답변 반환. 파싱·재생성·이전 대화 추가는 생략
-                    return (
-                        result[0] or last_output,
-                        False,
-                        input_tokens,
-                        output_tokens,
-                        "stopped" if stop_signal.is_set() else result[4],
+        with self._request_scope(run_id) as stop_signal:
+            context_id = None
+            manager = None
+            model_input = input_
+            if use_context:
+                if chat_id is None:
+                    raise ValueError("컨텍스트를 사용하는 작업에는 chat_id가 필요함")
+                manager = self.get_context_manager(run_id)
+                context_id = manager.get_id(chat_id, prompt_idx)
+                context = manager.get_context(context_id)
+                if context:
+                    model_input = (
+                        f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                     )
-                # 파싱 중 발생한 출력 형식 오류만 처리. 래퍼의 예외는 호출자에게 전달
+            # 재생성에도 같은 입력 사용. 최종 응답까지 이전 대화 내용은 유지
+            input_tokens: int | None = 0
+            output_tokens: int | None = 0
+            last_output = ""
+            for _ in range(MAX_FORMAT_FAILURES):
+                output: list[str] = []
+                format_valid = None
+                started = monotonic()
                 try:
-                    parsed = parser(result[0], prompt_idx)
-                except OutputFormatError:
-                    format_valid = False
-                    last_output = result[0]
-                    if stop_signal.is_set():
-                        return result[0], False, input_tokens, output_tokens, "stopped"
-                    continue
-                format_valid = True
-            finally:
-                # 요청마다 새 입력, 모델이 생성한 답변 및 형식 검사 결과로 로그 함수 호출
-                self._log_call(
-                    run_id,
-                    input_,
-                    "".join(output),
-                    prompt_idx=prompt_idx,
-                    prompt_version=prompt_version,
-                    elapsed_ms=(monotonic() - started) * 1000,
-                    format_valid=format_valid,
-                )
-            if stop_signal.is_set():
-                return result[0], False, input_tokens, output_tokens, "stopped"
-            if manager is not None and context_id is not None:
-                # 입력과 형식 검사를 통과한 최종 답변만 이전 대화에 한 번 추가
-                manager.append(
-                    context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
-                )
-            # 대화 압축 중 중지 신호를 받으면 요약 저장을 마친 뒤 요청 중지
-            if stop_signal.is_set():
-                return result[0], False, input_tokens, output_tokens, "stopped"
-            return parsed, True, input_tokens, output_tokens, result[4]
-        return None, False, input_tokens, output_tokens, "parse_failed"
+                    result = self._generate(
+                        model_input,
+                        system_prompt,
+                        output=output,
+                        max_tokens=max_tokens,
+                        on_token=on_token,
+                        stop_signal=stop_signal,
+                    )
+                    # 재생성을 포함한 총 사용량. 사용량을 받지 못한 요청이 있으면 None
+                    input_tokens = (
+                        input_tokens + result[2]
+                        if input_tokens is not None and result[2] is not None
+                        else None
+                    )
+                    output_tokens = (
+                        output_tokens + result[3]
+                        if output_tokens is not None and result[3] is not None
+                        else None
+                    )
+                    if not result[1] or stop_signal.is_set():
+                        # 중지 시 지금까지 받은 답변 반환. 파싱·재생성·이전 대화 추가는 생략
+                        return (
+                            result[0] or last_output,
+                            False,
+                            input_tokens,
+                            output_tokens,
+                            "stopped" if stop_signal.is_set() else result[4],
+                        )
+                    # 파싱 중 발생한 출력 형식 오류만 처리. 래퍼의 예외는 호출자에게 전달
+                    try:
+                        parsed = parser(result[0], prompt_idx)
+                    except OutputFormatError:
+                        format_valid = False
+                        last_output = result[0]
+                        if stop_signal.is_set():
+                            return (
+                                result[0],
+                                False,
+                                input_tokens,
+                                output_tokens,
+                                "stopped",
+                            )
+                        continue
+                    format_valid = True
+                finally:
+                    # 요청마다 새 입력, 모델이 생성한 답변 및 형식 검사 결과로 로그 함수 호출
+                    self._log_call(
+                        run_id,
+                        input_,
+                        "".join(output),
+                        prompt_idx=prompt_idx,
+                        prompt_version=prompt_version,
+                        elapsed_ms=(monotonic() - started) * 1000,
+                        format_valid=format_valid,
+                    )
+                if stop_signal.is_set():
+                    return result[0], False, input_tokens, output_tokens, "stopped"
+                if manager is not None and context_id is not None:
+                    # 입력과 형식 검사를 통과한 최종 답변만 이전 대화에 한 번 추가
+                    manager.append(
+                        context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
+                    )
+                # 대화 압축 중 중지 신호를 받으면 요약 저장을 마친 뒤 요청 중지
+                if stop_signal.is_set():
+                    return result[0], False, input_tokens, output_tokens, "stopped"
+                return parsed, True, input_tokens, output_tokens, result[4]
+            return None, False, input_tokens, output_tokens, "parse_failed"
 
     def regen(
         self,
@@ -397,26 +430,28 @@ class LocalLLMRunner:
                 model_input = (
                     f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                 )
-        output: list[str] = []
-        started = monotonic()
-        try:
-            return self._generate(
-                model_input,
-                system_prompt,
-                output=output,
-                max_tokens=max_tokens,
-                on_token=on_token,
-            )
-        finally:
-            self._log_call(
-                run_id,
-                input_,
-                "".join(output),
-                prompt_idx=None,
-                prompt_version=None,
-                elapsed_ms=(monotonic() - started) * 1000,
-                format_valid=None,
-            )
+        with self._request_scope(run_id) as stop_signal:
+            output: list[str] = []
+            started = monotonic()
+            try:
+                return self._generate(
+                    model_input,
+                    system_prompt,
+                    stop_signal=stop_signal,
+                    output=output,
+                    max_tokens=max_tokens,
+                    on_token=on_token,
+                )
+            finally:
+                self._log_call(
+                    run_id,
+                    input_,
+                    "".join(output),
+                    prompt_idx=None,
+                    prompt_version=None,
+                    elapsed_ms=(monotonic() - started) * 1000,
+                    format_valid=None,
+                )
 
     def _log_call(
         self,
@@ -455,14 +490,16 @@ class LocalLLMRunner:
                 raise RuntimeError("Runner is closed")
             return self._llm.tokenize(text.encode("utf-8"), add_bos=False, special=True)
 
-    def stop(self) -> None:
-        """현재 요청에 중지 신호 전달 후 즉시 반환.
+    def stop(self, run_id: str) -> None:
+        """실행 ID가 일치하는 현재 요청에 중지 신호 전달 후 즉시 반환.
 
         다른 스레드에서 호출 가능. 생성 함수에서 신호 확인 후 받은 답변까지 반환.
+        다른 실행 ID 또는 진행 중인 요청이 없는 경우 생략.
         대화 압축 중에는 압축 완료 후 중지 처리. 원격 서버의 생성 작업 취소는 별도 기능.
         """
         with self._state_lock:
-            self._stop_event.set()
+            if self._active_run_id == run_id and self._stop_event is not None:
+                self._stop_event.set()
 
     def close(self) -> None:
         """Runner 사용을 종료하고 진행 중인 수신이 끝나면 모델 자원 해제.
@@ -472,7 +509,8 @@ class LocalLLMRunner:
         """
         with self._state_lock:
             self._closed = True
-            self._stop_event.set()
+            if self._stop_event is not None:
+                self._stop_event.set()
         # 진행 중인 생성·토큰화가 끝난 후 모델 메모리 해제
         # stop은 즉시 반환. close는 진행 중인 작업이 끝날 때까지 대기
         with self._busy:
