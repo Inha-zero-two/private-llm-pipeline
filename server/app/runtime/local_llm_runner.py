@@ -9,19 +9,21 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from .local_res_parser import OutputFormatError, ParsedResult, PromptIdx, parser
+from ..models.enums import PromptIdx
+from ..models.llm_results import ParsedRequestResult, RequestResult
+from .local_res_parser import OutputFormatError, parser
 
 if TYPE_CHECKING:
     from .context_manager import ContextManager
 
-# 직접 요청한 결과: 답변, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유
-RequestResult = tuple[str, bool, int | None, int | None, str]
-# 작업별 요청 결과: 파싱 결과, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유
-ParsedRequestResult = tuple[ParsedResult | None, bool, int | None, int | None, str]
 # 최초 요청을 포함한 최대 생성 시도 횟수
 MAX_ATTEMPTS = 3
 # 모델의 전체 입력·출력 토큰 한도
 N_CTX = 32768
+# 일반 요청과 요약 요청의 기본 출력 상한
+MAX_OUTPUT_TOKENS = 5000
+# 채팅 형식, 역할 구분 및 시작·종료 토큰의 여유분
+PROMPT_MARGIN = 1024
 
 
 class LocalLLMRunner:
@@ -42,6 +44,7 @@ class LocalLLMRunner:
         self._timeout = timeout
         self._busy = Lock()  # 모델 사용 중 중복 접근 방지용 잠금
         self._state_lock = Lock()  # 종료 상태와 중지 신호 변경용 잠금
+        self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
         self._stop_event: Event | None = None  # 진행 중인 요청의 중지 신호
         self._active_run_id: str | None = None  # 진행 중인 요청의 실행 ID
         self._closed = False
@@ -86,7 +89,7 @@ class LocalLLMRunner:
         """
         from .context_manager import ContextManager
 
-        with self._state_lock:
+        with self._context_lock:
             if run_id not in self.context_managers:
                 self.context_managers[run_id] = ContextManager(self, run_id)
             return self.context_managers[run_id]
@@ -128,7 +131,7 @@ class LocalLLMRunner:
         system_prompt: str,
         *,
         run_id: str | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int = MAX_OUTPUT_TOKENS,
         log_call: bool = True,
         on_token: Callable[[str], None] | None = None,
         interruptible: bool = True,
@@ -140,31 +143,52 @@ class LocalLLMRunner:
         run_id: 실행 ID. stop(run_id)로 중지할 요청은 같은 ID 전달 필요.
         log_call: 일반 요청 로그 함수 호출 여부. interruptible: stop으로 중지 가능 여부.
         대화 압축 시 두 설정 모두 False로 지정해 일반 로그를 생략하고 압축 완료까지 수신.
+        출력 상한(length)으로 끝나면 같은 입력으로 최대 3회 요청 후 length_failed 반환.
         """
         with self._request_scope(run_id, interruptible=interruptible) as stop_signal:
-            output: list[str] = []
-            started = monotonic()
-            try:
-                return self._generate(
-                    input_,
-                    system_prompt,
-                    stop_signal=stop_signal,
-                    output=output,
-                    max_tokens=max_tokens,
-                    on_token=on_token,
-                    interruptible=interruptible,
-                )
-            finally:
-                if log_call:
-                    self._log_call(
-                        run_id,
+            input_tokens: int | None = 0
+            output_tokens: int | None = 0
+            last_output = ""
+            for _ in range(MAX_ATTEMPTS):
+                output: list[str] = []
+                started = monotonic()
+                try:
+                    result = self._generate(
                         input_,
-                        "".join(output),
-                        prompt_idx=None,
-                        prompt_version=None,
-                        elapsed_ms=(monotonic() - started) * 1000,
-                        format_valid=None,
+                        system_prompt,
+                        stop_signal=stop_signal,
+                        output=output,
+                        max_tokens=max_tokens,
+                        on_token=on_token,
+                        interruptible=interruptible,
                     )
+                finally:
+                    if log_call:
+                        self._log_call(
+                            run_id,
+                            input_,
+                            "".join(output),
+                            prompt_idx=None,
+                            prompt_version=None,
+                            elapsed_ms=(monotonic() - started) * 1000,
+                            format_valid=None,
+                        )
+                input_tokens = (
+                    input_tokens + result[2]
+                    if input_tokens is not None and result[2] is not None
+                    else None
+                )
+                output_tokens = (
+                    output_tokens + result[3]
+                    if output_tokens is not None and result[3] is not None
+                    else None
+                )
+                last_output = result[0] or last_output
+                if interruptible and stop_signal.is_set():
+                    return last_output, False, input_tokens, output_tokens, "stopped"
+                if result[4] != "length":
+                    return result[0], result[1], input_tokens, output_tokens, result[4]
+            return "", False, input_tokens, output_tokens, "length_failed"
 
     def _generate(
         self,
@@ -199,6 +223,24 @@ class LocalLLMRunner:
             if interruptible and stop_signal.is_set():
                 self._busy.release()
                 return "", False, 0, 0, "stopped"
+        try:
+            # 시스템 프롬프트·입력·채팅 형식·최대 출력을 모두 포함한 예산 확인
+            prompt_tokens = sum(
+                len(
+                    self._llm.tokenize(
+                        text.encode("utf-8"), add_bos=False, special=True
+                    )
+                )
+                for text in (system_prompt, input_)
+            )
+        except BaseException as exc:
+            self._busy.release()
+            if isinstance(exc, Exception):
+                generation_errors.append(exc)
+            raise
+        if prompt_tokens + PROMPT_MARGIN + max_tokens > N_CTX:
+            self._busy.release()
+            return "", False, 0, 0, "context_full"
         # 수신 스레드 종료 신호. 요청 전체의 중지 신호와 구분
         cancel = Event()
         # 수신한 응답, 발생한 예외 또는 수신 완료 표시(None)를 전달할 큐
@@ -272,7 +314,7 @@ class LocalLLMRunner:
                             )
                         generation_errors.append(error)
                         raise error
-                    success = finish_reason in {"stop", "length"}
+                    success = finish_reason == "stop"
                     return answer, success, input_tokens, output_tokens, finish_reason
                 # 답변 없이 사용량만 포함한 마지막 응답도 처리
                 usage = event.get("usage") or {}
@@ -300,7 +342,7 @@ class LocalLLMRunner:
         use_context: bool = False,
         system_prompt: str | None = None,
         prompt_version: str | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int = MAX_OUTPUT_TOKENS,
         on_token: Callable[[str], None] | None = None,
     ) -> ParsedRequestResult:
         """작업별 응답 요청, 결과 파싱 및 최종 대화 저장.
@@ -310,8 +352,7 @@ class LocalLLMRunner:
         출력 형식 오류, 연결·수신 오류, 타임아웃 또는 생성 실패 시 같은 입력으로 최대 3회 요청.
         중지 요청은 재시도 없이 반환. 타임아웃 뒤에는 이전 수신 정리 후 다음 요청 진행.
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
-        3회 모두 실패하면 오류 종류와 관계없이
-        (None, False, 총 입력 토큰 수, 총 출력 토큰 수, parse_failed) 반환.
+        3회 모두 실패하면 마지막 실패에 따라 length_failed 또는 parse_failed 반환.
         입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
         """
         prompt_idx = PromptIdx(prompt_idx)
@@ -329,6 +370,9 @@ class LocalLLMRunner:
             if use_context:
                 if chat_id is None:
                     raise ValueError("컨텍스트를 사용하는 작업에는 chat_id가 필요함")
+                input_limit = self.get_input_limit(system_prompt, max_tokens=max_tokens)
+                if len(self.tokenize(input_)) > input_limit:
+                    return None, False, 0, 0, "context_full"
                 manager = self.get_context_manager(run_id)
                 context_id = manager.get_id(chat_id, prompt_idx)
                 context = manager.get_context(context_id)
@@ -336,10 +380,22 @@ class LocalLLMRunner:
                     model_input = (
                         f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                     )
+                    # 새 입력과 출력 공간까지 포함해 넘칠 경우 모델 요청 전에 기존 대화 압축
+                    if len(self.tokenize(model_input)) > input_limit:
+                        compacted = manager.compact_context(context_id)
+                        if stop_signal.is_set():
+                            return "", False, 0, 0, "stopped"
+                        if not compacted:
+                            return None, False, 0, 0, "length_failed"
+                        context = manager.get_context(context_id)
+                        model_input = (
+                            f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
+                        )
             # 재생성에도 같은 입력 사용. 최종 응답까지 이전 대화 내용은 유지
             input_tokens: int | None = 0
             output_tokens: int | None = 0
             last_output = ""
+            failure_reason = "parse_failed"
             for attempt in range(MAX_ATTEMPTS):
                 if stop_signal.is_set():
                     return last_output, False, input_tokens, output_tokens, "stopped"
@@ -375,6 +431,7 @@ class LocalLLMRunner:
                         if not generation_errors:
                             raise
                         input_tokens = output_tokens = None
+                        failure_reason = "parse_failed"
                         last_output = "".join(output) or last_output
                         if stop_signal.is_set():
                             return last_output, False, None, None, "stopped"
@@ -401,12 +458,24 @@ class LocalLLMRunner:
                         )
                     if not result[1]:
                         last_output = result[0]
+                        if result[4] == "context_full":
+                            return (
+                                None,
+                                False,
+                                input_tokens,
+                                output_tokens,
+                                "context_full",
+                            )
+                        failure_reason = (
+                            "length_failed" if result[4] == "length" else "parse_failed"
+                        )
                         continue
                     # 출력 형식 오류만 재시도. 파서 내부 코드의 오류는 호출자에게 전달
                     try:
                         parsed = parser(result[0], prompt_idx)
                     except OutputFormatError:
                         format_valid = False
+                        failure_reason = "parse_failed"
                         last_output = result[0]
                         if stop_signal.is_set():
                             return (
@@ -433,17 +502,18 @@ class LocalLLMRunner:
                     return result[0], False, input_tokens, output_tokens, "stopped"
                 if manager is not None and context_id is not None:
                     # 입력과 형식 검사를 통과한 최종 답변만 이전 대화에 한 번 추가
-                    manager.append(
+                    appended = manager.append(
                         context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
                     )
+                    if not appended and not stop_signal.is_set():
+                        return None, False, input_tokens, output_tokens, "length_failed"
                 # 대화 압축 중 중지 신호를 받으면 요약 저장을 마친 뒤 요청 중지
                 if stop_signal.is_set():
                     return result[0], False, input_tokens, output_tokens, "stopped"
                 return parsed, True, input_tokens, output_tokens, result[4]
             if stop_signal.is_set():
                 return last_output, False, input_tokens, output_tokens, "stopped"
-            # 파싱·연결·타임아웃·생성 실패 모두 기존 실패 반환값으로 통일
-            return None, False, input_tokens, output_tokens, "parse_failed"
+            return None, False, input_tokens, output_tokens, failure_reason
 
     def regen(
         self,
@@ -453,15 +523,16 @@ class LocalLLMRunner:
         run_id: str | None = None,
         use_context: bool = False,
         context_id: int | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int = MAX_OUTPUT_TOKENS,
         on_token: Callable[[str], None] | None = None,
     ) -> RequestResult:
-        """같은 입력과 시스템 프롬프트로 답변을 한 번 더 생성.
+        """같은 입력과 시스템 프롬프트로 답변 재생성.
 
         반환값은 manual_request와 같은 순서의 튜플.
         use_context=True인 경우 run_id의 context_id에 저장된 이전 대화를 입력 앞에 추가.
         이전 출력이나 수정 지시는 추가하지 않고 결과 파싱과 이전 대화 저장도 생략.
         로그에는 이번 입력과 새로 생성한 답변만 전달.
+        length 종료만 최대 3회 재시도. 나머지 요청 오류는 예외 전달.
         """
         model_input = input_
         if use_context:
@@ -475,27 +546,47 @@ class LocalLLMRunner:
                     f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                 )
         with self._request_scope(run_id) as stop_signal:
-            output: list[str] = []
-            started = monotonic()
-            try:
-                return self._generate(
-                    model_input,
-                    system_prompt,
-                    stop_signal=stop_signal,
-                    output=output,
-                    max_tokens=max_tokens,
-                    on_token=on_token,
+            input_tokens: int | None = 0
+            output_tokens: int | None = 0
+            last_output = ""
+            for _ in range(MAX_ATTEMPTS):
+                output: list[str] = []
+                started = monotonic()
+                try:
+                    result = self._generate(
+                        model_input,
+                        system_prompt,
+                        stop_signal=stop_signal,
+                        output=output,
+                        max_tokens=max_tokens,
+                        on_token=on_token,
+                    )
+                finally:
+                    self._log_call(
+                        run_id,
+                        input_,
+                        "".join(output),
+                        prompt_idx=None,
+                        prompt_version=None,
+                        elapsed_ms=(monotonic() - started) * 1000,
+                        format_valid=None,
+                    )
+                input_tokens = (
+                    input_tokens + result[2]
+                    if input_tokens is not None and result[2] is not None
+                    else None
                 )
-            finally:
-                self._log_call(
-                    run_id,
-                    input_,
-                    "".join(output),
-                    prompt_idx=None,
-                    prompt_version=None,
-                    elapsed_ms=(monotonic() - started) * 1000,
-                    format_valid=None,
+                output_tokens = (
+                    output_tokens + result[3]
+                    if output_tokens is not None and result[3] is not None
+                    else None
                 )
+                last_output = result[0] or last_output
+                if stop_signal.is_set():
+                    return last_output, False, input_tokens, output_tokens, "stopped"
+                if result[4] != "length":
+                    return result[0], result[1], input_tokens, output_tokens, result[4]
+            return "", False, input_tokens, output_tokens, "length_failed"
 
     def _log_call(
         self,
@@ -522,6 +613,15 @@ class LocalLLMRunner:
         # )
         # format_valid: 형식 검사 결과. manual_request와 regen은 검사하지 않으므로 None
         # 저장 제외 항목: 이전 대화 전체, 시스템 프롬프트, 인증키
+
+    def get_input_limit(
+        self, system_prompt: str, *, max_tokens: int = MAX_OUTPUT_TOKENS
+    ) -> int:
+        """시스템 프롬프트, 채팅 형식 및 출력 공간을 제외한 최대 입력 토큰 수 반환.
+
+        채팅 형식 여유분은 1,024토큰. 입력과 출력의 합계는 N_CTX 안에서 계산.
+        """
+        return N_CTX - max_tokens - PROMPT_MARGIN - len(self.tokenize(system_prompt))
 
     def tokenize(self, text: str) -> list[int]:
         """응답 생성에 사용하는 모델로 문자열을 토큰 ID 목록으로 변환.

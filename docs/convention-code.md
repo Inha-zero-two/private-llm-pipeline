@@ -16,6 +16,7 @@ Python 표준인 [PEP 8](https://peps.python.org/pep-0008/#naming-conventions)�
 ## 폴더 구조
 
 서버와 화면을 루트에서 폴더 두 개로 나눕니다. 명령(`uv`, `npm`)은 각자 자기 폴더 안에서 실행합니다.
+로컬 모델 래퍼를 사용하는 실행은 [LocalLLMRunner 문서](local-llm-runner.md#사용법과-입출력)의 Python 경로 설정 적용.
 
 ```
 private-llm-pipeline/
@@ -47,6 +48,7 @@ server/
 │   │   ├── local_res_parser.py
 │   │   ├── frontier_client.py
 │   │   └── context_manager.py
+│   ├── models/                 모듈 사이에서 공유하는 자료형 · 열거형
 │   └── data/                   데이터 관리 모듈 (프롬프트 · 메모 · 채팅)
 │       ├── prompt_manager.py
 │       ├── memo_manager.py
@@ -54,7 +56,7 @@ server/
 ```
 
 - 모듈 하나는 파일 하나입니다. 파일 이름은 모듈 이름을 snake_case로 씁니다. (`LeakGuard` → `leak_guard.py`)
-- 각 모듈의 문서는 `docs/`에 하나만 작성. 관련 자료형과 열거형은 담당 모듈 파일 안에 함께 정의
+- 각 모듈의 문서는 `docs/`에 하나만 작성. 공유 자료형의 위치는 아래 기준 적용
 - 요청받은 코드와 문서만 추가. 이번 모듈의 테스트는 저장소 외부에서 작성·실행
 
 ## 모듈 사이 데이터 형식
@@ -78,8 +80,12 @@ class Rule(BaseModel):
 
 ### 각 모듈에서 주고받는 데이터 형식
 
-자료형은 담당 모듈 파일에 정의하고 필요한 모듈에서 import.
-예를 들어 작업 종류인 `PromptIdx`와 파싱 결과 자료형은 `app/runtime/local_res_parser.py`에 함께 정의.
+| 구분 | 위치 | 예시 |
+| --- | --- | --- |
+| 두 모듈 이상이 주고받는 것 | `app/models/` | `EndReason`, `PromptIdx` → `app/models/enums.py` |
+| 한 모듈 안에서만 쓰는 것 | 그 모듈 파일 안 | `Rule`을 PrivacySettings만 쓰면 `privacy_settings.py` 안 |
+
+처음엔 모듈 안에 뒀다가 다른 모듈도 쓰게 되면 `app/models/`로 옮깁니다.
 
 ### 타입 힌트는 필수
 

@@ -1,77 +1,19 @@
 """설계 5.2: 모델 출력 형식 검사 및 작업별 결과 반환."""
 
 import json
-from enum import StrEnum
-from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-
-# 작업 종류와 반환 자료형
-class PromptIdx(StrEnum):
-    DETECT = "DETECT"
-    NEEDS = "NEEDS"
-    JUDGE = "JUDGE"
-    WRITE = "WRITE"
-    REWRITE = "REWRITE"
-    GUARD = "GUARD"
-    ANSWER = "ANSWER"
-    PARSE_RULES = "PARSE_RULES"
-    MATCH_RULES = "MATCH_RULES"
-    CONSENT = "CONSENT"
-    DECIDE_CONTEXT = "DECIDE_CONTEXT"
-    FRONTIER = "FRONTIER"
-    MEMO_SUMMARY = "MEMO_SUMMARY"
-
-
-Index = Annotated[int, Field(ge=0)]
-ContextMode = Literal["keep", "reset"]
-
-
-class DetectedItem(BaseModel):
-    # 데이터베이스 ID와 실행 중 허용 상태는 호출자가 정의
-    text: str  # 검출한 개인정보 문자열
-    # 개인정보 분류 번호(0 식별, 1 민감, 2 속성)
-    category: Annotated[int, Field(ge=0, le=2)]
-
-
-class Plan(BaseModel):
-    # 모델 출력의 필드 이름과 파이썬 변수 이름 대응 설정
-    model_config = ConfigDict(populate_by_name=True)
-
-    enough: bool  # 답변에 필요한 정보 충족 여부
-    need_consent: bool = Field(alias="needConsent")  # 추가 동의 필요 여부
-    consent_items: list[int] = Field(alias="consentItems")  # 동의 대상 개인정보 ID 목록
-    need: list[str]  # 추가로 필요한 정보 목록
-
-
-class Rule(BaseModel):
-    target: str  # 규칙 적용 대상
-    scope: Literal["item", "category"]  # 항목 또는 분류 단위의 규칙 적용 범위
-    action: Literal["allow", "deny"]  # 허용·거절 구분
-
-
-class RuleMatch(BaseModel):
-    # 입력 목록에서 0부터 시작하는 항목 번호. 데이터베이스의 개인정보 ID와 구분
-    item: Index  # 입력 개인정보 항목 번호
-    rules: list[Index]  # 일치하는 규칙 번호 목록
-
-
-class ConsentText(BaseModel):
-    purpose: str  # 개인정보 사용 목적
-    benefit: str  # 동의 시 기대 효과
-    risk: str  # 동의 시 예상 위험
-
-
-ParsedResult = (
-    str
-    | list[DetectedItem]
-    | list[str]
-    | Plan
-    | list[int]
-    | list[Rule]
-    | list[RuleMatch]
-    | ConsentText
+from ..models.enums import PromptIdx
+from ..models.llm_results import (
+    ConsentText,
+    ContextMode,
+    DetectedItem,
+    Index,
+    ParsedResult,
+    Plan,
+    Rule,
+    RuleMatch,
 )
 
 
