@@ -16,6 +16,7 @@ Python 표준인 [PEP 8](https://peps.python.org/pep-0008/#naming-conventions)�
 ## 폴더 구조
 
 서버와 화면을 루트에서 폴더 두 개로 나눕니다. 명령(`uv`, `npm`)은 각자 자기 폴더 안에서 실행합니다.
+로컬 모델 래퍼를 사용하는 실행은 [LocalLLMRunner 문서](local-llm-runner.md#사용법과-입출력)의 Python 경로 설정 적용.
 
 ```
 private-llm-pipeline/
@@ -30,10 +31,9 @@ private-llm-pipeline/
 
 ```
 server/
-├── app/
+└── app/
 │   ├── main.py                 컨트롤러 (단계 순서 · 종료 조건)
 │   ├── api/                    화면 ↔ 서버 API · SSE
-│   ├── models/                 여러 모듈이 같이 쓰는 데이터 구조 · 열거형
 │   ├── pipeline/               파이프라인 핵심 모듈
 │   │   ├── planner.py
 │   │   ├── request_writer.py
@@ -48,18 +48,16 @@ server/
 │   │   ├── local_res_parser.py
 │   │   ├── frontier_client.py
 │   │   └── context_manager.py
+│   ├── models/                 모듈 사이에서 공유하는 자료형 · 열거형
 │   └── data/                   데이터 관리 모듈 (프롬프트 · 메모 · 채팅)
 │       ├── prompt_manager.py
 │       ├── memo_manager.py
 │       └── chat_manager.py
-└── tests/
-    ├── pipeline/
-    │   └── test_planner.py
-    └── ...
 ```
 
 - 모듈 하나는 파일 하나입니다. 파일 이름은 모듈 이름을 snake_case로 씁니다. (`LeakGuard` → `leak_guard.py`)
-- 테스트는 `tests/` 아래에 `app/`과 **같은 폴더 구조**로 두고, 파일 이름은 `test_` + 모듈 파일 이름입니다.
+- 각 모듈의 문서는 `docs/`에 하나만 작성. 공유 자료형의 위치는 아래 기준 적용
+- 요청받은 코드와 문서만 추가. 이번 모듈의 테스트는 저장소 외부에서 작성·실행
 
 ## 모듈 사이 데이터 형식
 
