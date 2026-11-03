@@ -310,8 +310,8 @@ class LocalLLMRunner:
         출력 형식 오류, 연결·수신 오류, 타임아웃 또는 생성 실패 시 같은 입력으로 최대 3회 요청.
         중지 요청은 재시도 없이 반환. 타임아웃 뒤에는 이전 수신 정리 후 다음 요청 진행.
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
-        마지막 시도도 출력 형식 오류면 (None, False, 총 입력 토큰 수, 총 출력 토큰 수, parse_failed) 반환.
-        마지막 모델 요청 오류는 원래 예외 전달. 실패 응답은 해당 종료 사유로 반환.
+        3회 모두 실패하면 오류 종류와 관계없이
+        (None, False, 총 입력 토큰 수, 총 출력 토큰 수, parse_failed) 반환.
         입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
         """
         prompt_idx = PromptIdx(prompt_idx)
@@ -378,8 +378,6 @@ class LocalLLMRunner:
                         last_output = "".join(output) or last_output
                         if stop_signal.is_set():
                             return last_output, False, None, None, "stopped"
-                        if attempt == MAX_ATTEMPTS - 1:
-                            raise
                         continue
                     # 재생성을 포함한 총 사용량. 사용량을 받지 못한 요청이 있으면 None
                     input_tokens = (
@@ -403,14 +401,6 @@ class LocalLLMRunner:
                         )
                     if not result[1]:
                         last_output = result[0]
-                        if attempt == MAX_ATTEMPTS - 1:
-                            return (
-                                result[0],
-                                False,
-                                input_tokens,
-                                output_tokens,
-                                result[4],
-                            )
                         continue
                     # 출력 형식 오류만 재시도. 파서 내부 코드의 오류는 호출자에게 전달
                     try:
@@ -450,6 +440,9 @@ class LocalLLMRunner:
                 if stop_signal.is_set():
                     return result[0], False, input_tokens, output_tokens, "stopped"
                 return parsed, True, input_tokens, output_tokens, result[4]
+            if stop_signal.is_set():
+                return last_output, False, input_tokens, output_tokens, "stopped"
+            # 파싱·연결·타임아웃·생성 실패 모두 기존 실패 반환값으로 통일
             return None, False, input_tokens, output_tokens, "parse_failed"
 
     def regen(
