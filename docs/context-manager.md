@@ -1,23 +1,23 @@
 # ContextManager 사용과 처리 흐름
 
-**대상:** [context_manager.py](../server/app/runtime/context_manager.py)의 `ContextManager`. 설계 5.4에 대응하며 로컬 모델의 대화 이력을 보관하고 압축한다.
+**대상:** [context_manager.py](../server/app/runtime/context_manager.py)의 `ContextManager`. 설계 5.4의 이전 대화 저장, 토큰 수 계산 및 대화 압축 처리. 대화 압축은 기존 대화를 모델로 요약해 저장 내용을 줄이는 기능.
 
-**인스턴스:** 컨텍스트를 사용하는 run_id마다 1개를 생성해 재사용한다. 프로그램 전체에는 여러 개가 존재할 수 있고, 모두 [Runner 1개](local-llm-runner.md)의 모델을 공유한다. 각 관리자 안에서 다시 `(chat_id, prompt_idx)`별 이력을 분리한다.
+**객체 수:** 이전 대화를 사용하는 실행 ID(run_id)마다 1개를 생성해 재사용. 프로그램 전체에서 여러 객체를 사용할 수 있으며 모두 [LocalLLMRunner 1개](local-llm-runner.md)의 모델을 공유. 각 객체 안에서 채팅 ID(chat_id)와 작업 종류(prompt_idx)에 따라 대화 내용 분리.
 
 ## 처리 흐름
 
 ```mermaid
 flowchart TD
-    A["append: 기존 내용과 새 내용 합산"] --> B{"28K 이상인가"}
+    A["append: 기존 대화에 새 내용 추가"] --> B{"28,000토큰 이상인가"}
     B -->|아니오| C["합산 내용을 메모리에 반영"]
-    B -->|예| D["기존 내용만 5K 목표로 압축"]
-    D --> E["요약과 새 원문을 합쳐 28K 미만인지 확인"]
-    E --> F["메모리에 반영 후 압축 결과 기록 연결점 호출"]
+    B -->|예| D["기존 대화만 5,000토큰 목표로 요약"]
+    D --> E["요약과 새 내용을 합쳐 28,000토큰 미만인지 확인"]
+    E --> F["메모리의 대화 교체 후 요약 로그 함수 호출"]
 ```
 
-- 압축 요청의 생성 상한은 7,000토큰이다. 5,000토큰은 목표이며 초과한 정상 요약도 사용한다.
-- 압축 요청은 stop이 와도 완료까지 처리한다. 일반 호출 로그를 끄고 반영된 요약만 별도로 기록한다.
-- 새 내용만으로 임계값에 도달하거나 압축 뒤 합산 내용도 임계값 이상이면 예외다. 실제 생성 실패·빈 요약도 예외이며 기존 내용을 보존한다.
+- 요약 응답은 최대 7,000토큰. 5,000토큰은 목표로만 사용하며 초과한 요약도 사용
+- 중지 신호가 와도 요약 완료까지 수신. 일반 요청 로그를 생략하고 저장된 요약으로 별도 로그 함수 호출. 실제 데이터베이스 저장 코드는 미구현
+- 새 내용만으로 토큰 한도에 도달하거나 요약 후 합산 내용도 한도 이상인 경우 예외 발생. 요약 생성 실패나 빈 요약도 예외로 전달하고 기존 대화 유지
 
 ## 사용법과 입출력
 
@@ -30,26 +30,26 @@ manager.compact_context(context_id)
 summary = manager.get_context(context_id)
 ```
 
-`request(..., use_context=True)`는 정상 대화를 자동 누적한다. 위 append는 직접 이력을 관리할 때 사용하며, 같은 대화를 수동으로 다시 추가하지 않는다.
+`request(..., use_context=True)`는 형식 검사를 통과한 답변과 해당 입력을 자동으로 저장. 위 append는 직접 대화 내용을 관리할 때 사용. request로 저장한 대화를 append로 다시 추가하면 중복 저장되므로 한 가지 방식 선택.
 
 | 호출 | 반환과 사용 기준 |
 | --- | --- |
-| `get_id(chat_id, prompt_idx)` | 같은 조합의 ID를 재사용하고 없으면 생성한다. 반환은 int다. |
-| `new_id()` | 채팅·작업에 매핑하지 않은 독립 ID를 만든다. |
-| `get_context(context_id)` | 현재 문자열을 반환한다. |
-| `get_context_length(context_id)` | 동일 모델의 실제 토크나이저로 계산한 토큰 수를 반환한다. |
-| `append(context_id, text)` | 새 내용을 붙이고 필요하면 기존 내용을 자동 압축한다. 반환은 None이다. |
-| `compact_context(context_id)` | 명시적으로 압축한다. 빈 이력은 생략하며 반환은 None이다. 결과는 get_context로 읽는다. |
+| `get_id(chat_id, prompt_idx)` | 채팅·작업에 해당하는 대화 번호 조회 또는 생성. 반환값은 int |
+| `new_id()` | 채팅·작업에 연결하지 않은 새 대화 번호 발급 |
+| `get_context(context_id)` | 해당 대화 번호에 저장된 문자열 반환 |
+| `get_context_length(context_id)` | 저장된 대화를 응답 생성 모델 기준으로 토큰화해 토큰 수 반환 |
+| `append(context_id, text)` | 새 내용 추가 후 토큰 한도에 따라 기존 대화 요약. 반환값은 None |
+| `compact_context(context_id)` | 저장된 대화를 바로 요약. 빈 대화는 생략. 반환값은 None이며 결과는 get_context로 조회 |
 
-- 설정을 바꾸려고 `ContextManager(runner, run_id, ...)`를 직접 만들면 같은 실행을 요청하기 전에 `runner.context_managers[run_id]`에 등록한다. 기본 사용은 get_context_manager로 조회한다.
-- context_id는 해당 관리자 안에서만 유효하다. 서로 다른 실행의 ID가 같은 정수여도 이력은 별개다.
-- 저장은 인스턴스 메모리 방식이다. 다른 run_id에는 이전 실행의 이력을 자동으로 이어 붙이지 않는다.
+- `ContextManager(runner, run_id, ...)`로 객체를 직접 만들 경우 request 호출 전에 `runner.context_managers[run_id]`에 등록. 기본 설정으로 사용할 때는 get_context_manager로 조회
+- context_id는 해당 객체 안에서 사용하는 대화 번호. 서로 다른 실행의 대화 번호가 같아도 저장 내용은 별개
+- 대화 내용은 객체의 메모리에 저장. 다른 run_id로 요청하면 기존 실행의 대화는 자동으로 사용하지 않음
 
 ## 설계서 대비 추가 및 변경
 
-- **실행별 인스턴스:** Runner의 `get_context_manager(run_id)`로 관리자 여러 개를 보관한다. 내부 저장소는 ID를 키로 사용하는 dict이며 메모리 접근에 RLock을 사용한다.
-- **압축 시점:** 원설계 37쪽의 기존 길이 검사 대신 새 내용을 합친 길이로 28K 경계를 검사한다. 사용자 확정 사항이다. 내부 압축 생성은 공통 `_compact_text()`가 수행한다.
-- **목표와 상한 분리:** 원설계의 5K 목표에 생성 상한 7K를 별도로 둔다. 5K 초과를 성공 실패 조건으로 쓰지 않는다.
-- **압축 중지 정책:** 진행 중인 압축은 완료·반영한다. 자동 압축 중 stop이면 바깥 request가 이후 stopped를 반환하며 이미 완성된 대화도 남는다.
-- **반환 해석:** compactContext의 함수 표는 void, 상세 절차는 생성 결과 리턴으로 적혀 있다. 현재는 표의 void를 따라 None을 반환하고 get_context로 결과를 읽는다.
-- **DB 기록:** 최신 [스키마](db-schema.md)와 사용자 결정에 따라 전용 컨텍스트 테이블 저장·복원은 사용하지 않는다. 압축 반영 후 `messages.role="context_compacted"`, `content=요약`으로 한 번 저장할 예상 호출을 주석으로 둔다. 시각은 ChatManager의 createdAt이며 압축 원문은 저장하지 않는다. 독립 new_id의 기록은 먼저 채팅 귀속을 정해야 한다.
+- **객체 관리:** Runner의 `get_context_manager(run_id)`에서 실행별 객체 조회 또는 생성. 대화 번호와 문자열은 dict에 저장. 같은 스레드에서 다시 획득할 수 있는 RLock으로 메모리 접근 보호
+- **자동 요약 시점:** 설계 37쪽의 기존 대화 길이만 검사하는 방식에서 새 내용을 포함해 28,000토큰 이상인지 검사하는 방식으로 변경. 실제 요약 요청은 `_compact_text()`에서 처리
+- **요약 길이:** 목표 5,000토큰과 최대 응답 7,000토큰을 구분. 목표를 넘긴 요약도 사용
+- **중지 처리:** 요약 완료 후 메모리에 반영. 자동 요약 중 중지 신호를 받으면 request에서 이후 stopped 반환. 이미 완성된 입력·답변은 유지
+- **반환값:** 설계서 함수 표의 ‘반환값 없음’에 맞춰 compact_context는 None 반환. 요약 결과는 get_context로 조회
+- **데이터베이스 기록:** 최신 [테이블 구조](db-schema.md)에 따라 별도 컨텍스트 테이블은 사용하지 않음. 요약 반영 후 `messages.role="context_compacted"`, `content=요약`으로 한 번 저장할 코드를 주석 처리. 저장 시각은 ChatManager에서 createdAt에 기록할 예정. 요약 전 원문은 저장하지 않으며, new_id로 직접 발급한 대화 번호는 먼저 채팅과 연결 필요

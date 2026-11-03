@@ -104,36 +104,22 @@ class PrivacySettings:
 | 5.3 `FrontierClient` | `frontier_client.py` · `FrontierClient` | `checkConnection()` → `check_connection()`, `send()`, `decideContext()` → `decide_context()` | `lastRequest` → `last_request`, `frontierSysPromIdx` → `frontier_sys_prom_idx`, `contextRecognizeSysPromIdx` → `context_recognize_sys_prom_idx` |
 | 5.4 `ContextManager` | `context_manager.py` · `ContextManager` | `getId()` → `get_id()`, `newId()` → `new_id()`, `getContext()` → `get_context()`, `append()`, `getContextLength()` → `get_context_length()`, `compactContext()` → `compact_context()` | |
 
-`reGen()`은 요청문 재작성의 `regenLimit`과 맞춰 `regen`을 한 단어로 봅니다.
+`reGen()`의 파이썬 함수 이름은 `regen`. 설계서의 요청문 재작성 횟수 변수 `regenLimit`과 같은 단어 표기.
 
-2026년 11월 3일 사용자 결정으로 5.1의 컨텍스트 사용 여부는 작업 목록 대신
-`request(..., use_context=False)`의 bool 인자로 호출마다 지정합니다. True인 경우에만
-채팅·작업별 컨텍스트를 조회하고 정상 결과를 누적하며, 생성자 `context_tasks`는 사용하지 않습니다.
+5.1·5.2·5.4 구현 기준:
 
-같은 날 추가 결정으로 `regen(input_, system_prompt, use_context=False, context_id=None)`은
-기존 출력을 고치라는 지시를 붙이지 않고 같은 입력을 다시 생성합니다. 컨텍스트를 사용할 때는
-해당 ID의 이력을 읽기만 하며, 누적은 `request()`가 최종 성공 시 한 번만 수행합니다.
-원본 PDF의 `reGen()`에 이전 출력·오류 안내를 덧붙이는 설명은 이 결정으로 대체합니다.
-
-같은 날 후속 결정으로 `run_id`는 Runner 생성자 대신 `request()`마다 받습니다.
-모델은 한 번 생성하고 `get_context_manager(run_id)`로 실행별 ContextManager를 따로 보관합니다.
-직접 구성하는 관리자는 `ContextManager(runner, run_id)`이며, 컨텍스트를 읽는 단독 regen에도 run_id가 필요합니다.
-수동·작업·재생성은 `_generate()`를 공유하며 request 내부에서 다른 공개 생성 함수를 호출하지 않습니다.
-완료된 빈 출력도 형식 실패 3회에 포함합니다. 압축은 중지 신호가 와도 요청 완료까지 처리하고,
-5K 목표 초과를 실패 조건으로 사용하지 않습니다. 합산 길이로 28K 압축을 시작하는 조건은 유지합니다.
-일반 로그에는 실행·작업·버전·소요 시간·검사 결과와 새 입력·출력을 전달합니다.
-PromptManager는 향후 `(프롬프트 본문, 버전)`을 반환하며 미구현 조회·저장 호출은 주석으로 둡니다.
-
-같은 날 5.4의 압축 기록은 전용 컨텍스트 테이블 대신 `messages`를 사용하기로 결정했습니다.
-성공한 압축 결과를 반영한 뒤에만 `ChatManager.save_message(chat_id, "context_compacted", result)`를
-한 번 호출할 예정이며, `role`로 구분하고 `content`에는 요약만 넣습니다. 시각은 ChatManager가
-`createdAt`에 기록합니다. 현재 호출은 주석 상태이며 일반 추가의 DB 저장·복원은 하지 않습니다.
-
-2026년 11월 3일 사용자 결정으로 5.2는 클래스와 `check()` 없이 모듈 함수 `parser()` 하나로 구현합니다.
-정상 결과만 반환하고 형식 오류는 `OutputFormatError`로 올립니다. Runner는 이 오류만 잡으며,
-`MAX_FORMAT_FAILURES=3`에 따라 최초 응답 포함 3회 형식 불일치면
-`(None, False, 입력 토큰 합계, 출력 토큰 합계, "parse_failed")`를 반환합니다.
-최종 실패는 원본 PDF 5.1의 실패 반환 방식을 따릅니다. `MAX_REGEN` 횟수 설명은 위 3회 기준으로 대체합니다.
+- `use_context`: 요청에 이전 대화를 사용할지 선택하는 값. 기본 False. True일 때만 채팅·작업별 이전 대화를 조회하고 최종 입력·답변 저장. 생성자의 context_tasks 설정은 사용하지 않음
+- `regen()`: 같은 입력과 시스템 프롬프트로 답변 재생성. 설계서의 이전 출력·오류 안내 추가는 생략. 이전 대화 사용 시 해당 내용을 조회만 하고 저장은 request에서 최종 성공 시 한 번 처리
+- `run_id`: request마다 전달할 작업 실행 ID. Runner 생성자에서는 받지 않으며 이전 대화를 사용하는 regen에도 필요
+- `get_context_manager(run_id)`: 해당 실행의 ContextManager 조회 또는 생성. 프로그램에서 모델 하나를 공유하고 실행별 대화 내용은 분리. 직접 생성할 때는 `ContextManager(runner, run_id)` 사용
+- `_generate()`: manual_request, request, regen에서 공유하는 응답 생성 함수. request 안에서 다른 공개 요청 함수를 호출하는 방식은 사용하지 않음
+- 대화 압축: 기존 대화와 새 내용을 합쳐 28,000토큰 이상이면 기존 대화를 요약. 목표 5,000토큰을 넘긴 요약도 사용하고 중지 신호가 와도 요약 완료까지 처리
+- 일반 요청 로그: 실행 ID, 작업 종류, 프롬프트 버전, 소요 시간, 형식 검사 결과, 새 입력 및 생성된 답변. 이전 대화 전체는 기록 대상에서 제외
+- 프롬프트 조회: PromptManager에서 `(프롬프트 본문, 버전)`을 반환할 예정. 미구현 조회·저장 코드는 주석 처리
+- 압축 결과 저장: 별도 컨텍스트 테이블 없이 요약 반영 후 `ChatManager.save_message(chat_id, "context_compacted", result)` 한 번 호출 예정. messages의 role은 기록 종류, content는 요약 결과, createdAt은 ChatManager에서 기록할 저장 시각. 일반 대화의 데이터베이스 저장·복원은 생략
+- `parser()`: 클래스와 check 함수 없이 출력 형식 검사 후 결과 반환. 형식 오류는 OutputFormatError로 전달하고 Runner에서 이 예외만 처리. 작업 종류와 반환 자료형도 파서 파일 안에 정의
+- `MAX_FORMAT_FAILURES`: 최초 응답을 포함한 출력 형식 오류 허용 횟수 3회. 응답이 정상 종료됐더라도 빈 문자열이나 공백뿐이면 횟수에 포함
+- 형식 오류 3회 시 설계 5.1의 실패 반환 방식에 따라 `(None, False, 총 입력 토큰 수, 총 출력 토큰 수, "parse_failed")` 반환. 재생성 횟수에 관한 설계서 설명은 위 기준 적용
 
 ### 6. 데이터 관리 (`app/data/`)
 

@@ -60,9 +60,9 @@ my_app/
 ```
 
 현재 작업 폴더가 아니라 **실행한 Python 파일의 폴더**를 기준으로 그 하위폴더까지 찾습니다.
-그곳에 키가 없으면 **`llama_wrapper.py`가 있는 폴더와 하위폴더**에서 찾습니다.
+그곳에 키가 없으면 **`llama_wrapper.py`가 있는 폴더와 하위 폴더**에서 검색.
 저장소에서 모듈을 테스트할 때는 이 폴더(`src/localLLM_API_proxy/`)에
-`llama_api_key_01.key`처럼 키 파일만 두면 됩니다. Runner에 키 경로를 넣지 않습니다.
+`llama_api_key_01.key` 같은 인증키 파일 배치. 키 검색은 래퍼에서 처리하므로 LocalLLMRunner에 경로를 지정할 필요 없음.
 로컬 실행시에는 키를 확인하지 않습니다.
 
 ## 호출
@@ -96,10 +96,10 @@ GPU가 있어도 원격 서버만 사용하려면 `Llama(backend="remote")`로 �
 | `response["model"]`, `response["id"]` | 모델 이름과 요청 ID |
 | `response.get("timings", {})` | 서버의 속도·캐시·MTP 통계. 원본 라이브러리에는 보장되지 않음 |
 
-원격 스트리밍은 기본적으로 `include_usage=True`를 요청하고
-`enable_thinking=False`로 본문 응답을 받습니다. 원격 전용 옵션은 이 래퍼에서
-처리하므로 호출자는 원본과 공통인 `messages`, `stream`, `max_tokens`만 전달해도 됩니다.
-명시한 `stream_options`와 `chat_template_kwargs`는 기본값보다 우선합니다.
+원격 서버에서 답변을 실시간으로 받을 때 기본적으로 `include_usage=True`로 토큰 사용량을 요청하고
+`enable_thinking=False`로 본문 응답 요청. 서버별 설정은 이 래퍼에서 처리하므로
+호출자는 원본 라이브러리와 같은 `messages`, `stream`, `max_tokens` 인자 사용 가능.
+호출자가 지정한 `stream_options`와 `chat_template_kwargs`는 기본값보다 우선 적용.
 
 추론은 `response["choices"][0]["message"].get("reasoning_content")`로 확인합니다. `reasoning_content`, `tool_calls`(도구), 스트림의 `delta`는 해당 기능 사용 시에만 생길 수 있습니다. 요청이 성공해도 답변이 비어 있으면 해당 필드와 토큰 한도를 확인하세요.
 
@@ -115,5 +115,5 @@ GPU가 있어도 원격 서버만 사용하려면 `Llama(backend="remote")`로 �
 .venv\Scripts\python.exe -m example.example_json
 ```
 
-예제용 키는 이 폴더 또는 `example/keys/`에 복사하세요. 기존 상위 `컴종설/keys/`는 자동 검색하지 않습니다.
+예제용 인증키는 이 폴더 또는 `example/keys/`에 복사. 상위 `컴종설/keys/`는 자동 검색 대상에서 제외.
 `example/example_chat.py`는 전체 응답과 최종 답변을 출력합니다.

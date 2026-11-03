@@ -1,7 +1,7 @@
-"""내부 테스트용 단일 파일 Llama 어댑터.
+"""로컬 모델과 원격 서버에 같은 Llama 호출 방식으로 요청하는 테스트용 래퍼.
 
-적격 로컬 CUDA에서는 원본 llama_cpp.Llama 인스턴스를 직접 반환한다.
-그 외 환경에서는 고정된 서버와 실행 파일 또는 래퍼 주변의 키 파일을 사용한다.
+지원하는 로컬 CUDA 환경에서는 원본 llama_cpp.Llama 객체 반환.
+그 외 환경에서는 지정된 서버 주소와 실행 파일 또는 래퍼 폴더의 인증키 사용.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def resolve_server_token(
     server_token: str | None = None,
     server_token_file: str | Path | None = None,
 ) -> tuple[str, Path | None]:
-    """명시한 토큰을 우선하고, 없으면 실행 코드와 래퍼 폴더에서 키를 찾는다."""
+    """인자로 전달한 인증키를 우선 사용하고 없으면 실행 파일·래퍼 폴더에서 검색."""
     if server_token is not None:
         return _validate_token(server_token), None
     if server_token_file is not None:
@@ -931,8 +931,7 @@ class AdaptiveLlama:
                 else function_call
             )
         if values.get("stream"):
-            # 원격 전용 옵션은 Runner가 아니라 어댑터 내부에서 처리한다.
-            # 명시한 호출 옵션은 유지한다.
+            # 원격 서버의 사용량 반환 및 본문 응답 설정. 호출자가 지정한 값 우선
             values.setdefault("stream_options", {"include_usage": True})
             values.setdefault("chat_template_kwargs", {"enable_thinking": False})
         payload = self._sampling_params(values, chat=True)

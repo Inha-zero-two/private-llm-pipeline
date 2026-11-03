@@ -1,4 +1,4 @@
-"""설계 5.4: 채팅/작업별 로컬 컨텍스트와 토큰 기준 자동 압축."""
+"""설계 5.4: 실행·채팅·작업별 이전 대화 관리 및 토큰 수에 따른 자동 요약."""
 
 from __future__ import annotations
 
@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .local_llm_runner import LocalLLMRunner
 
+# 이전 대화를 자동으로 요약할 기준 토큰 수
 COMPACTION_LIMIT = 28000
+# 요약 결과의 목표 토큰 수
 COMPACTION_TARGET = 5000
-# 요약 목표와 생성 상한은 구분해 모델이 요약을 마칠 여유를 둔다.
+# 요약 응답의 최대 토큰 수. 요약을 마칠 수 있도록 목표보다 크게 설정
 COMPACTION_MAX_TOKENS = 7000
 
 
@@ -23,10 +25,11 @@ class ContextManager:
         compaction_limit: int = COMPACTION_LIMIT,
         compaction_target: int = COMPACTION_TARGET,
     ) -> None:
-        """한 run_id의 채팅·작업별 이력을 보관하며 공유 Runner로 토큰화·압축한다.
+        """한 실행에서 사용할 이전 대화 저장 공간과 압축 설정 초기화.
 
-        compaction_limit은 자동 압축을 시작할 토큰 수이고 compaction_target은
-        요약 프롬프트의 목표다. 같은 실행에서 재사용하며 이력은 메모리에 보관한다.
+        runner: 프로그램에서 공유하는 모델 실행 객체. run_id: 실행 ID.
+        compaction_limit: 자동 요약 기준 토큰 수. compaction_target: 요약 목표 토큰 수.
+        같은 실행에서 객체를 재사용하고 이전 대화는 메모리에 저장.
         """
         if not 0 < compaction_target < compaction_limit:
             raise ValueError("Require 0 < compaction_target < compaction_limit")
@@ -34,18 +37,17 @@ class ContextManager:
         self.run_id = run_id
         self._limit = compaction_limit
         self._target = compaction_target
-        self._contexts: dict[int, str] = {}
-        self._ids: dict[tuple[str, str | int], int] = {}
-        self._next_id = 0
-        self._lock = RLock()
-        # 대화 컨텍스트는 인스턴스 메모리에만 보존한다.
-        # DB 기록 연결점은 압축 결과가 실제로 반영된 때에만 호출한다.
+        self._contexts: dict[int, str] = {}  # 대화 번호별 저장 내용
+        self._ids: dict[tuple[str, str | int], int] = {}  # 채팅·작업별 대화 번호
+        self._next_id = 0  # 다음에 할당할 대화 번호
+        self._lock = RLock()  # 같은 스레드에서 다시 획득할 수 있는 대화 접근 잠금
+        # 일반 대화는 메모리에 저장. 요약 결과를 반영한 경우에만 로그 함수 호출
 
     def new_id(self) -> int:
-        """이 관리자 안에서 고유한 정수 ID를 만들고 빈 이력을 준비한다.
+        """현재 객체 안에서 사용할 새 대화 번호를 발급하고 빈 대화 생성.
 
-        채팅·작업과의 연결은 get_id가 담당한다. 직접 만든 ID는 채팅 귀속을
-        별도로 연결해야 향후 압축 결과를 해당 채팅의 messages에 기록할 수 있다.
+        채팅·작업에 대화 번호를 연결하는 역할은 get_id에서 처리.
+        직접 발급한 번호로 요약을 기록하려면 먼저 어느 채팅의 대화인지 연결 필요.
         """
         with self._lock:
             context_id = self._next_id
@@ -54,10 +56,10 @@ class ContextManager:
             return context_id
 
     def get_id(self, chat_id: str, prompt_idx: str | int) -> int:
-        """채팅·작업 조합에 연결된 ID를 반환하고 첫 조회라면 빈 이력을 만든다.
+        """채팅·작업에 해당하는 대화 번호 조회 또는 생성.
 
-        같은 관리자 안에서는 같은 조합의 ID를 재사용한다. 실행 간 분리는
-        run_id마다 별도로 생성한 ContextManager 인스턴스가 담당한다.
+        같은 객체 안에서는 같은 채팅·작업의 번호 재사용.
+        서로 다른 실행은 별도로 생성한 ContextManager 객체로 대화 분리.
         """
         with self._lock:
             key = (chat_id, prompt_idx)
@@ -66,29 +68,29 @@ class ContextManager:
             return self._ids[key]
 
     def get_context(self, context_id: int) -> str:
-        """ID에 저장된 현재 이력 문자열을 반환한다. 압축 후에는 반영된 요약을 읽는다."""
+        """대화 번호에 저장된 문자열 반환. 압축 후에는 요약으로 바뀐 내용 조회."""
         with self._lock:
             return self._contexts[context_id]
 
     def get_context_length(self, context_id: int) -> int:
-        """현재 이력을 공유 모델로 토큰화하고 그 토큰 수를 반환한다.
+        """저장된 대화를 모델 기준으로 토큰화하고 토큰 수 반환.
 
-        호출자가 전달한 문자열 길이나 생성 응답의 사용량 대신 실제 저장된 이력을 센다.
+        계산 대상은 현재 저장된 대화 전체. 응답 생성에 사용한 토큰 수와 구분.
         """
         return len(self._runner.tokenize(self.get_context(context_id)))
 
     def append(self, context_id: int, additional_context: str) -> None:
-        """새 내용을 붙이고 합산 길이가 한도 이상이면 기존 내용만 압축한다.
+        """이전 대화에 새 내용을 추가하고 토큰 한도에 도달하면 기존 내용 요약.
 
-        새 원문은 그대로 유지하며, 요약과 새 내용을 합친 길이를 다시 검사한다.
-        생성·길이 검사에 성공한 뒤 이력을 교체하고 압축 로그 연결점을 한 번 호출한다.
-        반영 전 오류가 나면 기존 이력을 유지한다. 반환값은 None이다.
+        새 내용은 요약하지 않고 유지. 요약 결과와 새 내용을 합쳐 토큰 수 다시 확인.
+        검사 통과 후 메모리의 대화를 교체하고 요약 로그 함수 한 번 호출.
+        교체 전 오류 발생 시 기존 대화 유지. 반환값은 None.
         """
         with self._lock:
             current = self._contexts[context_id]
             candidate = current + additional_context
             summary = None
-            # 추가 후 한도를 넘어가는 경우도 검사해 다음 생성의 컨텍스트 초과를 막는다.
+            # 새 내용을 포함한 토큰 수 확인
             if len(self._runner.tokenize(candidate)) >= self._limit:
                 if not current:
                     raise ValueError("New context alone reaches the compaction limit")
@@ -101,10 +103,10 @@ class ContextManager:
                 self._log_compaction(context_id, summary)
 
     def compact_context(self, context_id: int) -> None:
-        """한도 도달 여부와 관계없이 현재 이력을 압축하고 성공한 요약으로 교체한다.
+        """현재 저장된 대화를 바로 요약하고 결과로 교체.
 
-        빈 이력은 생략한다. 요약을 반영한 뒤 압축 로그 연결점을 호출하며,
-        결과는 get_context로 읽는다. 반환값은 None이다.
+        빈 대화는 생략. 요약을 메모리에 반영한 뒤 요약 로그 함수 호출.
+        반환값은 None. 요약 결과는 get_context로 조회.
         """
         with self._lock:
             current = self._contexts[context_id]
@@ -115,11 +117,11 @@ class ContextManager:
             self._log_compaction(context_id, summary)
 
     def _compact_text(self, text: str) -> str:
-        """전달된 대화를 요약 요청의 데이터로 보내고 요약 문자열을 반환한다.
+        """전달받은 대화로 요약을 요청하고 요약 문자열 반환.
 
-        목표는 기본 5K, 생성 상한은 7K이며 stop이 와도 수신을 마친다.
-        일반 호출 로그는 끄고, 요약 반영과 별도 기록은 호출자가 담당한다.
-        실제 호출 오류는 전파하며, 실패 응답이나 빈 요약도 예외로 알린다.
+        기본 목표는 5,000토큰, 최대 응답은 7,000토큰. 중지 신호와 관계없이 끝까지 수신.
+        일반 요청 로그는 생략. 요약 저장과 별도 로그 기록은 호출한 함수에서 처리.
+        요청 중 오류, 실패 응답 또는 빈 요약은 예외로 전달.
         """
         system_prompt = (
             f"Summarize the conversation in at most {self._target} tokens. "
@@ -135,23 +137,23 @@ class ContextManager:
             log_call=False,
             interruptible=False,
         )
-        # 중지 요청이 와도 압축은 끝까지 받는다. 실제 호출 오류는 그대로 전파한다.
+        # 중지 신호가 있어도 요약 완료까지 수신. 요청 중 발생한 예외는 호출자에게 전달
         if not success or not summary.strip():
             raise RuntimeError(f"Context compaction failed: {reason}")
-        # 5K는 프롬프트의 목표다. 초과한 정상 결과도 수정·절단 없이 사용한다.
+        # 목표 토큰 수를 넘긴 요약도 자르거나 수정하지 않고 사용
         return summary
 
     def _log_compaction(self, context_id: int, result: str) -> None:
-        """압축이 반영된 시점에 messages에 요약 한 건을 남길 연결점이다.
+        """대화 압축 시점과 요약 결과 기록. 실제 저장은 미구현.
 
-        context_id의 채팅에 role=context_compacted, content=result로 저장할 자리다.
-        저장 시각은 ChatManager가 맡으며, 현재 DB 호출은 주석 상태다.
+        저장 대상: context_id에 해당하는 채팅의 messages 기록 한 건.
+        role은 context_compacted, content는 요약 결과. 저장 시각은 ChatManager에서 기록.
         """
-        # TODO 6.3: get_id()로 채팅에 연결된 컨텍스트의 chat_id를 찾는다.
+        # 미구현: 대화 번호에 해당하는 채팅 ID 조회 후 요약 저장
         # chat_id = next(
         #     chat for (chat, _), saved_id in self._ids.items() if saved_id == context_id
         # )
         # self.chat_manager.save_message(chat_id, "context_compacted", result)
-        # role로 압축 기록을 구분하고, content에는 압축 결과만 넣는다.
-        # createdAt은 ChatManager가 기록한다. 독립 new_id()는 먼저 채팅 귀속이 필요하다.
-        # 압축 원문은 저장하지 않는다. 일반 LLM 호출 로그도 log_call=False로 생략한다.
+        # role: 기록 종류. content: 요약 결과. createdAt: ChatManager에서 기록할 저장 시각
+        # new_id()로 직접 발급한 대화 번호는 먼저 채팅과 연결 필요
+        # 저장 제외 항목: 요약 전 대화 원문. 일반 요청 로그는 log_call=False로 생략
