@@ -16,7 +16,7 @@ flowchart TD
     F --> G["작업별 값 반환"]
 ```
 
-출력 형식 오류는 `OutputFormatError`로 전달. [LocalLLMRunner](local-llm-runner.md)에서 이 예외를 받아 같은 입력으로 재생성. 파서 안에서 재생성이나 로그 저장은 생략.
+출력 형식 오류는 `OutputFormatError`로 전달. [LocalLLMRunner](local-llm-runner.md)에서 이 예외를 받아 같은 입력으로 재생성. 연결 오류·타임아웃의 재시도도 Runner에서 처리. 파서 안에서 재생성이나 로그 저장은 생략.
 
 ## 사용법과 입출력
 
@@ -52,6 +52,6 @@ except OutputFormatError:
 ## 설계서 대비 추가 및 변경
 
 - **함수 구성:** 설계 32~33쪽의 check→parser를 parser 하나로 통합. 모델 출력을 직접 받아 JSON 읽기와 자료형 검사를 한 번씩 수행
-- **오류 처리:** 형식 검사를 통과한 값만 반환하고 오류는 OutputFormatError로 전달. 설계 check의 `(통과 여부, 결과, error)` 반환은 사용하지 않음. 재생성 후 최종 실패값 반환은 Runner에서 처리
+- **오류 처리:** 형식 검사를 통과한 값만 반환하고 오류는 OutputFormatError로 전달. 설계 check의 `(통과 여부, 결과, error)` 반환은 사용하지 않음. 재시도 횟수와 최종 실패 처리는 Runner에서 관리
 - **자료형 정의:** 작업 종류는 문자열 StrEnum, 반환 객체는 Pydantic 모델로 정의. 별도 파일 없이 파서 파일에서 관리하고 TypeAdapter로 필드·자료형·허용값 검사. 정의되지 않은 추가 필드는 기본적으로 무시
 - **JSON 읽기:** 문법 오류 외에 파이썬의 정수 자릿수·중첩 한도를 넘긴 경우도 출력 형식 오류로 처리. 코드 블록 안의 유니코드 문자열 유지

@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 RequestResult = tuple[str, bool, int | None, int | None, str]
 # 작업별 요청 결과: 파싱 결과, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유
 ParsedRequestResult = tuple[ParsedResult | None, bool, int | None, int | None, str]
-# 최초 응답을 포함한 출력 형식 오류 허용 횟수
-MAX_FORMAT_FAILURES = 3
+# 최초 요청을 포함한 최대 생성 시도 횟수
+MAX_ATTEMPTS = 3
 # 모델의 전체 입력·출력 토큰 한도
 N_CTX = 32768
 
@@ -176,14 +176,18 @@ class LocalLLMRunner:
         max_tokens: int,
         on_token: Callable[[str], None] | None = None,
         interruptible: bool = True,
+        generation_errors: list[Exception] | None = None,
     ) -> RequestResult:
         """별도 스레드에서 생성 중인 답변을 받아 본문, 사용량 및 종료 사유 반환.
 
         output: 수신한 답변 조각 목록. on_token: 답변 일부를 받을 때 실행할 함수.
         중지 시 지금까지 받은 답변과 stopped 반환. 수신 오류 발생 시 예외 전달.
         interruptible=False일 때 중지 신호는 무시하지만 응답 대기 시간 제한은 유지.
+        generation_errors: 모델 요청·수신 오류 목록. 화면 출력 함수의 오류와 구분용.
         결과 파싱, 이전 대화 저장 및 로그 기록은 이 함수를 호출한 함수에서 처리.
         """
+        if generation_errors is None:
+            generation_errors = []
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
         if not self._busy.acquire(blocking=False):
@@ -244,7 +248,9 @@ class LocalLLMRunner:
                 if interruptible and stop_signal.is_set():
                     return "".join(text), False, input_tokens, output_tokens, "stopped"
                 if monotonic() >= deadline:
-                    raise TimeoutError("Local LLM request exceeded its time limit")
+                    error = TimeoutError("Local LLM request exceeded its time limit")
+                    generation_errors.append(error)
+                    raise error
                 try:
                     event = events.get(timeout=0.05)
                 except Empty:
@@ -253,15 +259,19 @@ class LocalLLMRunner:
                 if interruptible and stop_signal.is_set():
                     return "".join(text), False, input_tokens, output_tokens, "stopped"
                 if isinstance(event, Exception):
+                    generation_errors.append(event)
                     raise event
                 if event is None:
                     answer = "".join(text)
                     if finish_reason is None:
                         if not answer.strip():
-                            raise RuntimeError("Local LLM returned no response")
-                        raise RuntimeError(
-                            "Local LLM stream ended without a finish reason"
-                        )
+                            error = RuntimeError("Local LLM returned no response")
+                        else:
+                            error = RuntimeError(
+                                "Local LLM stream ended without a finish reason"
+                            )
+                        generation_errors.append(error)
+                        raise error
                     success = finish_reason in {"stop", "length"}
                     return answer, success, input_tokens, output_tokens, finish_reason
                 # 답변 없이 사용량만 포함한 마지막 응답도 처리
@@ -297,10 +307,12 @@ class LocalLLMRunner:
 
         run_id: 실행 ID. prompt_idx: 작업 종류. chat_id: 채팅 ID.
         use_context=True인 경우 해당 실행, 채팅 및 작업에 저장된 이전 대화를 함께 사용.
-        출력 형식 오류 시 같은 입력으로 최초 요청 포함 최대 3회 생성하고 요청마다 로그 함수 호출.
+        출력 형식 오류, 연결·수신 오류, 타임아웃 또는 생성 실패 시 같은 입력으로 최대 3회 요청.
+        중지 요청은 재시도 없이 반환. 타임아웃 뒤에는 이전 수신 정리 후 다음 요청 진행.
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
-        3회 형식 오류 시 첫 값은 None, 성공 여부는 False, 종료 사유는 parse_failed.
-        중지 시 받은 답변까지 반환. 출력 형식 오류 이외의 예외는 호출자에게 전달.
+        마지막 시도도 출력 형식 오류면 (None, False, 총 입력 토큰 수, 총 출력 토큰 수, parse_failed) 반환.
+        마지막 모델 요청 오류는 원래 예외 전달. 실패 응답은 해당 종료 사유로 반환.
+        입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
         """
         prompt_idx = PromptIdx(prompt_idx)
         # 미구현: 프롬프트 조회. 반환값은 (프롬프트 본문, 버전)
@@ -328,19 +340,47 @@ class LocalLLMRunner:
             input_tokens: int | None = 0
             output_tokens: int | None = 0
             last_output = ""
-            for _ in range(MAX_FORMAT_FAILURES):
+            for attempt in range(MAX_ATTEMPTS):
+                if stop_signal.is_set():
+                    return last_output, False, input_tokens, output_tokens, "stopped"
+                if attempt:
+                    # 이전 수신이 끝난 후 재요청. 대기 중에도 해당 실행의 중지 신호 확인
+                    while not self._busy.acquire(timeout=0.05):
+                        if stop_signal.is_set():
+                            return (
+                                last_output,
+                                False,
+                                input_tokens,
+                                output_tokens,
+                                "stopped",
+                            )
+                    self._busy.release()
                 output: list[str] = []
+                generation_errors: list[Exception] = []  # 모델 요청·수신 중 발생한 오류
                 format_valid = None
                 started = monotonic()
                 try:
-                    result = self._generate(
-                        model_input,
-                        system_prompt,
-                        output=output,
-                        max_tokens=max_tokens,
-                        on_token=on_token,
-                        stop_signal=stop_signal,
-                    )
+                    try:
+                        result = self._generate(
+                            model_input,
+                            system_prompt,
+                            output=output,
+                            max_tokens=max_tokens,
+                            on_token=on_token,
+                            stop_signal=stop_signal,
+                            generation_errors=generation_errors,
+                        )
+                    except Exception:
+                        # 모델 요청·수신 실패만 재시도. 입력 설정이나 화면 출력 함수의 오류는 전달
+                        if not generation_errors:
+                            raise
+                        input_tokens = output_tokens = None
+                        last_output = "".join(output) or last_output
+                        if stop_signal.is_set():
+                            return last_output, False, None, None, "stopped"
+                        if attempt == MAX_ATTEMPTS - 1:
+                            raise
+                        continue
                     # 재생성을 포함한 총 사용량. 사용량을 받지 못한 요청이 있으면 None
                     input_tokens = (
                         input_tokens + result[2]
@@ -352,7 +392,7 @@ class LocalLLMRunner:
                         if output_tokens is not None and result[3] is not None
                         else None
                     )
-                    if not result[1] or stop_signal.is_set():
+                    if result[4] == "stopped" or stop_signal.is_set():
                         # 중지 시 지금까지 받은 답변 반환. 파싱·재생성·이전 대화 추가는 생략
                         return (
                             result[0] or last_output,
@@ -361,7 +401,18 @@ class LocalLLMRunner:
                             output_tokens,
                             "stopped" if stop_signal.is_set() else result[4],
                         )
-                    # 파싱 중 발생한 출력 형식 오류만 처리. 래퍼의 예외는 호출자에게 전달
+                    if not result[1]:
+                        last_output = result[0]
+                        if attempt == MAX_ATTEMPTS - 1:
+                            return (
+                                result[0],
+                                False,
+                                input_tokens,
+                                output_tokens,
+                                result[4],
+                            )
+                        continue
+                    # 출력 형식 오류만 재시도. 파서 내부 코드의 오류는 호출자에게 전달
                     try:
                         parsed = parser(result[0], prompt_idx)
                     except OutputFormatError:
