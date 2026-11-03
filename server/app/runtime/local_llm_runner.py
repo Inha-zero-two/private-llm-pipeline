@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 MAX_ATTEMPTS = 3
 # 모델의 전체 입력·출력 토큰 한도
 N_CTX = 32768
-# 일반 요청과 요약 요청의 기본 출력 상한
+# 연결 확인·일반 요청·요약 요청의 공통 출력 상한
 MAX_OUTPUT_TOKENS = 5000
 # 채팅 형식, 역할 구분 및 시작·종료 토큰의 여유분
 PROMPT_MARGIN = 1024
@@ -97,7 +97,7 @@ class LocalLLMRunner:
     def model_load(self) -> bool:
         """모델을 준비하고 짧은 응답으로 연결 확인 후 True 반환.
 
-        이미 준비된 모델은 재사용. 새 모델은 최대 32토큰의 응답으로 확인.
+        이미 준비된 모델은 재사용. 새 모델도 출력 상한 5,000토큰으로 짧은 응답 확인.
         응답 확인 실패 시 자원 정리 후 원래 예외 전달.
         """
         if self._closed:
@@ -114,9 +114,7 @@ class LocalLLMRunner:
             n_gpu_layers=-1,
         )
         try:
-            result = self.manual_request(
-                "Reply OK only.", "Answer briefly.", max_tokens=32
-            )
+            result = self.manual_request("Reply OK only.", "Answer briefly.")
             if not result[1] or not result[0].strip():
                 raise ConnectionError(f"Model response check failed: {result[4]}")
         except BaseException:
@@ -212,8 +210,8 @@ class LocalLLMRunner:
         """
         if generation_errors is None:
             generation_errors = []
-        if max_tokens <= 0:
-            raise ValueError("max_tokens must be positive")
+        if not 0 < max_tokens <= MAX_OUTPUT_TOKENS:
+            raise ValueError("max_tokens must be between 1 and 5000")
         if not self._busy.acquire(blocking=False):
             raise RuntimeError("A request is still running or being cleaned up")
         with self._state_lock:
@@ -621,6 +619,8 @@ class LocalLLMRunner:
 
         채팅 형식 여유분은 1,024토큰. 입력과 출력의 합계는 N_CTX 안에서 계산.
         """
+        if not 0 < max_tokens <= MAX_OUTPUT_TOKENS:
+            raise ValueError("max_tokens must be between 1 and 5000")
         return N_CTX - max_tokens - PROMPT_MARGIN - len(self.tokenize(system_prompt))
 
     def tokenize(self, text: str) -> list[int]:
