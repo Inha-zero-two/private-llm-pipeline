@@ -1,0 +1,15 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "N", "ANN"]
+# Native forwarding and extensible JSON values intentionally accept Any.
+ignore = ["ANN401"]
+
+[tool.ruff.lint.isort]
+extra-standard-library = ["__main__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

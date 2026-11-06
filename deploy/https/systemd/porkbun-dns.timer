@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the public IPv4 for satisshin.top every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Unit=porkbun-dns.service
+
+[Install]
+WantedBy=timers.target
