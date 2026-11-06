@@ -58,8 +58,6 @@ export type Chat = {
   id: string
   title: string
   turns: Turn[]
-  /** 이 채팅의 공개 허용 설정 */
-  setting: PrivacySetting
 }
 
 export type Rule = {
@@ -73,5 +71,3 @@ export type PrivacySetting = {
   text: string
   rules: Rule[]
 }
-
-export const EMPTY_SETTING: PrivacySetting = { text: '', rules: [] }

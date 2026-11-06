@@ -11,6 +11,7 @@ type Props = {
   onNewChat: () => void
   onSelect: (chatId: string) => void
   onDelete: (chat: Chat) => void
+  onOpenSettings: () => void
 }
 
 export function Sidebar({
@@ -22,6 +23,7 @@ export function Sidebar({
   onNewChat,
   onSelect,
   onDelete,
+  onOpenSettings,
 }: Props) {
   return (
     <>
@@ -68,6 +70,13 @@ export function Sidebar({
             )
           })}
         </nav>
+
+        <div className={styles.footer}>
+          <button className={styles.settings} onClick={onOpenSettings}>
+            <ShieldIcon />
+            공개 허용 설정
+          </button>
+        </div>
       </aside>
     </>
   )

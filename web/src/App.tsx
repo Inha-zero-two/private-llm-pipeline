@@ -5,16 +5,10 @@ import { Conversation } from '@/components/Conversation'
 import { Dialog } from '@/components/Dialog'
 import dialog from '@/components/Dialog.module.css'
 import { PlusIcon, ShieldIcon, SidebarIcon } from '@/components/icons'
-import { PrivacySettings } from '@/components/PrivacySettings'
+import { PrivacySettingsDialog } from '@/components/PrivacySettingsDialog'
 import { Sidebar } from '@/components/Sidebar'
 import { runDemo, type DemoRun } from '@/demo/run'
-import {
-  EMPTY_SETTING,
-  type Chat,
-  type ConsentRequest,
-  type PrivacySetting,
-  type Turn,
-} from '@/types'
+import type { Chat, ConsentRequest, PrivacySetting, Turn } from '@/types'
 import styles from './App.module.css'
 
 let seq = 0
@@ -23,17 +17,17 @@ const nextId = (prefix: string) => `${prefix}${++seq}`
 export default function App() {
   const [chats, setChats] = useState<Chat[]>([])
   const [currentChatId, setCurrentChatId] = useState<string | null>(null)
-  /** 새 채팅(아직 질문 전)의 공개 허용 설정. 첫 질문을 보내면 그 채팅으로 옮긴다 */
-  const [draftSetting, setDraftSetting] = useState<PrivacySetting>(EMPTY_SETTING)
   /** 답변을 만드는 중인 채팅. 한 번에 하나만 실행한다 */
   const [runningChatId, setRunningChatId] = useState<string | null>(null)
   const [consent, setConsent] = useState<ConsentRequest | null>(null)
+  /** 공개 허용 설정. 앱 전체에 하나다 (설계서 4.2) */
+  const [setting, setSetting] = useState<PrivacySetting>({ text: '', rules: [] })
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 768)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<Chat | null>(null)
   const runRef = useRef<DemoRun | null>(null)
 
   const current = chats.find((c) => c.id === currentChatId) ?? null
-  const setting = current?.setting ?? draftSetting
 
   const openChat = (chatId: string | null) => {
     setCurrentChatId(chatId)
@@ -42,11 +36,6 @@ export default function App() {
 
   const updateChat = (chatId: string, fn: (chat: Chat) => Chat) =>
     setChats((cs) => cs.map((c) => (c.id === chatId ? fn(c) : c)))
-
-  const saveSetting = (s: PrivacySetting) => {
-    if (current) updateChat(current.id, (c) => ({ ...c, setting: s }))
-    else setDraftSetting(s)
-  }
 
   const send = (text: string) => {
     if (runRef.current) return
@@ -67,11 +56,9 @@ export default function App() {
         id: chatId,
         title: text.slice(0, 30),
         turns: [],
-        setting: draftSetting,
       }
       return [{ ...chat, turns: [...chat.turns, turn] }, ...cs.filter((c) => c.id !== chatId)]
     })
-    if (!currentChatId) setDraftSetting(EMPTY_SETTING)
     setCurrentChatId(chatId)
     setRunningChatId(chatId)
     runRef.current = runDemo(text, setting.rules, {
@@ -103,7 +90,7 @@ export default function App() {
       : null
   const composer = (
     <Composer
-      // 채팅을 바꾸면 입력 중인 글과 열린 설정 창을 비운다
+      // 채팅을 바꾸면 입력 중인 글을 비운다
       key={currentChatId ?? 'new'}
       running={running}
       blockedReason={blockedReason}
@@ -119,7 +106,6 @@ export default function App() {
           />
         )
       }
-      tools={<PrivacySettings setting={setting} onSave={saveSetting} />}
     />
   )
 
@@ -134,6 +120,7 @@ export default function App() {
         onNewChat={() => openChat(null)}
         onSelect={openChat}
         onDelete={setDeleteTarget}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <main className={styles.main}>
@@ -176,13 +163,22 @@ export default function App() {
         )}
       </main>
 
+      {settingsOpen && (
+        <PrivacySettingsDialog
+          setting={setting}
+          onSave={setSetting}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
       <Dialog
         open={deleteTarget !== null}
         onClose={() => setDeleteTarget(null)}
         title="채팅을 삭제할까요?"
         description={
           <>
-            <strong>{deleteTarget?.title}</strong> 채팅의 메시지와 공개 허용 설정이 모두 지워집니다.
+            <strong>{deleteTarget?.title}</strong> 채팅의 메시지와 기록이 모두 지워집니다. 공개 허용
+            설정은 그대로 남습니다.
           </>
         }
         actions={
