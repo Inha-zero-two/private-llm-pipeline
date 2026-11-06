@@ -2,7 +2,7 @@
 //   "오류"     → 오류로 끝남
 //   "오프라인" → 외부 모델 연결 불가
 //   "상한"     → 질문 상한 도달
-//   나이("27살") · 전화번호 · 회사/학교 이름("삼성전자", "인하대학교") → 추가 공개 동의 요청
+//   나이("27살") · 전화번호 · 이름("제 이름은 홍길동") · 회사/학교 이름("삼성전자", "인하대학교") → 추가 공개 동의 요청
 //   "동의"     → 위 항목이 없어도 예시 항목으로 동의 요청
 
 import type { ConsentItem, PDCategory, Rule } from '@/types'
@@ -19,23 +19,23 @@ type Detector = { pattern: RegExp; category: PDCategory; label: string }
 
 const DETECTORS: Detector[] = [
   { pattern: /01[016789]-?\d{3,4}-?\d{4}/g, category: 0, label: '전화번호' },
+  { pattern: /(?<=이름은\s*)[가-힣]{2,3}/g, category: 0, label: '이름' },
   { pattern: /\d{1,3}\s*살/g, category: 2, label: '나이' },
   { pattern: /[가-힣A-Za-z]+(?:전자|그룹|은행|대학교)/g, category: 2, label: '직장' },
 ]
-
-type DetectedItem = ConsentItem & { label: string }
 
 export type Scenario = {
   kind: 'normal' | 'error' | 'offline' | 'call_limit'
   rounds: number
   consentItems: ConsentItem[]
-  frontierRequest: (round: number, consented: boolean) => string
+  /** allowed: 동의로 공개가 허용된 항목 id */
+  frontierRequest: (round: number, allowed: Set<number>) => string
   frontierAnswer: (round: number) => string
   finalAnswer: string
 }
 
-function detect(question: string): DetectedItem[] {
-  const items: DetectedItem[] = []
+function detect(question: string): ConsentItem[] {
+  const items: ConsentItem[] = []
   for (const d of DETECTORS) {
     for (const m of question.matchAll(d.pattern)) {
       items.push({ id: items.length + 1, text: m[0], category: d.category, label: d.label })
@@ -43,22 +43,22 @@ function detect(question: string): DetectedItem[] {
   }
   if (items.length === 0 && question.includes('동의')) {
     items.push(
-      { id: 1, text: '직무: 개발자', category: 2, label: '직무' },
-      { id: 2, text: '경력 기간: 3년', category: 2, label: '경력' },
+      { id: 1, text: '개발자', category: 2, label: '직무' },
+      { id: 2, text: '3년', category: 2, label: '경력' },
     )
   }
   return items
 }
 
 // 설정 규칙에서 허용된 항목은 동의를 묻지 않는다. (데모는 대상 이름이 종류 이름에 들어가는지만 본다)
-function isAllowed(item: DetectedItem, rules: Rule[]) {
+function isAllowed(item: ConsentItem, rules: Rule[]) {
   const matched = rules.filter(
     (r) => item.label.includes(r.target) || r.target.includes(item.label),
   )
   return matched.length > 0 && matched.every((r) => r.action === 'allow')
 }
 
-function mask(question: string, items: DetectedItem[]) {
+function mask(question: string, items: ConsentItem[]) {
   return items.reduce((q, item) => q.replaceAll(item.text, `[${item.label}]`), question)
 }
 
@@ -73,14 +73,16 @@ export function buildScenario(question: string, rules: Rule[]): Scenario {
 
   const detected = detect(question)
   const needConsent = detected.filter((item) => !isAllowed(item, rules))
-  const masked = mask(question, needConsent)
 
   return {
     kind,
     rounds: kind === 'call_limit' ? 3 : 2,
-    consentItems: needConsent.map(({ label: _label, ...item }) => item),
-    frontierRequest: (round, consented) => {
-      const q = consented ? question : masked
+    consentItems: needConsent,
+    frontierRequest: (round, allowed) => {
+      const q = mask(
+        question,
+        needConsent.filter((item) => !allowed.has(item.id)),
+      )
       return round === 1
         ? `다음 요청에 답하는 데 필요한 일반적인 정보를 알려 주세요. 개인을 특정할 수 있는 내용은 빼고 답해 주세요.\n\n요청: ${q}`
         : `앞의 답변에서 실제로 따라 할 수 있는 단계와 주의할 점을 더 구체적으로 알려 주세요.`

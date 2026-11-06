@@ -11,6 +11,9 @@ export const CATEGORY_LABEL: Record<PDCategory, string> = {
 
 export type ConsentItem = {
   id: number
+  /** 정보 종류. 예: 나이 */
+  label: string
+  /** 질문에 나온 값. 예: 27살 */
   text: string
   category: PDCategory
 }
@@ -23,7 +26,12 @@ export type ConsentRequest = {
   risk: string
 }
 
-export type ConsentResult = 'allow' | 'deny' | 'cancelled'
+export type ConsentDecision = { item: ConsentItem; allow: boolean }
+
+/** 동의 요청에 대한 응답. 사용자는 자연어로 답하고, 로컬 모델이 항목별 허용 여부로 해석한다 */
+export type ConsentRecord =
+  | { kind: 'answered'; answer: string; decisions: ConsentDecision[] }
+  | { kind: 'cancelled'; items: ConsentItem[] }
 
 export type FrontierQuery = {
   round: number
@@ -41,7 +49,7 @@ export type Turn = {
   /** 진행 중인 단계 이름 */
   step: string | null
   frontier: FrontierQuery[]
-  consentResults: { items: ConsentItem[]; result: ConsentResult }[]
+  consents: ConsentRecord[]
   answer: string
   notice: Notice | null
 }
@@ -50,6 +58,8 @@ export type Chat = {
   id: string
   title: string
   turns: Turn[]
+  /** 이 채팅의 공개 허용 설정 */
+  setting: PrivacySetting
 }
 
 export type Rule = {
@@ -63,3 +73,5 @@ export type PrivacySetting = {
   text: string
   rules: Rule[]
 }
+
+export const EMPTY_SETTING: PrivacySetting = { text: '', rules: [] }

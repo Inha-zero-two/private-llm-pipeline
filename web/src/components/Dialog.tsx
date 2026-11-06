@@ -5,22 +5,12 @@ type Props = {
   open: boolean
   title: string
   description?: ReactNode
-  /** Esc · 바깥 클릭으로 닫을 수 있는지. 동의 요청처럼 답해야 하는 창은 false */
-  dismissible?: boolean
-  onClose?: () => void
+  onClose: () => void
   children?: ReactNode
   actions: ReactNode
 }
 
-export function Dialog({
-  open,
-  title,
-  description,
-  dismissible = true,
-  onClose,
-  children,
-  actions,
-}: Props) {
+export function Dialog({ open, title, description, onClose, children, actions }: Props) {
   const ref = useRef<HTMLDialogElement>(null)
 
   useEffect(() => {
@@ -37,10 +27,10 @@ export function Dialog({
       aria-labelledby="dialog-title"
       onCancel={(e) => {
         e.preventDefault()
-        if (dismissible) onClose?.()
+        onClose()
       }}
       onClick={(e) => {
-        if (dismissible && e.target === e.currentTarget) onClose?.()
+        if (e.target === e.currentTarget) onClose()
       }}
     >
       <div className={styles.body}>

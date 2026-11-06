@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { CATEGORY_LABEL, type FrontierQuery, type Turn as TurnData } from '@/types'
+import type { ConsentRecord, FrontierQuery, Turn as TurnData } from '@/types'
 import { ChevronIcon, GlobeIcon, InfoIcon, ShieldIcon } from './icons'
 import { Markdown } from './Markdown'
 import styles from './Turn.module.css'
@@ -12,18 +12,8 @@ export function Turn({ turn }: { turn: TurnData }) {
       </div>
 
       <div className={styles.assistant}>
-        {turn.consentResults.map((c, i) => (
-          <div key={i} className={styles.consentLine} data-result={c.result}>
-            <ShieldIcon size={15} />
-            {c.result === 'allow'
-              ? '공개를 허용했습니다'
-              : c.result === 'deny'
-                ? '공개를 거절했습니다'
-                : '동의 요청이 취소되었습니다'}
-            <span className={styles.consentItems}>
-              {c.items.map((item) => `${item.text} (${CATEGORY_LABEL[item.category]})`).join(', ')}
-            </span>
-          </div>
+        {turn.consents.map((c, i) => (
+          <ConsentLine key={i} record={c} />
         ))}
 
         {turn.frontier.length > 0 && <FrontierToggle queries={turn.frontier} />}
@@ -49,6 +39,37 @@ export function Turn({ turn }: { turn: TurnData }) {
         )}
       </div>
     </section>
+  )
+}
+
+// 공개 요청에 어떻게 답했는지 남긴다
+function ConsentLine({ record }: { record: ConsentRecord }) {
+  if (record.kind === 'cancelled') {
+    return (
+      <div className={styles.consent}>
+        <div className={styles.consentHead}>
+          <ShieldIcon size={15} />
+          공개 요청이 취소되었습니다
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className={styles.consent}>
+      <div className={styles.consentHead}>
+        <ShieldIcon size={15} />
+        공개 여부에 답했습니다
+        <q className={styles.consentAnswer}>{record.answer}</q>
+      </div>
+      <ul className={styles.consentList}>
+        {record.decisions.map((d) => (
+          <li key={d.item.id} className={styles.consentItem} data-allow={d.allow}>
+            <span className={styles.consentVerdict}>{d.allow ? '공개' : '비공개'}</span>
+            {d.item.label} {d.item.text}
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 

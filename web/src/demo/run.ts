@@ -1,6 +1,7 @@
 // 화면 확인용 데모 실행. 설계서 흐름(①~⑧)대로 단계를 바꿔 가며 답변을 채운다.
 
-import type { ConsentRequest, ConsentResult, Notice, Rule, Turn } from '@/types'
+import type { ConsentRecord, ConsentRequest, Notice, Rule, Turn } from '@/types'
+import { interpretConsent, type ConsentInterpretation } from './consent'
 import { buildScenario, LIMITED_TEXT } from './scenario'
 
 export type DemoHandlers = {
@@ -13,7 +14,8 @@ export type DemoHandlers = {
 
 export type DemoRun = {
   stop: () => void
-  answerConsent: (allow: boolean) => void
+  /** 동의 요청에 자연어로 답한다. 해석하지 못하면 ok=false로 다시 묻는다 */
+  answerConsent: (answer: string) => Promise<ConsentInterpretation>
 }
 
 class StoppedError extends Error {}
@@ -23,7 +25,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 export function runDemo(question: string, rules: Rule[], h: DemoHandlers): DemoRun {
   const scenario = buildScenario(question, rules)
   let stopped = false
-  let resolveConsent: ((result: ConsentResult) => void) | null = null
+  let resolveConsent: ((record: ConsentRecord) => void) | null = null
 
   const checkpoint = () => {
     if (stopped) throw new StoppedError()
@@ -52,7 +54,7 @@ export function runDemo(question: string, rules: Rule[], h: DemoHandlers): DemoR
       await step('필요한 정보 정리 중')
 
       let endText: string | null = null
-      let consented = false
+      const allowed = new Set<number>()
       for (let round = 1; ; round++) {
         await step('답변 가능 여부 판단 중')
 
@@ -75,28 +77,27 @@ export function runDemo(question: string, rules: Rule[], h: DemoHandlers): DemoR
             benefit: '상황에 맞춘 더 정확한 답변을 받을 수 있습니다.',
             risk: '선택한 정보가 외부 서버로 전송됩니다.',
           })
-          const result = await new Promise<ConsentResult>((resolve) => {
+          const record = await new Promise<ConsentRecord>((resolve) => {
             resolveConsent = resolve
           })
           resolveConsent = null
           h.onConsent(null)
-          h.update((t) => ({ ...t, consentResults: [...t.consentResults, { items, result }] }))
+          h.update((t) => ({ ...t, consents: [...t.consents, record] }))
           checkpoint()
-          if (result === 'deny') {
+          if (record.kind === 'answered') {
+            for (const d of record.decisions) if (d.allow) allowed.add(d.item.id)
+          }
+          // 하나도 공개하지 않으면 거절과 같다
+          if (allowed.size === 0) {
             endText = LIMITED_TEXT.consent_denied
             break
           }
-          consented = true
         }
 
         await step('도움 요청문 작성 중')
         await step('누출 검사 중', 500)
-        if (scenario.consentItems.length > 0 && !consented && round === 1) {
-          await step('요청문 다시 작성 중 (누출 검사에서 걸림)')
-          await step('누출 검사 중', 500)
-        }
 
-        const request = scenario.frontierRequest(round, consented)
+        const request = scenario.frontierRequest(round, allowed)
         await step(`외부 모델에 묻는 중 (${round}회차)`, 1200)
         const answer = scenario.frontierAnswer(round)
         h.update((t) => ({ ...t, frontier: [...t.frontier, { round, request, answer }] }))
@@ -126,8 +127,12 @@ export function runDemo(question: string, rules: Rule[], h: DemoHandlers): DemoR
   return {
     stop: () => {
       stopped = true
-      resolveConsent?.('cancelled')
+      resolveConsent?.({ kind: 'cancelled', items: scenario.consentItems })
     },
-    answerConsent: (allow) => resolveConsent?.(allow ? 'allow' : 'deny'),
+    answerConsent: async (answer) => {
+      const result = await interpretConsent(answer, scenario.consentItems)
+      if (result.ok) resolveConsent?.({ kind: 'answered', answer, decisions: result.decisions })
+      return result
+    },
   }
 }

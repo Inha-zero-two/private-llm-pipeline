@@ -49,8 +49,7 @@
   color: var(--text);
 }
 
-.newChat,
-.settings {
+.newChat {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -61,8 +60,7 @@
   text-align: left;
 }
 
-.newChat:hover,
-.settings:hover {
+.newChat:hover {
   background: var(--bg-hover);
 }
 
@@ -147,11 +145,6 @@
 
 .deleteButton:disabled {
   opacity: 0 !important;
-}
-
-.footer {
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
 }
 
 /* 좁은 화면: 사이드바를 위에 덮는다 */

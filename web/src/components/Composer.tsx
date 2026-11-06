@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowUpIcon, StopIcon } from './icons'
 import styles from './Composer.module.css'
 
@@ -9,11 +9,23 @@ type Props = {
   onSend: (text: string) => void
   onStop: () => void
   autoFocus?: boolean
+  /** 입력창 바로 위에 붙는 내용 (동의 요청) */
+  above?: ReactNode
+  /** 입력창 왼쪽 아래 도구 (공개 허용 설정) */
+  tools?: ReactNode
 }
 
 const MAX_HEIGHT = 220
 
-export function Composer({ running, blockedReason, onSend, onStop, autoFocus }: Props) {
+export function Composer({
+  running,
+  blockedReason,
+  onSend,
+  onStop,
+  autoFocus,
+  above,
+  tools,
+}: Props) {
   const [text, setText] = useState('')
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -35,6 +47,7 @@ export function Composer({ running, blockedReason, onSend, onStop, autoFocus }: 
 
   return (
     <div className={styles.wrap}>
+      {above}
       <form
         className={styles.box}
         onSubmit={(e) => {
@@ -59,15 +72,18 @@ export function Composer({ running, blockedReason, onSend, onStop, autoFocus }: 
           }}
           aria-label="메시지 입력"
         />
-        {running ? (
-          <button type="button" className={styles.button} onClick={onStop} aria-label="중지">
-            <StopIcon size={16} />
-          </button>
-        ) : (
-          <button type="submit" className={styles.button} disabled={!canSend} aria-label="전송">
-            <ArrowUpIcon size={18} />
-          </button>
-        )}
+        <div className={styles.toolbar}>
+          <div className={styles.tools}>{tools}</div>
+          {running ? (
+            <button type="button" className={styles.button} onClick={onStop} aria-label="중지">
+              <StopIcon size={16} />
+            </button>
+          ) : (
+            <button type="submit" className={styles.button} disabled={!canSend} aria-label="전송">
+              <ArrowUpIcon size={18} />
+            </button>
+          )}
+        </div>
       </form>
       <p className={styles.hint}>
         질문 원문과 개인정보는 이 PC의 로컬 모델만 봅니다. 외부 모델에는 검사를 통과한 요청문만
