@@ -179,20 +179,8 @@
 }
 
 .frontierRound {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   font-weight: 600;
   margin-bottom: 6px;
-}
-
-.frontierStatus {
-  padding: 1px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 500;
-  background: var(--deny-bg);
-  color: var(--deny);
 }
 
 .frontierLabel {

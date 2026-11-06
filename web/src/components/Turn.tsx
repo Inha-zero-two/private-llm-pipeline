@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { CATEGORY_LABEL, type FrontierView, type Turn as TurnData } from '@/lib/turns'
+import { CATEGORY_LABEL, type FrontierQuery, type Turn as TurnData } from '@/types'
 import { ChevronIcon, GlobeIcon, InfoIcon, ShieldIcon } from './icons'
 import { Markdown } from './Markdown'
 import styles from './Turn.module.css'
@@ -52,7 +52,7 @@ export function Turn({ turn }: { turn: TurnData }) {
   )
 }
 
-function FrontierToggle({ queries }: { queries: FrontierView[] }) {
+function FrontierToggle({ queries }: { queries: FrontierQuery[] }) {
   // 기본은 닫힘 (설계서 9장)
   const [open, setOpen] = useState(false)
 
@@ -72,18 +72,11 @@ function FrontierToggle({ queries }: { queries: FrontierView[] }) {
         <ol className={styles.frontierList}>
           {queries.map((q) => (
             <li key={q.round} className={styles.frontierItem}>
-              <div className={styles.frontierRound}>
-                {q.round}회차
-                {q.status !== 'ok' && (
-                  <span className={styles.frontierStatus}>
-                    {q.status === 'failed' ? '전송 실패' : '전송 여부 불확실'}
-                  </span>
-                )}
-              </div>
+              <div className={styles.frontierRound}>{q.round}회차</div>
               <div className={styles.frontierLabel}>보낸 요청문</div>
               <p className={styles.frontierText}>{q.request}</p>
               <div className={styles.frontierLabel}>받은 응답</div>
-              <p className={styles.frontierText}>{q.answer ?? '(응답 없음)'}</p>
+              <p className={styles.frontierText}>{q.answer}</p>
             </li>
           ))}
         </ol>

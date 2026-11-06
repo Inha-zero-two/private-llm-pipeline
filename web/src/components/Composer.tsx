@@ -6,7 +6,7 @@ type Props = {
   running: boolean
   /** 입력을 막는 이유. 있으면 전송할 수 없다 */
   blockedReason: string | null
-  onSend: (text: string) => Promise<boolean>
+  onSend: (text: string) => void
   onStop: () => void
   autoFocus?: boolean
 }
@@ -15,7 +15,6 @@ const MAX_HEIGHT = 220
 
 export function Composer({ running, blockedReason, onSend, onStop, autoFocus }: Props) {
   const [text, setText] = useState('')
-  const [sending, setSending] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
 
   // 내용에 맞춰 높이를 늘리고, 최대 높이를 넘으면 안에서 스크롤한다
@@ -26,17 +25,12 @@ export function Composer({ running, blockedReason, onSend, onStop, autoFocus }: 
     el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`
   }, [text])
 
-  const canSend = text.trim().length > 0 && !running && !sending && !blockedReason
+  const canSend = text.trim().length > 0 && !running && !blockedReason
 
-  const submit = async () => {
+  const submit = () => {
     if (!canSend) return
-    const value = text.trim()
-    setSending(true)
+    onSend(text.trim())
     setText('')
-    const ok = await onSend(value)
-    if (!ok) setText(value) // 실패하면 입력을 되돌린다
-    setSending(false)
-    ref.current?.focus()
   }
 
   return (
@@ -45,7 +39,7 @@ export function Composer({ running, blockedReason, onSend, onStop, autoFocus }: 
         className={styles.box}
         onSubmit={(e) => {
           e.preventDefault()
-          void submit()
+          submit()
         }}
       >
         <textarea
@@ -60,7 +54,7 @@ export function Composer({ running, blockedReason, onSend, onStop, autoFocus }: 
             // 한글 조합 중 Enter는 글자 확정이므로 전송하지 않는다
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
-              void submit()
+              submit()
             }
           }}
           aria-label="메시지 입력"

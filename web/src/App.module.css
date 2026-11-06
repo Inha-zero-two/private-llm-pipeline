@@ -74,26 +74,3 @@
 .hero p {
   margin: 4px 0 0;
 }
-
-.toast {
-  position: fixed;
-  top: 16px;
-  left: 50%;
-  z-index: 30;
-  transform: translateX(-50%);
-  max-width: calc(100vw - 32px);
-  padding: 10px 18px;
-  border-radius: 999px;
-  background: var(--text);
-  color: var(--bg);
-  font-size: 14px;
-  box-shadow: var(--shadow-lg);
-  animation: drop 0.2s ease-out;
-}
-
-@keyframes drop {
-  from {
-    opacity: 0;
-    transform: translate(-50%, -8px);
-  }
-}

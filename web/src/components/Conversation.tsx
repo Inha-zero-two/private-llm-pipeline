@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from 'react'
-import type { Turn as TurnData } from '@/lib/turns'
+import type { Turn as TurnData } from '@/types'
 import { Turn } from './Turn'
 import styles from './Conversation.module.css'
 
@@ -31,7 +31,7 @@ export function Conversation({ turns }: { turns: TurnData[] }) {
     >
       <div className={styles.inner}>
         {turns.map((t) => (
-          <Turn key={t.key} turn={t} />
+          <Turn key={t.id} turn={t} />
         ))}
       </div>
     </div>

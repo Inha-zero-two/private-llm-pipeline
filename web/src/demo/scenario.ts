@@ -1,18 +1,15 @@
-// 목업 실행 시나리오. 질문에 아래 낱말을 넣으면 해당 상황을 볼 수 있다.
-//   "오류"     → error 이벤트로 끝남
-//   "오프라인" → 외부 모델 연결 불가 (offline)
-//   "상한"     → 질문 상한 도달 (call_limit)
+// 데모 실행 시나리오. 질문에 아래 낱말을 넣으면 해당 상황을 볼 수 있다.
+//   "오류"     → 오류로 끝남
+//   "오프라인" → 외부 모델 연결 불가
+//   "상한"     → 질문 상한 도달
 //   나이("27살") · 전화번호 · 회사/학교 이름("삼성전자", "인하대학교") → 추가 공개 동의 요청
 //   "동의"     → 위 항목이 없어도 예시 항목으로 동의 요청
 
-import type { ConsentItem, EndReason, PDCategory, Rule } from '../types'
+import type { ConsentItem, PDCategory, Rule } from '@/types'
 
 // 상세 설계서 3.4 EndReason 표의 화면 안내
-export const LIMITED_TEXT: Record<EndReason, string | null> = {
-  info_enough: null,
+export const LIMITED_TEXT = {
   call_limit: '질문 횟수 한도에 도달해 지금까지 모은 정보로 답했습니다.',
-  regen_limit: '개인정보가 포함되지 않은 질문을 만들지 못해 외부 모델에 묻지 못했습니다.',
-  budget_limit: '사용 비용 한도에 도달해 지금까지 모은 정보로 답했습니다.',
   offline: '외부 모델에 연결할 수 없어 현재까지 취합한 정보를 바탕으로 로컬 모델로 답했습니다.',
   stopped: '중지되었습니다.',
   consent_denied: '공개 동의가 필요한 정보는 보내지 않고 지금까지 모은 정보로 답했습니다.',
@@ -41,19 +38,19 @@ function detect(question: string): DetectedItem[] {
   const items: DetectedItem[] = []
   for (const d of DETECTORS) {
     for (const m of question.matchAll(d.pattern)) {
-      items.push({ pdId: items.length + 1, text: m[0], category: d.category, label: d.label })
+      items.push({ id: items.length + 1, text: m[0], category: d.category, label: d.label })
     }
   }
   if (items.length === 0 && question.includes('동의')) {
     items.push(
-      { pdId: 1, text: '직무: 개발자', category: 2, label: '직무' },
-      { pdId: 2, text: '경력 기간: 3년', category: 2, label: '경력' },
+      { id: 1, text: '직무: 개발자', category: 2, label: '직무' },
+      { id: 2, text: '경력 기간: 3년', category: 2, label: '경력' },
     )
   }
   return items
 }
 
-// 설정 규칙에서 허용된 항목은 동의를 묻지 않는다. (목업은 대상 이름이 종류 이름에 들어가는지만 본다)
+// 설정 규칙에서 허용된 항목은 동의를 묻지 않는다. (데모는 대상 이름이 종류 이름에 들어가는지만 본다)
 function isAllowed(item: DetectedItem, rules: Rule[]) {
   const matched = rules.filter(
     (r) => item.label.includes(r.target) || r.target.includes(item.label),

@@ -1,17 +1,15 @@
-import type { LiveRun } from '@/hooks/useLiveRun'
-import { CATEGORY_LABEL } from '@/lib/turns'
+import { CATEGORY_LABEL, type ConsentRequest } from '@/types'
 import { Dialog } from './Dialog'
 import dialog from './Dialog.module.css'
 import styles from './ConsentDialog.module.css'
 
 type Props = {
-  request: NonNullable<LiveRun['consent']> | null
-  answering: boolean
+  request: ConsentRequest | null
   onAnswer: (allow: boolean) => void
 }
 
 // 추가 개인정보 공개 요청 (설계서 9장 8.2). 시간 제한이 없고, 거절 / 허용으로만 닫힌다.
-export function ConsentDialog({ request, answering, onAnswer }: Props) {
+export function ConsentDialog({ request, onAnswer }: Props) {
   return (
     <Dialog
       open={request !== null}
@@ -20,10 +18,10 @@ export function ConsentDialog({ request, answering, onAnswer }: Props) {
       description="더 정확한 답변을 위해 외부 모델에 아래 정보를 보내도 될까요?"
       actions={
         <>
-          <button className={dialog.button} disabled={answering} onClick={() => onAnswer(false)}>
+          <button className={dialog.button} onClick={() => onAnswer(false)}>
             거절
           </button>
-          <button className={dialog.primary} disabled={answering} onClick={() => onAnswer(true)}>
+          <button className={dialog.primary} onClick={() => onAnswer(true)}>
             허용
           </button>
         </>
@@ -33,7 +31,7 @@ export function ConsentDialog({ request, answering, onAnswer }: Props) {
         <>
           <ul className={styles.items}>
             {request.items.map((item) => (
-              <li key={item.pdId} className={styles.item}>
+              <li key={item.id} className={styles.item}>
                 <span className={styles.category} data-category={item.category}>
                   {CATEGORY_LABEL[item.category]}
                 </span>

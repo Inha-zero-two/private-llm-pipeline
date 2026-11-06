@@ -1,15 +1,16 @@
-import type { ChatSummary } from '@/api'
+import type { Chat } from '@/types'
 import { PlusIcon, ShieldIcon, SidebarIcon, TrashIcon } from './icons'
 import styles from './Sidebar.module.css'
 
 type Props = {
   open: boolean
-  chats: ChatSummary[]
+  chats: Chat[]
   currentChatId: string | null
+  runningChatId: string | null
   onToggle: () => void
   onNewChat: () => void
   onSelect: (chatId: string) => void
-  onDelete: (chat: ChatSummary) => void
+  onDelete: (chat: Chat) => void
   onOpenSettings: () => void
 }
 
@@ -17,6 +18,7 @@ export function Sidebar({
   open,
   chats,
   currentChatId,
+  runningChatId,
   onToggle,
   onNewChat,
   onSelect,
@@ -44,16 +46,12 @@ export function Sidebar({
         <nav className={styles.list}>
           {chats.length > 0 && <div className={styles.sectionLabel}>채팅</div>}
           {chats.map((chat) => {
-            const running = chat.activeRunId !== null
+            const running = chat.id === runningChatId
             return (
-              <div
-                key={chat.chatId}
-                className={styles.item}
-                data-active={chat.chatId === currentChatId}
-              >
+              <div key={chat.id} className={styles.item} data-active={chat.id === currentChatId}>
                 <button
                   className={styles.itemTitle}
-                  onClick={() => onSelect(chat.chatId)}
+                  onClick={() => onSelect(chat.id)}
                   title={chat.title}
                 >
                   {running && <span className={styles.runningDot} aria-label="답변 생성 중" />}
