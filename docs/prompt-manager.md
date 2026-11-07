@@ -9,8 +9,8 @@
 - 데이터베이스 테이블 대신 `app/prompts/prompts.json` 파일에서 시스템 프롬프트를 관리
 - 버전(`version`)은 개별 프롬프트마다 두지 않고 파일 맨 앞에 전체 버전 하나만 기록
 - 각 프롬프트 항목은 `idx`(0 이상의 정수), `name`(단계 이름), `prompt`(시스템 프롬프트) 세 필드로 구성
+- 기본 13개 단계(`DETECT` ~ `MEMO_SUMMARY`)가 모두 포함되어야 하며, 추후 새로운 단계가 생기면 JSON의 `prompts` 목록에 형식에 맞춰 `idx`, `name`, `prompt`만 추가해 코드 수정 없이 숫자 `idx`나 `name` 문자열로 즉시 조회 가능
 - `prompt` 값은 일반 문자열(`str`)과 줄 단위 문자열 배열(`list[str]`)을 모두 허용하며, 배열로 작성한 경우 로드 시 `\n`으로 결합해 하나의 문자열로 보관
-- 추후 새로운 단계가 생기면 JSON의 `prompts` 목록에 형식에 맞춰 `idx`, `name`, `prompt`만 추가해 코드 수정 없이 숫자 `idx`나 `name` 문자열로 즉시 조회 가능
 
 ```json
 {
@@ -21,6 +21,7 @@
       "name": "DETECT",
       "prompt": "여기에 시스템 프롬프트 입력"
     },
+    "... (기본 0 ~ 12번 항목 포함) ...",
     {
       "idx": 13,
       "name": "NEW_STAGE",
@@ -57,13 +58,15 @@
 flowchart TD
     A["PromptManager 생성 또는 load_prompts 호출"] --> B{"이미 로드되었는가(_loaded)"}
     B -->|예| C["즉시 True 반환"]
-    B -->|아니오| D["prompts.json 파일 읽기 및 JSON 파싱"]
-    D -->|파일 없음 · 문법 오류| E["False 반환"]
-    D -->|성공| F["상단 version 및 항목별 idx · name · prompt 검증"]
-    F -->|필수값 누락 · 빈 값 · 중복| E
-    F -->|통과| G["_prompts 사전에 번호·이름 동시 저장 및 _loaded=True 후 True 반환"]
-    G --> H["get_prompt(PromptIdx | int | str) → 프롬프트 문자열(str)"]
-    G --> I["get_version() → 전체 버전 문자열(str)"]
+    B -->|아니오| D["1. prompts.json 파일 읽기"]
+    D -->|파일 없음| E["CLI 원인 출력 후 False 반환"]
+    D -->|성공| F["2. JSON 문법 및 항목별 형식 · 중복 검사"]
+    F -->|형식 안 맞음| E
+    F -->|통과| G["3. 기본 13개 단계 포함 여부 확인"]
+    G -->|항목 누락| E
+    G -->|통과| H["_prompts 사전에 번호·이름 저장 및 _loaded=True 후 True 반환"]
+    H --> I["get_prompt(PromptIdx | int | str) → 프롬프트 문자열(str)"]
+    H --> J["get_version() → 전체 버전 문자열(str)"]
 ```
 
 ## 사용법과 입출력
@@ -89,13 +92,13 @@ ok = pm.load_prompts()
 | 호출 | 반환과 사용 기준 |
 | --- | --- |
 | `PromptManager(prompt_file=DEFAULT_PROMPT_FILE)` | 기본 경로(`app/prompts/prompts.json`) 또는 지정 경로로 객체 초기화 및 최초 1회 로드 시도 |
-| `load_prompts()` | 아직 로드되지 않았을 때만 JSON 파일을 읽어 검증 후 멤버 변수에 저장. 이미 로드되었거나 로드에 성공하면 `True`, 읽을 파일이 없거나 형식·중복 오류 시 `False` 반환 |
+| `load_prompts()` | 아직 로드되지 않았을 때만 JSON 파일을 읽어 검증 후 멤버 변수에 저장. 이미 로드되었거나 로드에 성공하면 `True`, 실패(① 파일 없음 ② 형식 안 맞음 ③ 기본 13개 항목 누락) 시 CLI에 원인을 출력하고 `False` 반환 |
 | `get_prompt(prompt_idx)` | `PromptIdx`(`StrEnum`), 정수 `idx`, 단계 이름 `str`을 받아 시스템 프롬프트 문자열(`str`) 반환. 미로드 시 `RuntimeError`, 미등록 키는 `KeyError`, 잘못된 자료형(`bool` 포함)은 `TypeError` |
 | `get_version()` | JSON 최상단의 전체 버전 문자열(`str`) 반환. 미로드 시 `RuntimeError` |
 
 ## 설계서 대비 추가 및 변경
 
 - **파일 구조와 버전 관리:** 설계 6.1의 폴더 내 개별 파일·항목별 버전 대신 `app/prompts/prompts.json` 단일 파일에서 최상단 `version` 1개로 통합 관리. 긴 프롬프트 작성을 위해 `prompt` 필드에 문자열 배열(`list[str]`) 허용
-- **단일 사전을 통한 다중 키 조회:** 하나의 사전(`_prompts`)에 정수 `idx`(`0`~`12`)와 문자열 `name`(`PromptIdx` 포함)을 함께 매핑하며, JSON에 새 항목(`idx`, `name`, `prompt`)만 추가해도 코드 변경 없이 조회 가능
+- **단일 사전을 통한 다중 키 조회:** 하나의 사전(`_prompts`)에 정수 `idx`(`0`~`12`)와 문자열 `name`(`PromptIdx` 포함)을 함께 매핑하며, 기본 13개 단계 외에 새 항목(`idx`, `name`, `prompt`)을 JSON에 추가하면 코드 변경 없이 조회 가능
 - **반환값 분리:** 설계 6.1의 `getPrompt() -> (내용, 버전)` 튜플 대신 `get_prompt() -> str`과 `get_version() -> str`로 분리. 추후 `LocalLLMRunner.request()` 연동 시 두 메서드를 각각 호출하도록 주석 규격 갱신 예정
-- **1회 로드 플래그(`_loaded`):** 실행 중 프롬프트 동적 교체를 두지 않고 최초 로드 성공 후 재호출 시 즉시 `True`를 반환해 별도 잠금(Lock) 없이 안전하게 `Main.init()` 호출과 호환
+- **1회 로드 플래그(`_loaded`) 및 실패 원인 출력:** 최초 로드 성공 후 재호출 시 즉시 `True`를 반환해 별도 잠금(Lock) 없이 `Main.init()` 호출과 호환하며, 실패 시 3가지 원인(파일 없음 · 형식 안 맞음 · 기본 13개 항목 누락)을 CLI에 안내
