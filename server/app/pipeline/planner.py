@@ -42,11 +42,7 @@ class Planner:
         # needs, ok, *_ = self._runner.request(
         #     run_id, question, PromptIdx.NEEDS, chat_id, system_prompt=system_prompt
         # )
-        # 현재는 함수 인자로 분류 결과와 성공 여부 전달
-        if needs is None and ok:
-            raise NotImplementedError(
-                "LocalLLMRunner is not connected; pass needs"
-            )
+        # 현재는 함수 인자로 분류 결과와 성공 여부를 전달받으며 실패 시 예외 발생
         if (
             not ok
             or not isinstance(needs, list)
@@ -118,11 +114,7 @@ class Planner:
         # raw_plan, ok, *_ = self._runner.request(
         #     run_id, judge_input, PromptIdx.JUDGE, chat_id, system_prompt=system_prompt
         # )
-        # 현재는 함수 인자로 판단 결과와 성공 여부 전달
-        if raw_plan is None and ok:
-            raise NotImplementedError(
-                "LocalLLMRunner is not connected; pass raw_plan"
-            )
+        # 현재는 함수 인자로 판단 결과와 성공 여부를 전달받으며 실패 시 예외 발생
         if not ok or raw_plan is None:
             raise RuntimeError("답변 판단에 실패했습니다")
 

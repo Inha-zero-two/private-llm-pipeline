@@ -5,7 +5,7 @@
 ## 구현 내역
 
 - **`CATEGORY_LABEL` 상수 및 `PDItem` 모델 정의:** 개인정보 분류(`0: 식별정보`, `1: 민감정보`, `2: 속성정보`) 상수와 검출 항목 모델(`pd_id`, `text`, `category`, `allowed`, `allowed_by`) 구현
-- **`detect(run_id, chat_id, message_id, question) -> list[PDItem]` 구현:** 질문에서 검출한 개인정보 항목을 검증하고 기본 금지 상태(`allowed=False`, `allowed_by="none"`)로 묶어 반환
+- **`detect(run_id, chat_id, message_id, question, *, found_items=None, ok=True) -> list[PDItem]` 구현:** 질문에서 검출한 개인정보 항목을 검증하고 기본 금지 상태(`allowed=False`, `allowed_by="none"`)로 묶어 반환 (`found_items`, `ok`는 `LocalLLMRunner` 병합 전까지 사용하는 임시 키워드 인자)
 
 ## 함수별 처리 흐름
 

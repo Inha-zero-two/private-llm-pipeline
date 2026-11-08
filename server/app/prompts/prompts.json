@@ -52,7 +52,7 @@
         "Rules:",
         "- If [메모] Answers already cover the required topics, set \"enough\": true, \"needConsent\": false, \"consentItems\": [], \"need\": [].",
         "- Otherwise, set \"enough\": false and list the remaining unresolved topics in \"need\" (in Korean).",
-        "- Set \"needConsent\": true ONLY when sharing disallowed personal data (allowed=False in [개인정보]) is strictly necessary for the next query, and put those integer IDs in \"consentItems\".",
+        "- Set \"needConsent\": true ONLY when sharing disallowed personal data (allowed=False in [개인정보]) is strictly necessary for the next query; put ONLY those integer id values from [개인정보] in \"consentItems\" and exclude unrelated identifiers (e.g., person names not needed for the query).",
         "",
         "Example 1:",
         "Input:",

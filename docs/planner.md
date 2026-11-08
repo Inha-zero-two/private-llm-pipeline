@@ -5,8 +5,8 @@
 ## 구현 내역
 
 - **`Plan` 모델 정의:** `enough`, `need_consent`(`needConsent`), `consent_items`(`consentItems`), `need` 필드 구성
-- **`list_needs(question) -> list[str]` 구현:** 질문을 해결하는 데 필요한 세부 정보 목록 검증 및 반환
-- **`judge(question, memo, pd_table) -> Plan` 구현:** 질문·메모·개인정보 테이블로 모델 입력 문자열을 구성하고, 판단 결과에 설계서 보정 규칙 4가지를 적용해 `Plan` 반환
+- **`list_needs(question, run_id="", chat_id=None, *, needs=None, ok=True) -> list[str]` 구현:** 질문을 해결하는 데 필요한 세부 정보 목록 검증 및 반환 (`needs`, `ok`는 `LocalLLMRunner` 병합 전까지 사용하는 임시 키워드 인자)
+- **`judge(question, memo, pd_table, run_id="", chat_id=None, *, raw_plan=None, ok=True) -> Plan` 구현:** 질문·메모·개인정보 테이블로 모델 입력 문자열을 구성하고, 판단 결과에 설계서 보정 규칙 4가지를 적용해 `Plan` 반환 (`raw_plan`, `ok`는 임시 키워드 인자)
 
 ## 함수별 처리 흐름
 

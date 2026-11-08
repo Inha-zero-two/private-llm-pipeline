@@ -55,11 +55,7 @@ class PDDetector:
         # found_items, ok, *_ = self._runner.request(
         #     run_id, question, PromptIdx.DETECT, chat_id
         # )
-        # 현재는 함수 인자로 검출 결과와 성공 여부 전달
-        if found_items is None and ok:
-            raise NotImplementedError(
-                "LocalLLMRunner is not connected; pass found_items"
-            )
+        # 현재는 함수 인자로 검출 결과와 성공 여부를 전달받으며 실패 시 예외 발생
         if not ok or not isinstance(found_items, list):
             raise RuntimeError("개인정보 검출에 실패했습니다")
 
