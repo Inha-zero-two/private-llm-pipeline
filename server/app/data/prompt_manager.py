@@ -42,14 +42,14 @@ class PromptManager:
 
         # 1. 프롬프트 파일 존재 및 읽기 확인
         try:
-            raw_text = self._prompt_file.read_text(encoding="utf-8")
+            raw_bytes = self._prompt_file.read_bytes()
         except OSError:
             print(f"[PromptManager] 프롬프트 파일 없음: {self._prompt_file}")
             return False
 
-        # 2. JSON 문법 및 항목별 형식·중복 검사
+        # 2. UTF-8 디코딩, JSON 문법 및 항목별 형식·중복 검사
         try:
-            data = json.loads(raw_text)
+            data = json.loads(raw_bytes.decode("utf-8"))
             version = data["version"]
             raw_prompts = data["prompts"]
             if (
@@ -67,6 +67,10 @@ class PromptManager:
                     raise ValueError
                 if not isinstance(name, str) or not name.strip():
                     raise ValueError
+                # 기본 13개 단계(0~12)는 지정된 번호와 이름이 서로 일치해야 함
+                if idx < len(REQUIRED_PROMPTS) or name in REQUIRED_PROMPTS:
+                    if idx >= len(REQUIRED_PROMPTS) or REQUIRED_PROMPTS[idx] != name:
+                        raise ValueError
                 # 줄 단위 문자열 배열이면 줄바꿈으로 합쳐 단일 문자열로 변환
                 if isinstance(prompt, list) and all(isinstance(s, str) for s in prompt):
                     prompt = "\n".join(prompt)

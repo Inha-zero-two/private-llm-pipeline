@@ -9,7 +9,7 @@
 - 데이터베이스 테이블 대신 `app/prompts/prompts.json` 파일에서 시스템 프롬프트를 관리
 - 버전(`version`)은 개별 프롬프트마다 두지 않고 파일 맨 앞에 전체 버전 하나만 기록
 - 각 프롬프트 항목은 `idx`(0 이상의 정수), `name`(단계 이름), `prompt`(시스템 프롬프트) 세 필드로 구성
-- 기본 13개 단계(`DETECT` ~ `MEMO_SUMMARY`)가 모두 포함되어야 하며, 추후 새로운 단계가 생기면 JSON의 `prompts` 목록에 형식에 맞춰 `idx`, `name`, `prompt`만 추가해 코드 수정 없이 숫자 `idx`나 `name` 문자열로 즉시 조회 가능
+- 기본 13개 단계(`0: DETECT` ~ `12: MEMO_SUMMARY`)의 번호와 이름이 표와 일치해야 하며, 추후 새로운 단계(`idx >= 13`)가 생기면 JSON의 `prompts` 목록에 `idx`, `name`, `prompt`만 추가해 코드 수정 없이 숫자 `idx`나 `name` 문자열로 즉시 조회 가능
 - `prompt` 값은 일반 문자열(`str`)과 줄 단위 문자열 배열(`list[str]`)을 모두 허용하며, 배열로 작성한 경우 로드 시 `\n`으로 결합해 하나의 문자열로 보관
 
 ```json
