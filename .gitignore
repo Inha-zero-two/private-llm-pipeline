@@ -17,6 +17,8 @@ deploy/https/private/
 
 # 로컬 LLM 모델 파일
 models/
+# 서버 코드의 데이터 구조 폴더(app/models/)는 모델 파일이 아니므로 올린다
+!server/app/models/
 *.gguf
 *.bin
 *.safetensors
@@ -72,3 +74,5 @@ desktop.ini
 .idea/
 .vscode/
 .claude/settings.local.json
+
+CLAUDE.md
