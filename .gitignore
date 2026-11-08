@@ -70,9 +70,10 @@ Thumbs.db
 desktop.ini
 *.stackdump
 
-# 에디터 · 개인 설정 (.claude/settings.json은 올림)
+# 에디터 · 개인 설정 (.claude/settings.json, .vscode/extensions.json은 올림)
 .idea/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
 .claude/settings.local.json
 
 CLAUDE.md
