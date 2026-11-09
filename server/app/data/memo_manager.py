@@ -45,6 +45,10 @@ class MemoManager:
         # 현재 호출부의 (전체 입력 한도, 메모 앞 문자열, 메모 뒤 문자열).
         # prepare_for_request()에서 설정하며 새 실행마다 초기화한다.
         self._request_budget: tuple[int, str, str] | None = None
+        # 실패하거나 크기가 줄지 않은 입력은 내용이 바뀔 때까지 다시 요약하지 않는다.
+        self._unshrinkable: dict[str, tuple[str, ...]] = {}
+        # 후보 전체를 줄이지 못했다면 동일한 후보의 순환 작업도 반복하지 않는다.
+        self._blocked_candidate: dict[str, tuple[str, ...]] | None = None
         input_limit = runner.get_input_limit(
             prompt_manager.get_prompt("MEMO_SUMMARY"), max_tokens=SUMMARY_MAX_TOKENS
         )
@@ -59,6 +63,8 @@ class MemoManager:
         self._run_id = run_id
         self._memo = Memo(question=question)
         self._request_budget = None
+        self._unshrinkable.clear()
+        self._blocked_candidate = None
 
     def set_needs(self, needs: list[str]) -> None:
         """실행 초기의 전체 필요 정보 목록을 등록한다.
@@ -69,31 +75,24 @@ class MemoManager:
         memo = self._require_memo()
         memo.needs = list(dict.fromkeys(needs))
         memo.answers = {need: memo.answers.get(need, []) for need in memo.needs}
+        self._unshrinkable.clear()
+        self._blocked_candidate = None
 
     def add_answer(self, needs: list[str], answer: str) -> None:
         """이번 질문의 대상 need들에 답변을 연결한다.
 
         needs는 전체 목록에 등록된 문자열이어야 하며, 보통 Main이 plan.need를 전달한다.
-        한 응답이 여러 need를 다루면 각 묶음에 저장한다. 추가 후 예상 크기를 먼저
-        검사하고 기존 묶음을 압축한 뒤 재검사하며, 여전히 초과하면 새 답변은 저장하지 않는다.
+        새 답변을 포함한 후보에서 대상 need를 먼저 압축하고, 부족하면 다른 need를
+        순서대로 압축한다. 여유 공간을 확보한 후보만 저장하며 실패·중지 시 원문을 유지한다.
         """
         memo = self._require_memo()
         targets = list(dict.fromkeys(needs))
         if not targets or any(need not in memo.answers for need in targets):
             raise ValueError("답변을 연결할 need는 등록된 필요 정보여야 합니다")
 
-        # 새 답변은 아직 실제 메모에 넣지 않는다.
+        # 새 답변을 요약 입력에는 포함하되, 실제 메모는 압축 완료 후 교체한다.
         candidate = self._with_answer(targets, answer)
-        remaining_tokens = self._remaining_tokens(self._format_memo(candidate))
-        if remaining_tokens <= COMPACTION_REMAINING_TOKENS:
-            self.compact_answer()
-            # 압축으로 기존 묶음이 바뀌었으므로 추가 후보를 다시 만든다.
-            candidate = self._with_answer(targets, answer)
-            remaining_tokens = self._remaining_tokens(self._format_memo(candidate))
-        if remaining_tokens < 0:
-            raise ValueError("압축 후에도 새 답변이 메모 토큰 한도를 초과합니다")
-
-        memo.answers = candidate
+        memo.answers = self._compact_until_fit(candidate, targets)
 
     def _with_answer(self, needs: list[str], answer: str) -> dict[str, list[str]]:
         """기존 메모를 바꾸지 않고 지정한 need들에 답변을 추가한 후보를 만든다."""
@@ -103,29 +102,69 @@ class MemoManager:
         }
 
     def compact_answer(self) -> None:
-        """need마다 누적 답변들을 한 번에 요약하고 해당 묶음만 교체한다.
-
-        기존 요약과 이후에 쌓인 답변도 함께 입력한다. 실패하거나 더 길어진 묶음은
-        원문을 유지한다. 중지되면 이번 압축에서 만든 변경을 모두 반영하지 않는다.
-        """
+        """등록 순서로 need를 순환하며 압축 임계값 아래가 될 때까지 줄인다."""
         memo = self._require_memo()
-        # 처리 중에는 복사본만 바꾸고, 끝까지 확인한 뒤 한 번에 반영한다.
-        answers = {need: list(items) for need, items in memo.answers.items()}
-        for need, items in memo.answers.items():
-            if not items:
-                continue
-            summary, reason = self._summarize(need, items)
-            if reason == "stopped":
-                return
-            if summary is not None and self._count_tokens(
-                self._format_need(need, [summary])
-            ) < self._count_tokens(self._format_need(need, items)):
-                answers[need] = [summary]
+        memo.answers = self._compact_until_fit(memo.answers)
 
-        if self._count_tokens(self._format_memo(answers)) < self._count_tokens(
-            self.read_all()
+    def _compact_until_fit(
+        self,
+        source: dict[str, list[str]],
+        priority_needs: list[str] | None = None,
+    ) -> dict[str, list[str]]:
+        """대상 need부터 한 바퀴씩 압축하고 여유 공간을 확보한 복사본을 반환한다.
+
+        각 요약 직후 공간을 확인해 충분해지면 멈춘다. 줄어든 요약은 다음 바퀴에서
+        다시 압축할 수 있다. 한 바퀴 동안 진전이 없거나 중지되면 실제 메모는 바꾸지 않는다.
+        """
+        answers = {need: list(items) for need, items in source.items()}
+        remaining = self._remaining_tokens(self._format_memo(answers))
+        if remaining > COMPACTION_REMAINING_TOKENS:
+            return answers
+
+        original = {need: tuple(items) for need, items in source.items()}
+        if self._blocked_candidate == original:
+            raise ValueError("메모를 압축 임계값 아래로 줄일 수 없습니다")
+
+        # 질문·need·추가 입력만으로 기준을 넘으면 답변을 줄여도 해결할 수 없다.
+        empty = {need: [] for need in answers}
+        if (
+            self._remaining_tokens(self._format_memo(empty))
+            <= COMPACTION_REMAINING_TOKENS
         ):
-            memo.answers = answers
+            raise ValueError("고정 입력만으로 압축 임계값을 초과합니다")
+
+        order = list(priority_needs or [])
+        order.extend(need for need in answers if need not in order)
+        while remaining <= COMPACTION_REMAINING_TOKENS:
+            before_round = remaining
+            for need in order:
+                items = answers[need]
+                if not items or self._unshrinkable.get(need) == tuple(items):
+                    continue
+                summary, reason = self._summarize(need, items)
+                if reason == "stopped":
+                    raise InterruptedError("메모 압축이 중지되었습니다")
+                if summary is None:
+                    self._unshrinkable[need] = tuple(items)
+                    continue
+
+                candidate = {**answers, need: [summary]}
+                candidate_remaining = self._remaining_tokens(
+                    self._format_memo(candidate)
+                )
+                if candidate_remaining > remaining:
+                    answers, remaining = candidate, candidate_remaining
+                else:
+                    self._unshrinkable[need] = tuple(items)
+                if remaining > COMPACTION_REMAINING_TOKENS:
+                    self._blocked_candidate = None
+                    return answers
+
+            if remaining == before_round:
+                self._blocked_candidate = original
+                raise ValueError("메모를 압축 임계값 아래로 줄일 수 없습니다")
+
+        return answers
 
     def read_all(self) -> str:
         """질문, 필요한 정보 목록, 답변을 읽기 쉬운 하나의 문자열로 반환한다."""
@@ -150,12 +189,13 @@ class MemoManager:
         limit = self._runner.get_input_limit(
             system_prompt, max_tokens=max_output_tokens
         )
-        self._request_budget = (limit, prefix, suffix)
-        if self._remaining_tokens(self.read_all()) <= COMPACTION_REMAINING_TOKENS:
-            self.compact_answer()
+        budget = (limit, prefix, suffix)
+        if self._request_budget != budget:
+            self._unshrinkable.clear()
+            self._blocked_candidate = None
+        self._request_budget = budget
+        self.compact_answer()
         memo_text = self.read_all()
-        if self._remaining_tokens(memo_text) < 0:
-            raise ValueError("압축 후에도 전체 요청이 모델 입력 한도를 초과합니다")
         return prefix + memo_text + suffix
 
     def _remaining_tokens(self, memo_text: str) -> int:
@@ -190,6 +230,8 @@ class MemoManager:
         self._run_id = None
         self._memo = None
         self._request_budget = None
+        self._unshrinkable.clear()
+        self._blocked_candidate = None
 
     def _count_tokens(self, text: str) -> int:
         """PR #13 Runner의 모델 토크나이저로 메모 크기를 계산한다."""
