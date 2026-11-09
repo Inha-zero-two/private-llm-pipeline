@@ -81,6 +81,7 @@ class FakePlanner(Recorder):
     def judge(
         self, question: str, memo: str, pd_table: list[Any], run_id: str, chat_id: str
     ) -> SimpleNamespace:
+        """실행·채팅 ID를 기록하고 메모의 답변 수로 정보가 충분한지 판단한다."""
         self.record("judge", run_id, chat_id)
         answers = len(memo.split()) if memo else 0
         return SimpleNamespace(

@@ -356,6 +356,7 @@ class LocalLLMRunner:
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
         3회 모두 실패하면 마지막 실패에 따라 length_failed 또는 parse_failed 반환.
         입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
+        프롬프트 미로드(RuntimeError)·미등록 키(KeyError)는 모델 재시도 없이 즉시 전달.
         """
         prompt_idx = PromptIdx(prompt_idx)
         # 직접 전달한 프롬프트가 없으면 공유 관리자로 본문과 버전을 각각 조회

@@ -58,6 +58,7 @@ def connected(
 def test_detector_and_planner_use_prompts_and_parser(
     connected: tuple[LocalLLMRunner, ScriptedLlama], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """검출·분류·판단이 공용 프롬프트와 파서를 사용하고 실행 ID와 버전을 기록한다."""
     runner, model = connected
     log_call = Mock()
     monkeypatch.setattr(runner, "_log_call", log_call)
@@ -99,6 +100,7 @@ def test_detector_and_planner_use_prompts_and_parser(
 
 
 def test_parser_uses_planner_plan_and_requires_all_model_output_fields() -> None:
+    """완전한 별칭·필드명 입력은 허용하고 필수 필드 누락과 잘못된 자료형은 거부한다."""
     result = parser(
         '{"enough": true, "needConsent": false, "consentItems": [], "need": []}',
         PromptIdx.JUDGE,
@@ -106,6 +108,7 @@ def test_parser_uses_planner_plan_and_requires_all_model_output_fields() -> None
     assert type(result) is Plan
     assert Plan(enough=True).need == []  # Planner 직접 사용 시 기본값 유지
     complete = result.model_dump()
+    assert parser(json.dumps(complete), PromptIdx.JUDGE) == result
     for field in Plan.model_fields:
         incomplete = {key: value for key, value in complete.items() if key != field}
         with pytest.raises(OutputFormatError):
@@ -121,6 +124,7 @@ def test_parser_uses_planner_plan_and_requires_all_model_output_fields() -> None
 def test_invalid_model_output_propagates_after_runner_retries(
     connected: tuple[LocalLLMRunner, ScriptedLlama], stage: str
 ) -> None:
+    """각 단계의 잘못된 모델 출력은 Runner가 세 번 시도한 뒤 호출자에게 실패로 전달한다."""
     runner, model = connected
     model.outputs.extend(["invalid json"] * 3)
     with pytest.raises(RuntimeError):
@@ -136,6 +140,7 @@ def test_invalid_model_output_propagates_after_runner_retries(
 def test_explicit_prompt_and_results_remain_supported(
     connected: tuple[LocalLLMRunner, ScriptedLlama], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """직접 지정한 프롬프트·버전과 검출·분류·판단 결과를 그대로 사용할 수 있다."""
     runner, model = connected
     log_call = Mock()
     monkeypatch.setattr(runner, "_log_call", log_call)
@@ -164,6 +169,7 @@ def test_explicit_prompt_and_results_remain_supported(
 def test_managed_prompts_work_with_context_isolation(
     connected: tuple[LocalLLMRunner, ScriptedLlama],
 ) -> None:
+    """공용 프롬프트를 사용하면서 같은 실행의 대화는 이어 받고 다른 실행은 분리한다."""
     runner, model = connected
     model.outputs.extend(['{"needs": ["항목"]}'] * 3)
     for run_id, question in [
@@ -183,6 +189,7 @@ def test_managed_prompts_work_with_context_isolation(
 def test_main_calls_connected_modules(
     connected: tuple[LocalLLMRunner, ScriptedLlama], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Main이 실제 검출·분류·판단 모듈에 실행 ID를 전달하고 최종 답변을 저장한다."""
     runner, model = connected
     log_call = Mock()
     monkeypatch.setattr(runner, "_log_call", log_call)
