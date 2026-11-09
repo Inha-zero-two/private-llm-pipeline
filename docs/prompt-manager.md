@@ -100,5 +100,5 @@ ok = pm.load_prompts()
 
 - **파일 구조와 버전 관리:** 설계 6.1의 폴더 내 개별 파일·항목별 버전 대신 `app/prompts/prompts.json` 단일 파일에서 최상단 `version` 1개로 통합 관리. 긴 프롬프트 작성을 위해 `prompt` 필드에 문자열 배열(`list[str]`) 허용
 - **단일 사전을 통한 다중 키 조회:** 하나의 사전(`_prompts`)에 정수 `idx`(`0`~`12`)와 문자열 `name`(`PromptIdx` 포함)을 함께 매핑하며, 기본 13개 단계 외에 새 항목(`idx`, `name`, `prompt`)을 JSON에 추가한 뒤 인스턴스를 다시 생성하면 코드 변경 없이 조회 가능
-- **반환값 분리:** 설계 6.1의 `getPrompt() -> (내용, 버전)` 튜플 대신 `get_prompt() -> str`과 `get_version() -> str`로 분리. 추후 `LocalLLMRunner.request()` 연동 시 두 메서드를 각각 호출하도록 주석 규격 갱신 예정
+- **반환값 분리:** 설계 6.1의 `getPrompt() -> (내용, 버전)` 튜플 대신 `get_prompt() -> str`과 `get_version() -> str`로 분리. `LocalLLMRunner(prompt_manager=pm)`으로 주입하면 `request()`가 두 메서드를 각각 호출
 - **1회 로드 플래그(`_loaded`) 및 실패 원인 출력:** 최초 로드 성공 후 재호출 시 즉시 `True`를 반환해 별도 잠금(Lock) 없이 `Main.init()` 호출과 호환하며, 실패 시 3가지 원인(파일 없음 · 형식 안 맞음 · 기본 13개 항목 누락)을 CLI에 안내

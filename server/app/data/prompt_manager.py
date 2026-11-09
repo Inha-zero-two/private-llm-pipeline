@@ -3,7 +3,9 @@
 import json
 from pathlib import Path
 
-DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "prompts.json"
+DEFAULT_PROMPT_FILE = (
+    Path(__file__).resolve().parent.parent / "prompts" / "prompts.json"
+)
 
 # 파이프라인에서 필수로 사용하는 기본 13개 단계 이름
 REQUIRED_PROMPTS = (
@@ -111,12 +113,7 @@ class PromptManager:
         return self._prompts[prompt_idx]
 
     def get_version(self) -> str:
-        """프롬프트 파일 최상단에 정의된 전체 버전 문자열 반환.
-
-        추후 LocalLLMRunner.request() 연동 시 기존의
-        `system_prompt, prompt_version = self.prompt_manager.get_prompt(prompt_idx)` 주석 규격을
-        `get_prompt(prompt_idx)`와 `get_version()`을 각각 호출하는 방식으로 변경한다.
-        """
+        """프롬프트 파일 최상단의 버전 반환. Runner에서 본문과 별도로 조회."""
         if not self._loaded:
             raise RuntimeError("시스템 프롬프트가 로드되지 않았습니다")
         return self._version

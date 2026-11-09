@@ -2,7 +2,9 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
+
+from ..pipeline.planner import Plan
 
 Index = Annotated[int, Field(ge=0)]
 ContextMode = Literal["keep", "reset"]
@@ -12,16 +14,6 @@ class DetectedItem(BaseModel):
     # 데이터베이스 ID와 실행 중 허용 상태는 호출자가 정의
     text: str  # 검출한 개인정보 문자열
     category: Annotated[int, Field(ge=0, le=2)]  # 개인정보 분류(0 식별, 1 민감, 2 속성)
-
-
-class Plan(BaseModel):
-    # 모델 출력의 필드 이름과 파이썬 변수 이름 대응 설정
-    model_config = ConfigDict(populate_by_name=True)
-
-    enough: bool  # 답변에 필요한 정보 충족 여부
-    need_consent: bool = Field(alias="needConsent")  # 추가 동의 필요 여부
-    consent_items: list[int] = Field(alias="consentItems")  # 동의 대상 개인정보 ID 목록
-    need: list[str]  # 추가로 필요한 정보 목록
 
 
 class Rule(BaseModel):

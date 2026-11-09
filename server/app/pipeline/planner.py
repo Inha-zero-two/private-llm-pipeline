@@ -1,8 +1,15 @@
 """설계 3.1: 필요 정보 나누기(list_needs)와 답변 판단(judge)."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.enums import PromptIdx
+
+if TYPE_CHECKING:
+    from app.runtime.local_llm_runner import LocalLLMRunner
 
 
 class Plan(BaseModel):
@@ -19,7 +26,7 @@ class Plan(BaseModel):
 class Planner:
     """필요한 정보를 나누고 현재 정보로 답할 수 있는지 판단하는 클래스."""
 
-    def __init__(self, local_llm_runner: Any = None) -> None:
+    def __init__(self, local_llm_runner: LocalLLMRunner | None = None) -> None:
         """로컬 모델 실행기 저장."""
         self._runner = local_llm_runner
 
@@ -37,12 +44,11 @@ class Planner:
         if not isinstance(question, str) or not question.strip():
             raise ValueError("질문이 비어 있습니다")
 
-        # 2. 로컬 모델로 필요 정보를 나누고 실패하면 예외 발생 (PR #13·#16 병합 후 주석 해제)
-        # system_prompt = self._prompt_manager.get_prompt(PromptIdx.NEEDS)
-        # needs, ok, *_ = self._runner.request(
-        #     run_id, question, PromptIdx.NEEDS, chat_id, system_prompt=system_prompt
-        # )
-        # 현재는 함수 인자로 분류 결과와 성공 여부를 전달받으며 실패 시 예외 발생
+        # 2. 직접 전달한 결과가 없으면 공유 실행기로 필요 정보 분류 요청
+        if needs is None and ok and self._runner is not None:
+            needs, ok, *_ = self._runner.request(
+                run_id, question, PromptIdx.NEEDS, chat_id
+            )
         if (
             not ok
             or not isinstance(needs, list)
@@ -51,8 +57,7 @@ class Planner:
             raise RuntimeError("필요 정보 분류에 실패했습니다")
 
         result = list(needs)
-        # 미병합: 분류한 필요 정보 목록을 임시 메모에 저장 (PR #14 MemoManager 병합 후 주석 해제)
-        # self._memo_manager.set_needs(result)
+        # 메모 저장은 호출자인 Main에서 담당
         return result
 
     def judge(
@@ -104,17 +109,14 @@ class Planner:
                 consent_candidates.add(pd_id)
 
         # 질문, 메모, 개인정보를 모델 입력 문자열 하나로 합치기
-        # 미병합: 메모 원문 조회도 PR #14 MemoManager 병합 후 연결 가능
-        # memo = self._memo_manager.read_all()
         pd_text = "\n".join(pd_lines) if pd_lines else "없음"
         judge_input = f"[질문]\n{question}\n\n[메모]\n{memo}\n\n[개인정보]\n{pd_text}"
 
-        # 3. 로컬 모델에 판단 요청 후 호출 실패 시 예외 발생 (PR #13·#16 병합 후 주석 해제)
-        # system_prompt = self._prompt_manager.get_prompt(PromptIdx.JUDGE)
-        # raw_plan, ok, *_ = self._runner.request(
-        #     run_id, judge_input, PromptIdx.JUDGE, chat_id, system_prompt=system_prompt
-        # )
-        # 현재는 함수 인자로 판단 결과와 성공 여부를 전달받으며 실패 시 예외 발생
+        # 3. 직접 전달한 결과가 없으면 공유 실행기로 판단 요청
+        if raw_plan is None and ok and self._runner is not None:
+            raw_plan, ok, *_ = self._runner.request(
+                run_id, judge_input, PromptIdx.JUDGE, chat_id
+            )
         if not ok or raw_plan is None:
             raise RuntimeError("답변 판단에 실패했습니다")
 

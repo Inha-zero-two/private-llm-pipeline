@@ -74,10 +74,14 @@ class FakePlanner(Recorder):
         self.enough_after = enough_after
         self.need_consent = False
 
-    def list_needs(self, question: str) -> list[str]:
+    def list_needs(self, question: str, run_id: str, chat_id: str) -> list[str]:
+        self.record("list_needs", run_id, chat_id)
         return ["경력"]
 
-    def judge(self, question: str, memo: str, pd_table: list[Any]) -> SimpleNamespace:
+    def judge(
+        self, question: str, memo: str, pd_table: list[Any], run_id: str, chat_id: str
+    ) -> SimpleNamespace:
+        self.record("judge", run_id, chat_id)
         answers = len(memo.split()) if memo else 0
         return SimpleNamespace(
             enough=answers >= self.enough_after,
@@ -193,8 +197,8 @@ class FakeSimple(Recorder):
         self.record("model_load")
         return True
 
-    def stop(self) -> None:
-        self.record("local_stop")
+    def stop(self, run_id: str) -> None:
+        self.record("local_stop", run_id)
 
 
 def make_main(
@@ -267,6 +271,8 @@ def test_enough_from_start_answers_without_frontier() -> None:
     assert ("save_message", "assistant", "최종 답변") in log
     assert "notify_limited" not in names(log)
     assert finished_with(log) == EndReason.INFO_ENOUGH
+    assert ("list_needs", "run-1", "chat-1") in log
+    assert ("judge", "run-1", "chat-1") in log
     # 정리는 release → clear → finish_run 순서
     tail = names(log)[-3:]
     assert tail == ["consent_release", "memo_clear", "finish_run"]
@@ -362,6 +368,7 @@ def test_stop_while_waiting_for_consent() -> None:
     asyncio.run(scenario())
 
     assert "consent_cancel" in names(log)
+    assert ("local_stop", "run-1") in log
     assert "generate" not in names(log)  # 1)~6) 도중 중지면 7)을 하지 않는다
     assert finished_with(log) == EndReason.STOPPED
     assert "consent_release" in names(log)

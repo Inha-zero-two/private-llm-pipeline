@@ -48,10 +48,22 @@ uv run --project server python
 위 Python 실행 환경에서 다음 코드 사용.
 
 ```python
+from app.data.prompt_manager import PromptManager
+from app.pipeline.planner import Planner
+from app.privacy.pd_detector import PDDetector
 from app.runtime.local_llm_runner import LocalLLMRunner
 
-runner = LocalLLMRunner()  # 프로그램 시작 시 한 번 생성
+prompts = PromptManager()
+runner = LocalLLMRunner(prompt_manager=prompts)  # Main에도 같은 두 객체 전달
+detector = PDDetector(runner)
+planner = Planner(runner)
 run_id = "run-1"
+
+# 등록된 DETECT·NEEDS·JUDGE 프롬프트로 실제 모델 요청과 파싱 수행
+question = "파이썬 비동기 처리를 설명해 줘"
+items = detector.detect(run_id, "chat-1", "msg-1", question)
+needs = planner.list_needs(question, run_id, "chat-1")
+plan = planner.judge(question, "Answers:", [], run_id, "chat-1")
 
 # 취소 버튼 등 다른 스레드에서 호출할 함수
 def cancel_request() -> None:
@@ -66,6 +78,10 @@ result = runner.request(
 )
 # 프로그램 종료 시 runner.close()
 ```
+
+`system_prompt`를 생략하면 주입한 PromptManager에서 본문과 버전을 각각 조회합니다. 직접 지정한 `system_prompt`와 `prompt_version`은 그대로 사용하며, 직접 프롬프트만 사용하는 Runner는 PromptManager 없이 생성할 수 있습니다. DETECT·NEEDS·JUDGE 외 기본 프롬프트는 아직 자리표시자입니다.
+
+현재 `dev`의 모듈 연결 범위는 위 검출·분류·판단과 기존 컨텍스트 관리까지입니다. Main은 Planner에 `run_id`·`chat_id`를 전달하고 중지 시 `runner.stop(run_id)`를 호출합니다. 전체 실행에는 아직 없는 MemoManager·ChatManager·PrivacySettings·ConsentManager·RequestWriter·LeakGuard·FrontierClient·AnswerGenerator가 필요합니다.
 
 | 호출 | 사용 방법 |
 | --- | --- |
@@ -106,4 +122,4 @@ result = runner.request(
 - **중지:** `stop(run_id)`로 실행 ID가 일치하는 요청만 중지. 생성·파싱·재생성·대화 저장까지 같은 중지 신호를 공유하고 요청 종료 시 실행 ID 정리. Event와 별도 수신 스레드로 중지 처리. 원격 서버에서 진행 중인 생성 작업 취소는 별도 기능
 - **모델 실행:** 기존 로컬 모델 래퍼를 사용하고 인증키 검색도 래퍼에서 처리. llama-cpp-python 직접 사용 시 Llama import 변경. 설계 31쪽의 세부 그래픽카드 설정 중 일부만 현재 생성자에 지정
 - **연결 확인:** 생성자에서 실제 응답 확인 후 사용. 응답 대기 시간은 요청 한 번당 기본 120초. request의 최종 실패는 반환값으로 전달. 생성자 확인과 manual_request는 오류 발생 시 즉시 예외 전달
-- **프롬프트와 로그:** PromptManager의 반환값은 `(본문, 버전)`으로 예정. 현재는 인자로 전달하고 조회 코드는 주석 처리. 로그 항목은 실행 ID·작업 종류·버전·소요 시간·검사 결과·새 입력·생성된 답변. ChatManager의 저장 코드도 미구현으로 주석 처리
+- **프롬프트와 로그:** 생성자로 받은 PromptManager의 `get_prompt()`와 `get_version()`을 각각 호출. 직접 전달한 프롬프트도 지원. 로그 항목은 실행 ID·작업 종류·버전·소요 시간·검사 결과·새 입력·생성된 답변. ChatManager의 저장 코드는 미구현으로 주석 처리
