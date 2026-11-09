@@ -5,9 +5,11 @@ import threading
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
+from app.data.memo_manager import MemoManager
 from app.main import STOPPED_MARK, Main
 from app.models.enums import EndReason
 
@@ -56,7 +58,8 @@ class FakeMemoManager(Recorder):
     def set_needs(self, needs: list[str]) -> None:
         pass
 
-    def add_answer(self, answer: str) -> None:
+    def add_answer(self, needs: list[str], answer: str) -> None:
+        self.record("add_answer", list(needs), answer)
         self.answers.append(answer)
 
     def read_all(self) -> str:
@@ -278,6 +281,52 @@ def test_one_round_trip_then_enough() -> None:
     asyncio.run(main.run_pipeline("chat-1", "질문"))
 
     assert names(log).count("send") == 1
+    assert ("add_answer", ["경력"], "답") in log
+    assert finished_with(log) == EndReason.INFO_ENOUGH
+
+
+@pytest.mark.parametrize("selected_needs", [["학력"], ["경력", "직무"]])
+def test_round_trip_links_reply_to_selected_needs(selected_needs: list[str]) -> None:
+    """실제 메모에 선택한 need만 연결하고 다음 판단과 최종 답변에 전달한다."""
+    log: list[tuple[Any, ...]] = []
+    needs = ["경력", "학력", "직무"]
+    runner = Mock()
+    runner.get_input_limit.return_value = 26_000
+    runner.tokenize.side_effect = str.split
+    prompt_manager = Mock()
+    prompt_manager.get_prompt.return_value = "요약 프롬프트"
+    memo_manager = Mock(wraps=MemoManager(runner, prompt_manager))
+    planner = Mock(spec=FakePlanner)
+    planner.list_needs.return_value = needs
+    planner.judge.side_effect = [
+        SimpleNamespace(enough=False, need=selected_needs, need_consent=False),
+        SimpleNamespace(enough=True),
+    ]
+    answer_generator = Mock(wraps=FakeAnswerGenerator(log))
+    main = make_main(
+        log,
+        memo_manager=memo_manager,
+        planner=planner,
+        answer_generator=answer_generator,
+    )
+
+    asyncio.run(main.run_pipeline("chat-1", "질문"))
+
+    memo_manager.add_answer.assert_called_once_with(selected_needs, "답")
+    assert planner.judge.call_count == 2
+    memo = planner.judge.call_args_list[1].args[1]
+    expected_sections = [
+        f"Need:\n{need}\n원문:\n" + ("[답변 1]\n답" if need in selected_needs else "")
+        for need in needs
+    ]
+    assert memo == (
+        "Question: 질문\nNeeds:\n- 경력\n- 학력\n- 직무\nAnswers:\n"
+        + "\n\n".join(expected_sections)
+    )
+    answer_generator.generate.assert_called_once_with("질문", memo)
+    runner.request.assert_not_called()
+    assert names(log).count("send") == 1
+    assert ("save_message", "assistant", "최종 답변") in log
     assert finished_with(log) == EndReason.INFO_ENOUGH
 
 
