@@ -1,0 +1,123 @@
+{
+  "version": "0.1",
+  "prompts": [
+    {
+      "idx": 0,
+      "name": "DETECT",
+      "prompt": [
+        "Extract all personal data from the user's text and classify each item.",
+        "Return ONLY valid JSON matching: {\"items\": [{\"text\": \"<exact substring>\", \"category\": <0|1|2>}]}",
+        "Categories:",
+        "- 0 (Identifier): uniquely identifies a person (name, resident/passport/driver ID, phone, email, SNS handle, detailed address, account/plate number, IP).",
+        "- 1 (Sensitive): legally protected sensitive data (political/religious belief, health/medical condition, genetic/biometric data, criminal record, race).",
+        "- 2 (Attribute): personal context that can identify someone when combined (age, birth year, gender, job, workplace, school, major, income, location, hobby).",
+        "If no personal data exists, return {\"items\": []}.",
+        "",
+        "Example 1:",
+        "Input: 안녕하세요, 저는 인하대학교 컴퓨터공학과에 재학 중인 24살 김민수이고 당뇨약을 복용 중입니다.",
+        "Output: {\"items\": [{\"text\": \"인하대학교\", \"category\": 2}, {\"text\": \"컴퓨터공학과\", \"category\": 2}, {\"text\": \"24살\", \"category\": 2}, {\"text\": \"김민수\", \"category\": 0}, {\"text\": \"당뇨약\", \"category\": 1}]}",
+        "",
+        "Example 2:",
+        "Input: 파이썬에서 리스트와 튜플의 차이점을 설명해 줘.",
+        "Output: {\"items\": []}",
+        "",
+        "Example 3:",
+        "Input: 제 이메일은 minsu@inha.edu이고 현재 삼성전자 수원사업장에서 백엔드 개발자로 일하고 있어요.",
+        "Output: {\"items\": [{\"text\": \"minsu@inha.edu\", \"category\": 0}, {\"text\": \"삼성전자 수원사업장\", \"category\": 2}, {\"text\": \"백엔드 개발자\", \"category\": 2}]}"
+      ]
+    },
+    {
+      "idx": 1,
+      "name": "NEEDS",
+      "prompt": [
+        "Break down the user's question into a concise list of information topics (2 to 4 items in Korean) needed to write a complete answer.",
+        "Do NOT include raw personal identifiers in the topic names.",
+        "Return ONLY valid JSON matching: {\"needs\": [\"<topic 1>\", \"<topic 2>\"]}",
+        "",
+        "Example 1:",
+        "Input: 저는 25살 인하대 컴공과 학생인데 네이버 백엔드 신입 자기소개서 1번 지원동기 문항을 어떻게 쓰면 좋을까요?",
+        "Output: {\"needs\": [\"백엔드 신입 직무 핵심 역량\", \"지원동기 문항 구성 방법\", \"전공 및 프로젝트 경험 연결 방식\"]}",
+        "",
+        "Example 2:",
+        "Input: 당뇨가 있는 50대 직장인인데 일주일 저녁 식단표를 짜줘.",
+        "Output: {\"needs\": [\"혈당 관리를 위한 식단 원칙\", \"피해야 할 음식과 권장 식재료\", \"일주일 저녁 식단 구성 예시\"]}"
+      ]
+    },
+    {
+      "idx": 2,
+      "name": "JUDGE",
+      "prompt": [
+        "Evaluate whether the collected answers in [메모] are sufficient to answer [질문].",
+        "Return ONLY valid JSON matching: {\"enough\": <bool>, \"needConsent\": <bool>, \"consentItems\": [<int>, ...], \"need\": [\"<str>\", ...]}",
+        "Rules:",
+        "- If [메모] Answers already cover the required topics, set \"enough\": true, \"needConsent\": false, \"consentItems\": [], \"need\": [].",
+        "- Otherwise, set \"enough\": false and list the remaining unresolved topics in \"need\" (in Korean).",
+        "- Set \"needConsent\": true ONLY when sharing disallowed personal data (allowed=False in [개인정보]) is strictly necessary for the next query; put ONLY those integer id values from [개인정보] in \"consentItems\" and exclude unrelated identifiers (e.g., person names not needed for the query).",
+        "",
+        "Example 1:",
+        "Input:",
+        "[질문]\n네이버 백엔드 자소서 지원동기를 어떻게 쓸까?",
+        "[메모]\nQuestion: 네이버 백엔드 자소서 지원동기를 어떻게 쓸까?\nNeeds:\n- 백엔드 핵심 역량\n- 지원동기 구성 방법\nAnswers:",
+        "[개인정보]\n- id=1, category=0, text=김민수, allowed=False\n- id=2, category=2, text=네이버, allowed=False",
+        "Output: {\"enough\": false, \"needConsent\": true, \"consentItems\": [2], \"need\": [\"백엔드 핵심 역량\", \"지원동기 구성 방법\"]}",
+        "",
+        "Example 2:",
+        "Input:",
+        "[질문]\n파이썬 비동기 처리 방법을 알려줘.",
+        "[메모]\nQuestion: 파이썬 비동기 처리 방법을 알려줘.\nNeeds:\n- asyncio 기본 개념\n- async/await 사용 예시\nAnswers:\n- asyncio는 이벤트 루프 기반 비동기 라이브러리이며 async def와 await로 코루틴을 실행합니다.",
+        "[개인정보]\n없음",
+        "Output: {\"enough\": true, \"needConsent\": false, \"consentItems\": [], \"need\": []}"
+      ]
+    },
+    {
+      "idx": 3,
+      "name": "WRITE",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 4,
+      "name": "REWRITE",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 5,
+      "name": "GUARD",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 6,
+      "name": "ANSWER",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 7,
+      "name": "PARSE_RULES",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 8,
+      "name": "MATCH_RULES",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 9,
+      "name": "CONSENT",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 10,
+      "name": "DECIDE_CONTEXT",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 11,
+      "name": "FRONTIER",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    },
+    {
+      "idx": 12,
+      "name": "MEMO_SUMMARY",
+      "prompt": "여기에 시스템 프롬프트 입력"
+    }
+  ]
+}
