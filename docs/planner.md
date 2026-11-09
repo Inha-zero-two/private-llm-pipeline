@@ -4,9 +4,9 @@
 
 ## 구현 내역
 
-- **`Plan` 모델 정의:** `planner.py`에만 정의하며 LocalResParser에서도 같은 클래스를 사용. `enough`, `need_consent`(`needConsent`), `consent_items`(`consentItems`), `need` 필드 구성
-- **`list_needs(question, run_id="", chat_id=None, *, needs=None, ok=True) -> list[str]` 구현:** 주입한 LocalLLMRunner로 필요 정보를 분류하고 검증 후 반환. 기존 `needs`, `ok` 직접 전달도 지원
-- **`judge(question, memo, pd_table, run_id="", chat_id=None, *, raw_plan=None, ok=True) -> Plan` 구현:** 질문·메모·개인정보 테이블로 모델 입력 문자열을 구성하고, 실제 판단 결과에 설계서 보정 규칙 4가지를 적용해 `Plan` 반환. 기존 `raw_plan`, `ok` 직접 전달도 지원
+- **`Plan` 모델 정의:** `enough`, `need_consent`(`needConsent`), `consent_items`(`consentItems`), `need` 필드 구성
+- **`list_needs(question, run_id="", chat_id=None, *, needs=None, ok=True) -> list[str]` 구현:** 질문을 해결하는 데 필요한 세부 정보 목록 검증 및 반환 (`needs`, `ok`로 분류 결과를 직접 전달할 수도 있음)
+- **`judge(question, memo, pd_table, run_id="", chat_id=None, *, raw_plan=None, ok=True) -> Plan` 구현:** 질문·메모·개인정보 테이블로 모델 입력 문자열을 구성하고, 판단 결과에 설계서 보정 규칙 4가지를 적용해 `Plan` 반환 (`raw_plan`, `ok`로 판단 결과를 직접 전달할 수도 있음)
 
 ## 함수별 처리 흐름
 
@@ -21,5 +21,5 @@
 
 ## 설계서 대비 변경 사항
 
-- **모듈 연결:** `Planner(runner)`로 공유 실행기를 전달. 프롬프트 조회는 Runner가 담당하며 Main은 실행·채팅 ID를 전달. 메모 저장·조회는 Main이 담당하고, 미구현된 `ChatManager.log_event()`는 주석 유지
-- **반환 객체 호환:** LocalResParser와 같은 `Plan` 클래스를 사용. Planner의 기본값·엄격한 검증과 `dict`·속성 기반 입력 수용을 유지하며, 모델 응답의 네 필드 필수 검사는 파서에서 수행
+- **모듈 호출:** `LocalLLMRunner.request()` 호출을 연결했습니다. 프롬프트는 LocalLLMRunner가 PromptManager에서 읽습니다. 메모 저장·조회는 Main에서 호출하며, `ChatManager.log_event()` 호출은 주석 상태입니다.
+- **반환 객체 호환:** Pydantic `from_attributes=True` 및 `populate_by_name=True` 설정으로 `LocalResParser`가 반환하는 `Plan` 객체와 `dict`를 모두 수용

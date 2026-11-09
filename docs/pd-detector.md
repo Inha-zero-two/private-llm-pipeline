@@ -5,7 +5,7 @@
 ## 구현 내역
 
 - **`CATEGORY_LABEL` 상수 및 `PDItem` 모델 정의:** 개인정보 분류(`0: 식별정보`, `1: 민감정보`, `2: 속성정보`) 상수와 검출 항목 모델(`pd_id`, `text`, `category`, `allowed`, `allowed_by`) 구현
-- **`detect(run_id, chat_id, message_id, question, *, found_items=None, ok=True) -> list[PDItem]` 구현:** 주입한 LocalLLMRunner로 개인정보를 검출하고 검증 후 기본 금지 상태(`allowed=False`, `allowed_by="none"`)로 반환. 기존 `found_items`, `ok` 직접 전달도 지원
+- **`detect(run_id, chat_id, message_id, question, *, found_items=None, ok=True) -> list[PDItem]` 구현:** 질문에서 검출한 개인정보 항목을 검증하고 기본 금지 상태(`allowed=False`, `allowed_by="none"`)로 묶어 반환 (`found_items`, `ok`로 검출 결과를 직접 전달할 수도 있음)
 
 ## 함수별 처리 흐름
 
@@ -17,5 +17,5 @@
 
 ## 설계서 대비 변경 사항
 
-- **모듈 연결:** `PDDetector(runner)`로 공유 실행기를 전달하고 `DETECT` 요청을 호출. 프롬프트 조회는 Runner가 담당. DB 저장은 Main의 `set_pd_items()` 호출에서 담당하며 검출기 내부의 미구현 ChatManager 호출은 주석 유지
+- **모듈 호출:** `LocalLLMRunner.request()` 호출을 연결했습니다. 검출 결과를 직접 전달하지 않으면 모델에 개인정보 검출을 요청합니다. `ChatManager`의 `set_pd_items()`와 `log_event()` 호출은 주석 상태입니다.
 - **반환값 수용 방식:** 파서가 반환하는 `DetectedItem` 객체와 `dict` 형식을 모두 `PDItem`으로 변환하도록 처리
