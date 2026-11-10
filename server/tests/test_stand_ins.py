@@ -34,3 +34,14 @@ def test_answer_about_other_item_is_not_read_as_allow_all() -> None:
 def test_build_message_skips_when_nothing_to_ask() -> None:
     table = [PDItem(pd_id=1, text="27살", category=2, allowed=True)]
     assert ScreenConsentManager(Store()).build_message("1", [1], [], table) is None
+
+
+def test_request_writer_masks_need_names_too() -> None:
+    from app.api.stand_ins import MaskingRequestWriter, TextLeakGuard
+
+    table = [PDItem(pd_id=2, text="삼성전자", category=2)]
+    text = MaskingRequestWriter().write(
+        "삼성전자 다니는데 이직 고민", "", table, ["현재 직장(삼성전자)의 장단점 분석"]
+    )
+    assert "삼성전자" not in text
+    assert TextLeakGuard().detect("1", text, table).passed

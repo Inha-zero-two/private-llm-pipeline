@@ -221,9 +221,11 @@ class MaskingRequestWriter:
         self, question: str, memo: str, pd_table: PDTable, need: list[str]
     ) -> str:
         topics = "\n".join(f"- {n}" for n in need) or "- 질문에 답하는 데 필요한 정보"
-        return (
+        # need 이름에도 원문이 들어올 수 있어(예: "현재 직장(삼성전자)의 장단점") 전체를 가린다
+        return mask(
             "다음 질문에 답하는 데 필요한 일반적인 정보를 알려 주세요.\n\n"
-            f"질문: {mask(question, pd_table)}\n\n알고 싶은 것:\n{topics}"
+            f"질문: {question}\n\n알고 싶은 것:\n{topics}",
+            pd_table,
         )
 
     def rewrite(
