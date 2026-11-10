@@ -333,7 +333,7 @@ class Main:
                 return EndReason.OFFLINE
             frontier_calls += 1
             spent_cost += reply.cost
-            await self._call(self.memo_manager.add_answer, reply.answer)
+            await self._call(self.memo_manager.add_answer, plan.need, reply.answer)
             # 다시 2)로 돌아가 판단한다.
 
     async def _write_safe_request(
