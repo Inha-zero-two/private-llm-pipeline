@@ -71,9 +71,13 @@ class MainBackend:
 
     name = "main"
 
-    def __init__(self, store: Store, runner_factory: Any = None) -> None:
+    def __init__(
+        self, store: Store, runner_factory: Any = None, *, fake_llm: bool = False
+    ) -> None:
         self._store = store
         self._runner_factory = runner_factory  # 테스트에서 Runner를 바꿔 끼울 때
+        # True면 모델 자리에 fake_llm.RuleBasedLlama를 끼운다 (모델 없이 실제 Main 확인)
+        self._fake_llm = fake_llm
         self._main: Any = None
         self._runner: Any = None
         self._answer_generator: Any = None
@@ -99,6 +103,8 @@ class MainBackend:
 
         prompts = PromptManager()
         factory = self._runner_factory or LocalLLMRunner
+        if self._fake_llm:
+            factory = _with_fake_llm(factory)
         # Runner는 만들 때 모델(또는 원격 서버)에 실제로 짧게 물어 연결을 확인한다.
         try:
             self._runner = await asyncio.to_thread(factory, prompt_manager=prompts)
@@ -203,6 +209,26 @@ class MainBackend:
             await push_error(
                 run, "INTERNAL_ERROR", "실행이 정상적으로 끝나지 않았습니다."
             )
+
+
+def _with_fake_llm(factory: Any) -> Any:
+    """Runner를 만드는 동안만 래퍼의 Llama를 가짜 모델로 바꾼다.
+
+    Runner는 생성할 때 한 번 Llama를 만들고 이후 재사용하므로, 생성 뒤에는 되돌려도 된다.
+    """
+
+    def make(**kwargs: Any) -> Any:
+        from app.api.fake_llm import RuleBasedLlama
+        from src.localLLM_API_proxy import llama_wrapper
+
+        original = llama_wrapper.Llama
+        llama_wrapper.Llama = RuleBasedLlama  # type: ignore[misc, assignment]
+        try:
+            return factory(**kwargs)
+        finally:
+            llama_wrapper.Llama = original  # type: ignore[misc]
+
+    return make
 
 
 async def _cancel_all(store: Store) -> None:

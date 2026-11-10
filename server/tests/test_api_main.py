@@ -88,7 +88,7 @@ def test_real_main_detects_asks_consent_and_answers(make_client: Any) -> None:
     # 실제 PDDetector가 찾은 항목으로, 실제 Planner가 동의를 요청했다
     consent = wait_pending_consent(client, run_id)
     assert [(i["text"], i["category"]) for i in consent["items"]] == [("25살", 2)]
-    assert consent["items"][0]["label"] == "속성정보"
+    assert consent["items"][0]["label"] == "나이"  # 원문 모양으로 추정한 이름
 
     # 다른 질문은 동시에 받지 않는다 (로컬 모델이 하나)
     busy = client.post("/api/chats", json={}).json()["chatId"]
@@ -154,3 +154,35 @@ def test_stop_while_waiting_consent_in_real_main(make_client: Any) -> None:
     assert events[-2]["data"]["result"] == "cancelled"
     assert events[-1]["data"]["endReason"] == "stopped"
     assert client.get(f"/api/runs/{run_id}").json()["status"] == "finished"
+
+
+def test_fake_llm_mode_runs_real_pipeline_end_to_end() -> None:
+    """LLM=fake: 모델만 규칙 기반 가짜이고 Main·검출·판단·메모·Runner는 실제로 돈다."""
+    with TestClient(create_app("main", delay=0, fake_llm=True)) as client:
+        run_id = start(client, "저는 27살이고 삼성전자 다니는데 이직 고민이에요")
+        consent = wait_pending_consent(client, run_id)
+        assert {i["text"] for i in consent["items"]} == {"27살", "삼성전자"}
+
+        reply = client.post(
+            f"/api/runs/{run_id}/consent",
+            json={
+                "consentId": consent["consentId"],
+                "text": "나이는 공개하고 직장은 빼줘",
+            },
+        )
+        assert reply.json()["ok"] is True
+
+        events = events_of(client, run_id)
+        frontier = next(e["data"] for e in events if e["event"] == "frontier")
+        assert "27살" in frontier["request"]  # 허용한 나이는 그대로
+        assert "삼성전자" not in frontier["request"]  # 거부한 직장은 가림
+        answer = "".join(e["data"]["text"] for e in events if e["event"] == "token")
+        assert "가짜 로컬 모델" in answer
+        assert "이직 고민" in answer
+        assert events[-1]["data"]["endReason"] == "info_enough"
+
+        # 개인정보가 없는 질문은 동의 없이 끝난다
+        plain = start(client, "계획 세우는 법 알려줘")
+        plain_events = events_of(client, plain)
+        assert not any(e["event"] == "consent_request" for e in plain_events)
+        assert plain_events[-1]["data"]["endReason"] == "info_enough"

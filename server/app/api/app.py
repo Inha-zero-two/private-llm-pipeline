@@ -10,6 +10,9 @@
                  llama-cpp-python이 없으면 래퍼가 원격으로 넘어가지 않고 멈추기 때문)
     fake       : 모델 없이 fake_run이 흐름만 흉내 낸다. FAKE_DELAY로 속도 조절.
 
+환경변수 LLM=fake를 함께 주면 PIPELINE=main에서 모델 자리만 규칙 기반 가짜 모델(fake_llm.py)로
+바꾼다. 모델 파일·키 없이 실제 Main · 검출 · 판단 · 메모 · Runner를 화면에서 확인할 때 쓴다.
+
 web은 vite 프록시로 /api 요청을 이 서버(127.0.0.1:8000)에 보낸다.
 """
 
@@ -67,14 +70,16 @@ def create_app(
     *,
     delay: float = 1.0,
     runner_factory: Callable[..., Any] | None = None,
+    fake_llm: bool = False,
 ) -> FastAPI:
     """pipeline: 실행 방식 (모듈 설명 참고).
     delay: 가짜 실행·해석의 대기 시간 배율. 테스트는 0으로 기다림 없이 돌린다.
     runner_factory: MainBackend가 LocalLLMRunner 대신 쓸 생성 함수 (테스트용).
+    fake_llm: MainBackend의 모델 자리에 규칙 기반 가짜 모델을 끼운다.
     """
     store = Store()
     backend: Backend = (
-        MainBackend(store, runner_factory)
+        MainBackend(store, runner_factory, fake_llm=fake_llm)
         if pipeline == "main"
         else FakeBackend(store, delay)
     )
@@ -310,4 +315,5 @@ def create_app(
 app = create_app(
     "fake" if os.environ.get("PIPELINE") == "fake" else "main",
     delay=float(os.environ.get("FAKE_DELAY", "1")),
+    fake_llm=os.environ.get("LLM") == "fake",
 )

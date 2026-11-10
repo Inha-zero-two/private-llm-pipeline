@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from app.api import schemas
 from app.api.consent_flow import ask_consent
+from app.api.fake_interpret import DETECTORS
 from app.api.store import Store
 from app.models.enums import EndReason
 from app.privacy.pd_detector import CATEGORY_LABEL, PDItem
@@ -36,7 +37,14 @@ PDTable = list[PDItem]
 
 
 def label_of(item: PDItem) -> str:
-    """화면에 보일 항목 이름. 검출 결과에 종류 이름이 없어 분류 이름을 쓴다."""
+    """화면에 보일 항목 이름 (예: 나이, 직장).
+
+    검출 결과(PDItem)에는 종류 이름이 없어 원문 모양으로 추정하고, 모르면 분류 이름을 쓴다.
+    사용자가 "나이는 공개해도 돼"처럼 이름으로 답하므로 동의 해석에 필요하다.
+    """
+    for detector in DETECTORS:
+        if detector.pattern.fullmatch(item.text):
+            return detector.label
     return CATEGORY_LABEL.get(item.category, "개인정보")
 
 

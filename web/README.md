@@ -12,7 +12,9 @@ cd server
 # 실제 파이프라인: 개발된 모듈(검출·판단·메모·로컬 LLM)은 실제, 없는 모듈은 대역
 #   원격 모델 서버 키를 src/localLLM_API_proxy/keys/llama_api_key.key에 둔다
 CUDA_VISIBLE_DEVICES=-1 PYTHONPATH=.. ../src/localLLM_API_proxy/.venv/Scripts/python -m uvicorn app.api.app:app --port 8000
-# 모델 없이 흐름만 볼 때
+# 모델 없이 실제 파이프라인 확인: 모델 자리만 규칙 기반 가짜 모델, Main·검출·판단·메모는 실제
+LLM=fake PYTHONPATH=.. ../src/localLLM_API_proxy/.venv/Scripts/python -m uvicorn app.api.app:app --port 8000
+# 모델 없이 화면 흐름만 볼 때 (Main을 쓰지 않음)
 PIPELINE=fake PYTHONPATH=.. ../src/localLLM_API_proxy/.venv/Scripts/python -m uvicorn app.api.app:app --port 8000
 
 # 2) 화면 (다른 터미널)
