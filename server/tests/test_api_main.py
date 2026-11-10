@@ -46,10 +46,11 @@ class ScriptedLlama:
 DETECT_AGE = '{"items": [{"text": "25살", "category": 2}]}'
 NEEDS = '{"needs": ["진로 탐색 방법"]}'
 JUDGE_NEED_AGE = (
-    '{"enough": false, "needConsent": true, "consentItems": [1], '
-    '"need": ["진로 탐색 방법"]}'
+    '{"enough": false, "needConsent": true, "consentItems": [1], "needIdx": [0]}'
 )
-JUDGE_ENOUGH = '{"enough": true, "needConsent": false, "consentItems": [], "need": []}'
+JUDGE_ENOUGH = (
+    '{"enough": true, "needConsent": false, "consentItems": [], "needIdx": []}'
+)
 ANSWER = "25살이라면 관심 분야를 먼저 좁혀 보세요."
 
 

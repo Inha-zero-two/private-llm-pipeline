@@ -7,7 +7,8 @@ MemoManager · Main · API · web은 모두 실제 코드가 돈다. 이 클래�
     연결 확인       → "OK"
     DETECT(검출)    → 전화번호 · 이름 · 나이 · 직장을 정규식으로 찾은 {"items": [...]}
     NEEDS(필요 정보) → 정해진 두 항목
-    JUDGE(판단)     → 메모에 답이 있으면 충분, 없고 허용 안 된 개인정보가 있으면 동의 요청
+    JUDGE(판단)     → 메모에 답이 있으면 충분, 없으면 [필요 정보] 번호 전부(needIdx)와
+                      허용 안 된 개인정보가 있으면 동의 요청
     최종 답변       → 질문과 메모를 넣은 문장 (가짜임을 표시)
 """
 
@@ -49,7 +50,7 @@ def _collected(memo: str) -> list[str]:
 
 def _judge(text: str) -> dict[str, Any]:
     if _collected(_section(text, "메모")):
-        return {"enough": True, "needConsent": False, "consentItems": [], "need": []}
+        return {"enough": True, "needConsent": False, "consentItems": [], "needIdx": []}
     hidden = [
         int(m.group(1))
         for m in re.finditer(r"id=(\d+), category=\d, text=.*?, allowed=False", text)
@@ -58,7 +59,11 @@ def _judge(text: str) -> dict[str, Any]:
         "enough": False,
         "needConsent": bool(hidden),
         "consentItems": hidden,
-        "need": NEEDS,
+        # [필요 정보]의 번호 전부 (아직 아무 답도 모으지 못했으므로)
+        "needIdx": [
+            int(m.group(1))
+            for m in re.finditer(r"^(\d+)\. ", _section(text, "필요 정보"), re.M)
+        ],
     }
 
 
