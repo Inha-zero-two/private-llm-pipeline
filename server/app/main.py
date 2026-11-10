@@ -176,7 +176,7 @@ class Main:
             await self._call(self.memo_manager.set_needs, needs)
 
             # 2)~6) 왕복: 끝날 때까지 정보를 모은다
-            end_reason = await self._collect(run_id, chat_id, question, pd_table)
+            end_reason = await self._collect(run_id, chat_id, question, pd_table, needs)
 
             # 7) 최종 답변
             answer_message_id = await self._answer(
@@ -273,7 +273,12 @@ class Main:
     # run_pipeline()을 단계별로 나눈 내부 함수
 
     async def _collect(
-        self, run_id: str, chat_id: str, question: str, pd_table: PDTable
+        self,
+        run_id: str,
+        chat_id: str,
+        question: str,
+        pd_table: PDTable,
+        needs: list[str],
     ) -> EndReason:
         """2)~6) 왕복을 반복하며 정보를 모은다. 끝나야 하는 이유가 생기면 그 사유를 반환한다."""
         frontier_calls = 0  # 이번 실행에서 프론티어에 물어본 횟수
@@ -290,8 +295,9 @@ class Main:
 
             # 지금까지 모은 메모로 답할 수 있는지 판단한다.
             memo = await self._call(self.memo_manager.read_all)
+            # needs를 넘겨 plan.need가 메모에 등록된 이름으로만 오게 한다 (add_answer 규격)
             plan = await self._call(
-                self.planner.judge, question, memo, pd_table, run_id, chat_id
+                self.planner.judge, question, memo, pd_table, run_id, chat_id, needs
             )
 
             # 3) 정보가 충분하면 정상 종료.

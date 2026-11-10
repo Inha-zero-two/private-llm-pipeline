@@ -10,11 +10,11 @@ from ..models.llm_results import (
     ContextMode,
     DetectedItem,
     Index,
+    JudgeResult,
     ParsedResult,
     Rule,
     RuleMatch,
 )
-from ..pipeline.planner import Plan
 
 
 class OutputFormatError(ValueError):
@@ -26,7 +26,7 @@ class OutputFormatError(ValueError):
 OUTPUT_FORMAT: dict[PromptIdx, tuple[TypeAdapter[ParsedResult], str | None] | None] = {
     PromptIdx.DETECT: (TypeAdapter(list[DetectedItem]), "items"),
     PromptIdx.NEEDS: (TypeAdapter(list[str]), "needs"),
-    PromptIdx.JUDGE: (TypeAdapter(Plan), None),
+    PromptIdx.JUDGE: (TypeAdapter(JudgeResult), None),
     PromptIdx.GUARD: (TypeAdapter(list[Index]), "hits"),
     PromptIdx.PARSE_RULES: (TypeAdapter(list[Rule]), "rules"),
     PromptIdx.MATCH_RULES: (TypeAdapter(list[RuleMatch]), "matches"),
@@ -90,7 +90,9 @@ def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
         result = adapter.validate_python(data, strict=True)
     except ValidationError as exc:
         raise OutputFormatError(str(exc)) from exc
-    # Planner의 기본값과 별개로 모델 응답에는 판단 필드 네 개가 모두 필요
-    if isinstance(result, Plan) and result.model_fields_set != set(Plan.model_fields):
+    # 기본값과 별개로 모델 응답에는 판단 필드 네 개가 모두 필요
+    if isinstance(result, JudgeResult) and result.model_fields_set != set(
+        JudgeResult.model_fields
+    ):
         raise OutputFormatError("판단 결과의 필수 항목이 없음")
     return result

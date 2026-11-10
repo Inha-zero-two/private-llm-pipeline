@@ -82,10 +82,17 @@ class FakePlanner(Recorder):
         return ["경력"]
 
     def judge(
-        self, question: str, memo: str, pd_table: list[Any], run_id: str, chat_id: str
+        self,
+        question: str,
+        memo: str,
+        pd_table: list[Any],
+        run_id: str,
+        chat_id: str,
+        needs: list[str],
     ) -> SimpleNamespace:
-        """실행·채팅 ID를 기록하고 메모의 답변 수로 정보가 충분한지 판단한다."""
+        """실행·채팅 ID와 등록된 need를 기록하고 메모의 답변 수로 충분한지 판단한다."""
         self.record("judge", run_id, chat_id)
+        self.record("judge_needs", list(needs))
         answers = len(memo.split()) if memo else 0
         return SimpleNamespace(
             enough=answers >= self.enough_after,
@@ -277,6 +284,8 @@ def test_enough_from_start_answers_without_frontier() -> None:
     assert finished_with(log) == EndReason.INFO_ENOUGH
     assert ("list_needs", "run-1", "chat-1") in log
     assert ("judge", "run-1", "chat-1") in log
+    # list_needs로 정한 need를 judge에 넘겨, 메모에 등록된 이름으로만 판단하게 한다
+    assert ("judge_needs", ["경력"]) in log
     # 정리는 release → clear → finish_run 순서
     tail = names(log)[-3:]
     assert tail == ["consent_release", "memo_clear", "finish_run"]
