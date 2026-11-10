@@ -1,8 +1,15 @@
 """설계 4.1: 질문에서 개인정보 검출."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.enums import PromptIdx
+
+if TYPE_CHECKING:
+    from app.runtime.local_llm_runner import LocalLLMRunner
 
 # 개인정보 분류 번호와 이름
 CATEGORY_LABEL: dict[int, str] = {
@@ -32,7 +39,7 @@ PDTable = list[PDItem]
 class PDDetector:
     """질문에서 개인정보를 찾아내는 클래스."""
 
-    def __init__(self, local_llm_runner: Any = None) -> None:
+    def __init__(self, local_llm_runner: LocalLLMRunner | None = None) -> None:
         """로컬 모델 실행기 저장."""
         self._runner = local_llm_runner
 
@@ -51,18 +58,20 @@ class PDDetector:
         if not isinstance(question, str) or not question.strip():
             raise ValueError("질문이 비어 있습니다")
 
-        # 2. 로컬 모델에 개인정보 검출 요청 (PR #13 LocalLLMRunner 병합 후 주석 해제)
-        # found_items, ok, *_ = self._runner.request(
-        #     run_id, question, PromptIdx.DETECT, chat_id
-        # )
-        # 현재는 함수 인자로 검출 결과와 성공 여부를 전달받으며 실패 시 예외 발생
+        # 2. 직접 전달한 결과가 없으면 공유 실행기로 개인정보 검출 요청
+        if found_items is None and ok and self._runner is not None:
+            found_items, ok, *_ = self._runner.request(
+                run_id, question, PromptIdx.DETECT, chat_id
+            )
         if not ok or not isinstance(found_items, list):
             raise RuntimeError("개인정보 검출에 실패했습니다")
 
         # 3. 찾은 항목을 기본 금지 상태(allowed=False)로 묶어 반환
         items: list[PDItem] = []
         for raw in found_items:
-            text = raw.get("text") if isinstance(raw, dict) else getattr(raw, "text", None)
+            text = (
+                raw.get("text") if isinstance(raw, dict) else getattr(raw, "text", None)
+            )
             category = (
                 raw.get("category")
                 if isinstance(raw, dict)

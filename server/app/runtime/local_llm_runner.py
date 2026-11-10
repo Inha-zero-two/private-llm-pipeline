@@ -14,6 +14,7 @@ from ..models.llm_results import ParsedRequestResult, RequestResult
 from .local_res_parser import OutputFormatError, parser
 
 if TYPE_CHECKING:
+    from ..data.prompt_manager import PromptManager
     from .context_manager import ContextManager
 
 # 최초 요청을 포함한 최대 생성 시도 횟수
@@ -32,16 +33,19 @@ class LocalLLMRunner:
         *,
         model_path: str = "models/gemma.gguf",
         timeout: float = 120.0,
+        prompt_manager: PromptManager | None = None,
     ) -> None:
         """공유 모델과 실행별 대화 관리 객체 초기화.
 
         model_path: 모델 파일 경로. timeout: 한 번의 응답을 기다리는 최대 시간(초).
+        prompt_manager: Main과 공유할 프롬프트 관리자. 직접 프롬프트를 전달하면 생략 가능.
         초기화 시 짧은 요청으로 실제 응답 확인. 모델 준비나 응답 확인 실패 시 예외 전달.
         """
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self._model_path = model_path
         self._timeout = timeout
+        self.prompt_manager = prompt_manager
         self._busy = Lock()  # 모델 사용 중 중복 접근 방지용 잠금
         self._state_lock = Lock()  # 종료 상태와 중지 신호 변경용 잠금
         self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
@@ -352,15 +356,18 @@ class LocalLLMRunner:
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
         3회 모두 실패하면 마지막 실패에 따라 length_failed 또는 parse_failed 반환.
         입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
+        프롬프트 미로드(RuntimeError)·미등록 키(KeyError)는 모델 재시도 없이 즉시 전달.
         """
         prompt_idx = PromptIdx(prompt_idx)
-        # 미구현: 프롬프트 조회. 반환값은 (프롬프트 본문, 버전)
-        # system_prompt, prompt_version = self.prompt_manager.get_prompt(prompt_idx)
-        # 현재는 함수 인자로 본문과 버전 전달
+        # 직접 전달한 프롬프트가 없으면 공유 관리자로 본문과 버전을 각각 조회
         if system_prompt is None:
-            raise NotImplementedError(
-                "PromptManager is not connected; pass system_prompt"
-            )
+            if self.prompt_manager is None:
+                raise NotImplementedError(
+                    "PromptManager is not connected; pass prompt_manager or system_prompt"
+                )
+            system_prompt = self.prompt_manager.get_prompt(prompt_idx)
+            if prompt_version is None:
+                prompt_version = self.prompt_manager.get_version()
         with self._request_scope(run_id) as stop_signal:
             context_id = None
             manager = None

@@ -11,10 +11,10 @@ from ..models.llm_results import (
     DetectedItem,
     Index,
     ParsedResult,
-    Plan,
     Rule,
     RuleMatch,
 )
+from ..pipeline.planner import Plan
 
 
 class OutputFormatError(ValueError):
@@ -87,6 +87,10 @@ def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
     # 4. 작업별 자료형 검사 후 통과한 값 반환
     try:
         # 문자열 '1'이나 참·거짓 값을 정수로 바꾸는 등의 자동 변환 방지
-        return adapter.validate_python(data, strict=True)
+        result = adapter.validate_python(data, strict=True)
     except ValidationError as exc:
         raise OutputFormatError(str(exc)) from exc
+    # Planner의 기본값과 별개로 모델 응답에는 판단 필드 네 개가 모두 필요
+    if isinstance(result, Plan) and result.model_fields_set != set(Plan.model_fields):
+        raise OutputFormatError("판단 결과의 필수 항목이 없음")
+    return result
