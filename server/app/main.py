@@ -27,12 +27,13 @@ if TYPE_CHECKING:
     from app.data.chat_manager import ChatManager
     from app.data.memo_manager import MemoManager
     from app.data.prompt_manager import PromptManager
+    from app.models.schemas import PDTable
     from app.pipeline.answer_generator import AnswerGenerator
     from app.pipeline.leak_guard import LeakGuard
     from app.pipeline.planner import Planner
     from app.pipeline.request_writer import RequestWriter
     from app.privacy.consent_manager import ConsentManager
-    from app.privacy.pd_detector import PDDetector, PDTable
+    from app.privacy.pd_detector import PDDetector
     from app.privacy.privacy_settings import PrivacySettings
     from app.runtime.frontier_client import FrontierClient
     from app.runtime.local_llm_runner import LocalLLMRunner
@@ -172,11 +173,11 @@ class Main:
 
             # 임시 메모를 시작하고, 답하는 데 필요한 정보 목록을 적어 둔다.
             await self._call(self.memo_manager.start, run_id, question)
-            needs = await self._call(self.planner.list_needs, question, run_id, chat_id)
+            needs = await self._call(self.planner.list_needs, question)
             await self._call(self.memo_manager.set_needs, needs)
 
             # 2)~6) 왕복: 끝날 때까지 정보를 모은다
-            end_reason = await self._collect(run_id, chat_id, question, pd_table)
+            end_reason = await self._collect(run_id, question, pd_table)
 
             # 7) 최종 답변
             answer_message_id = await self._answer(
@@ -259,7 +260,7 @@ class Main:
 
         if not state.finishing:  # 이미 끝나는 중이면 모델 중지·동의 취소도 하지 않는다
             # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
-            await self._call(self.local_llm_runner.stop, run_id)
+            await self._call(self.local_llm_runner.stop)
             # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
             await self._call(self.consent_manager.cancel, run_id)
 
@@ -273,7 +274,7 @@ class Main:
     # run_pipeline()을 단계별로 나눈 내부 함수
 
     async def _collect(
-        self, run_id: str, chat_id: str, question: str, pd_table: PDTable
+        self, run_id: str, question: str, pd_table: PDTable
     ) -> EndReason:
         """2)~6) 왕복을 반복하며 정보를 모은다. 끝나야 하는 이유가 생기면 그 사유를 반환한다."""
         frontier_calls = 0  # 이번 실행에서 프론티어에 물어본 횟수
@@ -290,9 +291,7 @@ class Main:
 
             # 지금까지 모은 메모로 답할 수 있는지 판단한다.
             memo = await self._call(self.memo_manager.read_all)
-            plan = await self._call(
-                self.planner.judge, question, memo, pd_table, run_id, chat_id
-            )
+            plan = await self._call(self.planner.judge, question, memo, pd_table)
 
             # 3) 정보가 충분하면 정상 종료.
             if plan.enough:
@@ -334,7 +333,7 @@ class Main:
                 return EndReason.OFFLINE
             frontier_calls += 1
             spent_cost += reply.cost
-            await self._call(self.memo_manager.add_answer, reply.answer)
+            await self._call(self.memo_manager.add_answer, plan.need, reply.answer)
             # 다시 2)로 돌아가 판단한다.
 
     async def _write_safe_request(
