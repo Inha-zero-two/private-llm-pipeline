@@ -68,6 +68,8 @@ DENY = re.compile(
 ALLOW = re.compile(r"(공개|괜찮|보내|허용|돼|좋아|해도|응|네)")
 ALIASES = {"직장": ["회사", "학교", "소속"], "전화번호": ["번호", "연락처"]}
 REST = "나머지"
+# 정보 종류를 가리키는 낱말 (검출 이름과 다른 말)
+KNOWN_WORDS = [d.label for d in DETECTORS] + [w for ws in ALIASES.values() for w in ws]
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,10 @@ def interpret_consent(answer: str, items: list[PDItem]) -> ConsentInterpretation
     points = sorted(i for i in [*marks.values(), rest_at] if i >= 0)
 
     # 아무 항목도 짚지 않았으면 답변 전체가 모든 항목에 대한 답이다 ("모두 공개해도 돼")
+    # 단, 이번 요청에 없는 정보 이름(예: 직장만 묻는데 "나이는 공개해도 돼")을 말했다면
+    # 무엇에 대한 답인지 알 수 없으므로 전체 허용으로 읽지 않고 다시 묻는다.
+    if not points and any(word in text for word in KNOWN_WORDS):
+        return fail
     if not points:
         v = _verdict(text)
         if v is None:

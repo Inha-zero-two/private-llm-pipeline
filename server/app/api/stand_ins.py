@@ -165,15 +165,19 @@ class ScreenConsentManager:
     def apply(
         self, result: ConsentResult, req: ConsentRequest, pd_table: PDTable
     ) -> None:
+        asked = {item.pd_id for item in req.items}
         for item in pd_table:
             if item.pd_id in result.allowed_ids:
                 item.allowed = True
                 item.allowed_by = "consent"
+            elif item.pd_id in asked:
+                # 이번 실행에서 거부한 항목. Planner가 같은 실행에서 다시 묻지 않는다
+                item.allowed_by = "denied"
 
     def release(self, run_id: str, pd_table: PDTable) -> None:
-        """동의 허용은 이번 실행에만 적용한다."""
+        """동의 결과(허용·거부)는 이번 실행에만 적용한다."""
         for item in pd_table:
-            if item.allowed_by == "consent":
+            if item.allowed_by in ("consent", "denied"):
                 item.allowed = False
                 item.allowed_by = "none"
 
