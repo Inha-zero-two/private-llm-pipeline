@@ -159,6 +159,7 @@ class Main:
             await self._emit("run", {"run_id": run_id})  # 화면이 중지 버튼에 쓸 ID
 
             # 질문 속 개인정보를 찾아 이 채팅의 개인정보 테이블(PDTable)에 더한다.
+            await self._step(run_id, "개인정보 검출 중")
             found_items = await self._call(
                 self.pd_detector.detect, run_id, chat_id, user_message_id, question
             )
@@ -168,9 +169,11 @@ class Main:
             pd_table = await self._call(self.chat_manager.get_pd_table, chat_id)
 
             # 사용자가 미리 정한 허용/금지 설정을 테이블의 각 항목에 적용한다.
+            await self._step(run_id, "허용 설정 적용 중")
             await self._call(self.privacy_settings.apply_to_table, run_id, pd_table)
 
             # 임시 메모를 시작하고, 답하는 데 필요한 정보 목록을 적어 둔다.
+            await self._step(run_id, "필요한 정보 정리 중")
             await self._call(self.memo_manager.start, run_id, question)
             needs = await self._call(self.planner.list_needs, question, run_id, chat_id)
             await self._call(self.memo_manager.set_needs, needs)
@@ -195,7 +198,6 @@ class Main:
                 answer_message_id = await self._call(
                     self.chat_manager.save_message, chat_id, "assistant", partial
                 )
-            await self._emit("stopped", {"run_id": run_id})
             raise
 
         except Exception as error:
@@ -220,6 +222,17 @@ class Main:
                 if cleanup_errors and original is None:
                     # 본 흐름은 성공했는데 정리가 실패한 경우만 정리 오류를 올린다
                     raise cleanup_errors[0]
+                if original is None or isinstance(original, asyncio.CancelledError):
+                    # 정상 종료 · 중지는 정리까지 끝난 뒤 화면에 완료를 알린다.
+                    # (오류는 위에서 error 이벤트를 이미 보냈다)
+                    await self._emit(
+                        "done",
+                        {
+                            "run_id": run_id,
+                            "end_reason": end_reason,
+                            "answer_message_id": answer_message_id,
+                        },
+                    )
                 # 원래 오류가 있으면 그것을 살리고, 정리 오류는 메모로 붙인다
                 for e in cleanup_errors:
                     if original is not None:
@@ -294,6 +307,7 @@ class Main:
                 return end_reason
 
             # 지금까지 모은 메모로 답할 수 있는지 판단한다.
+            await self._step(run_id, "답변 가능 여부 판단 중")
             memo = await self._call(self.memo_manager.read_all)
             # needs를 넘겨 plan.need가 메모에 등록된 이름으로만 오게 한다 (add_answer 규격)
             plan = await self._call(
@@ -315,6 +329,7 @@ class Main:
                 )
                 if consent_req is not None:  # None이면 실제로 물어볼 항목이 없다
                     # 사용자가 응답할 때까지 기다린다. (중지되면 stop()이 이 대기를 끊는다)
+                    await self._step(run_id, "공개 동의를 기다리는 중")
                     consent_result = await self.consent_manager.request(consent_req)
                     if not consent_result.allow:
                         return EndReason.CONSENT_DENIED
@@ -334,11 +349,17 @@ class Main:
                 return EndReason.REGEN_LIMIT
 
             # 6) 검사를 통과한 요청문만 프론티어로 보낸다.
+            await self._step(run_id, f"외부 모델에 묻는 중 ({frontier_calls + 1}회차)")
             try:
                 reply = await self._call(self.frontier_client.send, request_text)
             except ConnectionError:
                 return EndReason.OFFLINE
             frontier_calls += 1
+            # 화면의 '외부 모델 질의 · 응답'에 실제로 보낸 요청문과 받은 답을 보여 준다.
+            await self._emit(
+                "frontier",
+                {"run_id": run_id, "request": request_text, "answer": reply.answer},
+            )
             spent_cost += reply.cost
             await self._call(self.memo_manager.add_answer, plan.need, reply.answer)
             # 다시 2)로 돌아가 판단한다.
@@ -355,6 +376,7 @@ class Main:
 
         통과한 요청문을 반환한다. regen_limit번 고쳐도 안 되면 None을 반환한다.
         """
+        await self._step(run_id, "도움 요청문 작성 중")
         request_text = await self._call(
             self.request_writer.write, question, memo, pd_table, need
         )
@@ -364,6 +386,7 @@ class Main:
             hits: list[Any] = []  # 누출 검사에 걸린 개인정보 항목 ID
             # request_text가 None이면 생성 실패. 검사에 걸린 것과 같이 센다.
             if request_text is not None:
+                await self._step(run_id, "누출 검사 중")
                 guard_result = await self._call(
                     self.leak_guard.detect, run_id, request_text, pd_table
                 )
@@ -393,6 +416,7 @@ class Main:
     ) -> str:
         """7) 모은 정보로 최종 답변을 만들어 화면에 흘려보내고 저장한다. 메시지 ID를 반환한다."""
         state = self._runs[run_id]
+        await self._step(run_id, "최종 답변 생성 중")
         memo = await self._call(self.memo_manager.read_all)
         tokens = await self._call(self.answer_generator.generate, question, memo)
 
@@ -452,6 +476,10 @@ class Main:
         except Exception as error:
             errors.append(error)
             return None
+
+    async def _step(self, run_id: str, label: str) -> None:
+        """화면의 '현재 동작' 문구를 바꾼다. (API-06 step 이벤트)"""
+        await self._emit("step", {"run_id": run_id, "label": label})
 
     def _run_config(self) -> dict[str, Any]:
         """startRun()에 함께 저장할 이번 실행의 설정값."""

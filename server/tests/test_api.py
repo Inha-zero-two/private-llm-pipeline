@@ -20,7 +20,7 @@ T = TypeVar("T")
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     # delay=0: 가짜 실행이 기다리지 않고 바로 진행한다
-    with TestClient(create_app(delay=0)) as c:
+    with TestClient(create_app("fake", delay=0)) as c:
         yield c
 
 

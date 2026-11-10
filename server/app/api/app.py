@@ -1,7 +1,11 @@
 """화면 ↔ 서버 API (docs/screen-api-spec.md의 API-01 ~ API-11).
 
-실행 (server/ 폴더에서):
-    python -m uvicorn app.api.app:app --reload --port 8000
+실행 (server/ 폴더에서, 저장소 루트를 PYTHONPATH에 넣어야 래퍼 src를 찾는다):
+    PYTHONPATH=.. python -m uvicorn app.api.app:app --port 8000
+
+환경변수 PIPELINE으로 실행 방식을 고른다.
+    main (기본): 실제 Main + 있는 모듈은 실제 것 + 없는 모듈은 대역. 모델 접속이 필요하다.
+    fake       : 모델 없이 fake_run이 흐름만 흉내 낸다. FAKE_DELAY로 속도 조절.
 
 web은 vite 프록시로 /api 요청을 이 서버(127.0.0.1:8000)에 보낸다.
 """
@@ -10,16 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import Any, Literal
 
 from fastapi import FastAPI, Header, Path, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.backends import Backend, BusyError, FakeBackend, MainBackend
 from app.api.fake_interpret import interpret_consent, parse_rules
-from app.api.fake_run import fake_run
 from app.api.schemas import (
     ChatCreated,
     ChatDetail,
@@ -54,24 +59,32 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"code": code, "message": message})
 
 
-def create_app(delay: float = 1.0) -> FastAPI:
-    """delay: 가짜 실행의 대기 시간 배율. 테스트는 0으로 기다림 없이 돌린다.
-
-    환경변수 FAKE_DELAY로도 바꿀 수 있다 (예: FAKE_DELAY=3 이면 세 배 느리게).
+def create_app(
+    pipeline: Literal["main", "fake"] = "main",
+    *,
+    delay: float = 1.0,
+    runner_factory: Callable[..., Any] | None = None,
+) -> FastAPI:
+    """pipeline: 실행 방식 (모듈 설명 참고).
+    delay: 가짜 실행·해석의 대기 시간 배율. 테스트는 0으로 기다림 없이 돌린다.
+    runner_factory: MainBackend가 LocalLLMRunner 대신 쓸 생성 함수 (테스트용).
     """
     store = Store()
+    backend: Backend = (
+        MainBackend(store, runner_factory)
+        if pipeline == "main"
+        else FakeBackend(store, delay)
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await backend.startup()
         yield
-        # 서버를 끌 때 아직 도는 실행을 정리한다
-        tasks = [r.task for r in store.runs.values() if r.task and not r.task.done()]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await backend.shutdown()  # 아직 도는 실행을 정리한다
 
-    app = FastAPI(title="private-llm-pipeline API (가짜 실행)", lifespan=lifespan)
+    app = FastAPI(title=f"private-llm-pipeline API ({backend.name})", lifespan=lifespan)
     app.state.store = store
+    app.state.backend = backend
 
     # 오류 응답
 
@@ -158,12 +171,14 @@ def create_app(delay: float = 1.0) -> FastAPI:
         text = body.text.strip()
         if not text:
             raise ApiError(422, "VALIDATION_ERROR", "질문을 입력해 주세요.")
-        message = store.save_message(chat_id, "user", text)
-        run = store.start_run(chat_id, message.message_id)
-        # 설정은 실행을 시작할 때의 것으로 고정한다 (새 설정은 다음 실행부터)
-        rules = list(store.setting.rules)
-        run.task = asyncio.create_task(fake_run(store, run, text, rules, delay))
-        return RunStarted(run_id=run.run_id)
+        try:
+            run_id = await backend.start(chat_id, text)
+        except BusyError:
+            # 명세서에 없는 경우: 로컬 모델이 하나라 실행을 동시에 돌리지 않는다
+            raise ApiError(
+                409, "RUN_IN_PROGRESS", "다른 질문에 답하는 중입니다."
+            ) from None
+        return RunStarted(run_id=run_id)
 
     @app.get("/api/runs/{run_id}/events")
     async def run_events(
@@ -192,7 +207,7 @@ def create_app(delay: float = 1.0) -> FastAPI:
         run = get_run(run_id)
         if run.status == "finished" or run.task is None:
             raise ApiError(409, "RUN_FINISHED", "이미 종료된 실행입니다.")
-        run.task.cancel()  # 실제 종료는 스트림의 done(stopped)으로 알린다
+        await backend.stop(run)  # 실제 종료는 스트림의 done(stopped)으로 알린다
         return Response(status_code=200)
 
     @app.post("/api/runs/{run_id}/consent")
@@ -289,4 +304,7 @@ def create_app(delay: float = 1.0) -> FastAPI:
     return app
 
 
-app = create_app(delay=float(os.environ.get("FAKE_DELAY", "1")))
+app = create_app(
+    "fake" if os.environ.get("PIPELINE") == "fake" else "main",
+    delay=float(os.environ.get("FAKE_DELAY", "1")),
+)

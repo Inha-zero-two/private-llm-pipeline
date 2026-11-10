@@ -14,9 +14,10 @@ from __future__ import annotations
 import asyncio
 import random
 
+from app.api.consent_flow import ask_consent
 from app.api.fake_interpret import detect, is_allowed, mask
-from app.api.schemas import PDItem, Rule
-from app.api.store import RunRecord, Store, now_iso
+from app.api.schemas import Rule
+from app.api.store import RunRecord, Store
 from app.models.enums import EndReason
 
 # 상세 설계서 3.4 EndReason 표의 화면 안내
@@ -101,7 +102,15 @@ async def fake_run(
 
             if round_ == 1 and need_consent:
                 await events.push("step", {"label": "공개 동의를 기다리는 중"})
-                allowed = await _ask_consent(store, run, need_consent)
+                decisions = await ask_consent(
+                    store,
+                    run,
+                    need_consent,
+                    purpose="질문에 맞는 구체적인 답변을 받기 위해 외부 모델에 함께 보냅니다.",
+                    benefit="상황에 맞춘 더 정확한 답변을 받을 수 있습니다.",
+                    risk="선택한 정보가 외부 서버로 전송됩니다.",
+                )
+                allowed = {d.pd_id for d in decisions if d.allow}
                 if not allowed:
                     end_reason = EndReason.CONSENT_DENIED
                     break
@@ -134,57 +143,29 @@ async def fake_run(
             await asyncio.sleep(0.025 * delay)
 
         message = store.save_message(run.chat_id, "assistant", "".join(answer_parts))
-        await _finish(run, end_reason, message.message_id)
+        await push_done(run, end_reason, message.message_id)
 
     except asyncio.CancelledError:
-        # API-07 중지. 동의 대기 중이었으면 그 요청을 먼저 취소로 닫는다.
-        pending = run.pending_consent()
-        if pending is not None:
-            pending.result = "cancelled"
-            pending.responded_at = now_iso()
-            await events.push(
-                "consent_result",
-                {"consentId": pending.consent_id, "result": "cancelled"},
-            )
+        # API-07 중지. 동의 대기 중이었으면 ask_consent가 그 요청을 취소로 닫았다.
         # 최종 답변 도중이면 부분 답변을 남긴다.
         answer_id = None
         if answer_parts:
             partial = "".join(answer_parts) + STOPPED_MARK
             answer_id = store.save_message(run.chat_id, "assistant", partial).message_id
-        await _finish(run, EndReason.STOPPED, answer_id)
+        await push_done(run, EndReason.STOPPED, answer_id)
 
     except FakeLocalLLMError as error:
-        await _fail(run, "LOCAL_LLM_ERROR", str(error))
+        await push_error(run, "LOCAL_LLM_ERROR", str(error))
 
     except Exception:  # 예상하지 못한 오류도 화면에는 error 이벤트로 알린다
-        await _fail(run, "INTERNAL_ERROR", "실행 중 오류가 발생했습니다.")
+        await push_error(run, "INTERNAL_ERROR", "실행 중 오류가 발생했습니다.")
         raise
 
 
-async def _ask_consent(store: Store, run: RunRecord, items: list[PDItem]) -> set[int]:
-    """동의 요청을 보내고 API-08의 응답을 기다린다. 허용된 pd_id 집합을 돌려준다."""
-    consent = store.add_consent(
-        run,
-        items,
-        purpose="질문에 맞는 구체적인 답변을 받기 위해 외부 모델에 함께 보냅니다.",
-        benefit="상황에 맞춘 더 정확한 답변을 받을 수 있습니다.",
-        risk="선택한 정보가 외부 서버로 전송됩니다.",
-    )
-    run.consent_waiter = asyncio.get_running_loop().create_future()
-    await run.events.push(
-        "consent_request",
-        consent.model_dump(
-            by_alias=True, include={"consent_id", "items", "purpose", "benefit", "risk"}
-        ),
-    )
-    try:
-        decisions = await run.consent_waiter
-    finally:
-        run.consent_waiter = None
-    return {d.pd_id for d in decisions if d.allow}
-
-
-async def _finish(run: RunRecord, end_reason: EndReason, answer_id: int | None) -> None:
+async def push_done(
+    run: RunRecord, end_reason: EndReason, answer_id: int | None
+) -> None:
+    """실행 기록을 끝난 상태로 바꾸고 done 이벤트를 보낸다."""
     limited = LIMITED_TEXT.get(end_reason)
     run.status = "finished"
     run.end_reason = end_reason.value
@@ -200,7 +181,8 @@ async def _finish(run: RunRecord, end_reason: EndReason, answer_id: int | None) 
     )
 
 
-async def _fail(run: RunRecord, code: str, message: str) -> None:
+async def push_error(run: RunRecord, code: str, message: str) -> None:
+    """실행 기록을 오류로 끝내고 error 이벤트를 보낸다."""
     run.status = "finished"
     run.notice = message
     run.error_code = code
