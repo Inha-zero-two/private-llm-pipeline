@@ -5,6 +5,9 @@
 
 환경변수 PIPELINE으로 실행 방식을 고른다.
     main (기본): 실제 Main + 있는 모듈은 실제 것 + 없는 모듈은 대역. 모델 접속이 필요하다.
+                 원격 서버를 쓰려면 src/localLLM_API_proxy/keys/에 llama_api_key*.key를 두고
+                 CUDA_VISIBLE_DEVICES=-1로 실행한다. (CUDA GPU가 보이는데 CUDA용
+                 llama-cpp-python이 없으면 래퍼가 원격으로 넘어가지 않고 멈추기 때문)
     fake       : 모델 없이 fake_run이 흐름만 흉내 낸다. FAKE_DELAY로 속도 조절.
 
 web은 vite 프록시로 /api 요청을 이 서버(127.0.0.1:8000)에 보낸다.

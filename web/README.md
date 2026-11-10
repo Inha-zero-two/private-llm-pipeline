@@ -7,8 +7,12 @@ React + Vite (TypeScript). 상세 설계서 9장의 화면 세 개(메인 채팅
 화면은 앱 서버(`server/app/api`, 명세서 `docs/screen-api-spec.md`)에 연결된다. 서버를 먼저 켠다.
 
 ```bash
-# 1) 앱 서버 (저장소 루트에서). 모델 없이 흐름만 볼 때는 PIPELINE=fake
+# 1) 앱 서버 (저장소 루트에서)
 cd server
+# 실제 파이프라인: 개발된 모듈(검출·판단·메모·로컬 LLM)은 실제, 없는 모듈은 대역
+#   원격 모델 서버 키를 src/localLLM_API_proxy/keys/llama_api_key.key에 둔다
+CUDA_VISIBLE_DEVICES=-1 PYTHONPATH=.. ../src/localLLM_API_proxy/.venv/Scripts/python -m uvicorn app.api.app:app --port 8000
+# 모델 없이 흐름만 볼 때
 PIPELINE=fake PYTHONPATH=.. ../src/localLLM_API_proxy/.venv/Scripts/python -m uvicorn app.api.app:app --port 8000
 
 # 2) 화면 (다른 터미널)
