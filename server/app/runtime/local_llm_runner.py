@@ -10,7 +10,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from ..models.enums import PromptIdx
-from ..models.llm_results import ParsedRequestResult, RequestResult
+from ..models.llm_results import ParsedRequestResult, RequestResult, RuleParseFailure
 from .local_res_parser import OutputFormatError, parser
 
 if TYPE_CHECKING:
@@ -336,10 +336,10 @@ class LocalLLMRunner:
 
     def request(
         self,
-        run_id: str,
+        run_id: int | str | None,
         input_: str,
         prompt_idx: PromptIdx | str,
-        chat_id: str | None,
+        chat_id: int | str | None,
         *,
         use_context: bool = False,
         system_prompt: str | None = None,
@@ -354,7 +354,8 @@ class LocalLLMRunner:
         출력 형식 오류, 연결·수신 오류, 타임아웃 또는 생성 실패 시 같은 입력으로 최대 3회 요청.
         중지 요청은 재시도 없이 반환. 타임아웃 뒤에는 이전 수신 정리 후 다음 요청 진행.
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
-        3회 모두 실패하면 마지막 실패에 따라 length_failed 또는 parse_failed 반환.
+        3회 모두 실패하면 마지막 실패에 따라 length_failed, parse_failed, unavailable 반환.
+        PARSE_RULES의 명시적 해석 불가는 interpretation_failed로 재시도 없이 반환.
         입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
         프롬프트 미로드(RuntimeError)·미등록 키(KeyError)는 모델 재시도 없이 즉시 전달.
         """
@@ -436,7 +437,7 @@ class LocalLLMRunner:
                         if not generation_errors:
                             raise
                         input_tokens = output_tokens = None
-                        failure_reason = "parse_failed"
+                        failure_reason = "unavailable"
                         last_output = "".join(output) or last_output
                         if stop_signal.is_set():
                             return last_output, False, None, None, "stopped"
@@ -492,6 +493,16 @@ class LocalLLMRunner:
                             )
                         continue
                     format_valid = True
+                    if isinstance(parsed, RuleParseFailure):
+                        if stop_signal.is_set():
+                            return None, False, input_tokens, output_tokens, "stopped"
+                        return (
+                            parsed,
+                            False,
+                            input_tokens,
+                            output_tokens,
+                            "interpretation_failed",
+                        )
                 finally:
                     # 요청마다 새 입력, 모델이 생성한 답변 및 형식 검사 결과로 로그 함수 호출
                     self._log_call(
