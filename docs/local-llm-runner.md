@@ -22,7 +22,7 @@ flowchart TD
     C -->|연결·수신 오류, length 종료 또는 생성 실패| E
     D -->|형식 오류| E["요청 로그 함수 호출 후 같은 입력으로 재생성"]
     E -->|최초 포함 3회 미만| C
-    E -->|3회 실패| F["마지막 실패에 따라 length_failed 또는 parse_failed 반환"]
+    E -->|3회 실패| F["마지막 실패에 따라 length_failed, parse_failed 또는 unavailable 반환"]
     D -->|정상| G["요청 로그 함수 호출 후 입력과 최종 답변 저장"]
     G --> H["실행 ID 정리 후 파싱 결과와 토큰 사용량 반환"]
 ```
@@ -82,7 +82,7 @@ result = runner.request(
 **반환 순서:** `(결과, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유)`
 
 - 작업 성공: 첫 값은 파싱 결과. `manual_request()`와 `regen()`의 첫 값은 답변 문자열
-- 최대 3회 시도 후 모두 실패한 경우: `(None, False, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유)` 반환. 마지막 실패가 출력 상한 도달이면 `"length_failed"`, 나머지는 `"parse_failed"`
+- 최대 3회 시도 후 모두 실패한 경우: `(None, False, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유)` 반환. 마지막 실패가 출력 상한 도달이면 `"length_failed"`, 연결·수신 실패는 `"unavailable"`, 나머지는 `"parse_failed"`
 - 입력·답변이 너무 길어 이전 대화에 저장할 수 없는 경우에도 `"length_failed"` 실패 튜플 반환. 결과는 None이며 기존 대화 유지. 저장 실패에 따른 재생성은 생략
 - `manual_request()`와 `regen()`도 length 종료만 최대 3회 재시도. 모두 실패하면 첫 값은 빈 문자열, 성공 여부는 False, 종료 사유는 `"length_failed"`. 나머지 요청 오류는 예외 전달
 - `context_full`: 시스템 프롬프트·입력·채팅 형식 여유분·최대 출력의 합계가 32,768토큰을 초과. 모델 요청 없이 실패값 반환
@@ -99,7 +99,7 @@ result = runner.request(
 ## 설계서 대비 추가 및 변경
 
 - **반환값:** 설계 5.1의 성공 여부·결과에 토큰 사용량·종료 사유 추가. 결과를 튜플의 첫 값으로 반환
-- **최종 실패:** 설계 5.1의 `(false, 없음)`에 맞춰 결과는 None, 성공 여부는 False. 마지막 실패가 length 종료이면 length_failed, 나머지는 parse_failed. 입력 예산 초과는 context_full로 구분
+- **최종 실패:** 설계 5.1의 `(false, 없음)`에 맞춰 결과는 None, 성공 여부는 False. 마지막 실패가 length 종료이면 length_failed, 연결·수신 실패는 unavailable, 나머지는 parse_failed. 입력 예산 초과는 context_full로 구분
 - **응답 생성:** `manual_request()`, `request()`, `regen()`에서 `_generate()`를 공유. request 안에서 다른 공개 요청 함수를 호출하는 방식은 사용하지 않음
 - **재생성:** 설계 30쪽의 이전 출력·오류·수정 지시 추가 없이 같은 입력으로 요청. 파싱 오류뿐 아니라 모델 요청·수신 실패도 재시도하고 종류를 합쳐 최초 요청 포함 최대 3회 시도. 최종 성공한 입력·답변만 한 번 저장. manual_request와 regen은 length 종료만 최대 3회 요청
 - **이전 대화 사용:** 작업 종류에 따라 고정하지 않고 요청마다 use_context로 선택. Runner는 프로그램당 1개, ContextManager는 실행 ID마다 1개. run_id는 설계대로 요청마다 전달
@@ -107,3 +107,5 @@ result = runner.request(
 - **모델 실행:** 기존 로컬 모델 래퍼를 사용하고 인증키 검색도 래퍼에서 처리. llama-cpp-python 직접 사용 시 Llama import 변경. 설계 31쪽의 세부 그래픽카드 설정 중 일부만 현재 생성자에 지정
 - **연결 확인:** 생성자에서 실제 응답 확인 후 사용. 응답 대기 시간은 요청 한 번당 기본 120초. request의 최종 실패는 반환값으로 전달. 생성자 확인과 manual_request는 오류 발생 시 즉시 예외 전달
 - **프롬프트와 로그:** LocalLLMRunner가 생성자로 받은 PromptManager의 `get_prompt()`로 본문을, `get_version()`으로 버전을 조회. 로그 항목은 실행 ID·작업 종류·버전·소요 시간·검사 결과·새 입력·생성된 답변. ChatManager의 저장 코드도 미구현으로 주석 처리
+
+동의 응답 해석도 같은 요청 게이트를 사용한다. 다른 요청이 진행 중이면 RuntimeError의 하위 예외 RunnerBusyError를 전달하며, ConsentManager는 이를 API-08의 503에 해당하는 ConnectionError로 변환하고 대기를 유지한다.

@@ -14,6 +14,7 @@ class PromptIdx(StrEnum):
     PARSE_RULES = "PARSE_RULES"
     MATCH_RULES = "MATCH_RULES"
     CONSENT = "CONSENT"
+    INTERPRET_CONSENT = "INTERPRET_CONSENT"
     DECIDE_CONTEXT = "DECIDE_CONTEXT"
     FRONTIER = "FRONTIER"
     MEMO_SUMMARY = "MEMO_SUMMARY"
@@ -28,4 +29,3 @@ class EndReason(StrEnum):
     OFFLINE = "offline"  # 프론티어 연결 불가
     STOPPED = "stopped"  # 사용자 중지
     CONSENT_DENIED = "consent_denied"  # 개인정보 공개 모두 거부
-

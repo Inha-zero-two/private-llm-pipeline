@@ -4,6 +4,7 @@ import json
 
 from pydantic import TypeAdapter, ValidationError
 
+from ..models.consent_results import ConsentInterpretation
 from ..models.enums import PromptIdx
 from ..models.llm_results import (
     ConsentText,
@@ -31,6 +32,7 @@ OUTPUT_FORMAT: dict[PromptIdx, tuple[TypeAdapter[ParsedResult], str | None] | No
     PromptIdx.PARSE_RULES: (TypeAdapter(list[Rule]), "rules"),
     PromptIdx.MATCH_RULES: (TypeAdapter(list[RuleMatch]), "matches"),
     PromptIdx.CONSENT: (TypeAdapter(ConsentText), None),
+    PromptIdx.INTERPRET_CONSENT: (TypeAdapter(ConsentInterpretation), None),
     PromptIdx.DECIDE_CONTEXT: (TypeAdapter(ContextMode), "context"),
     PromptIdx.WRITE: None,
     PromptIdx.REWRITE: None,

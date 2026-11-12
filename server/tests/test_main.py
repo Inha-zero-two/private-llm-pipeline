@@ -154,7 +154,9 @@ class FakeConsentManager(Recorder):
         self.record("consent_request")
         if self.wait_forever:
             await asyncio.Event().wait()
-        return SimpleNamespace(run_id=req.run_id, allow=self.allow)
+        return SimpleNamespace(
+            run_id=req.run_id, decisions=[SimpleNamespace(pd_id=1, allow=self.allow)]
+        )
 
     def apply(
         self, result: SimpleNamespace, req: SimpleNamespace, pd_table: list[Any]
