@@ -132,11 +132,19 @@ class FakeFrontierClient(Recorder):
     def check_connection(self) -> bool:
         return self.online
 
-    def send(self, prompt: str) -> SimpleNamespace:
+    def send(
+        self, run_id: str, prompt: str, pd_table: list[Any] | None = None
+    ) -> SimpleNamespace:
         self.record("send", prompt)
         if self.fail_send:
             raise ConnectionError("API 연결 실패")
         return SimpleNamespace(answer="답", cost=0.1)
+
+    def stop(self, run_id: str) -> None:
+        pass
+
+    def clear(self, run_id: str) -> None:
+        pass
 
 
 class FakeConsentManager(Recorder):

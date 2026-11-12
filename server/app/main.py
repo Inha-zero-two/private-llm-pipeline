@@ -261,6 +261,8 @@ class Main:
         if not state.finishing:  # 이미 끝나는 중이면 모델 중지·동의 취소도 하지 않는다
             # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
             await self._call(self.local_llm_runner.stop)
+            # 진행 중인 프론티어 전송이 있으면 HTTP 연결을 끊는다.
+            await self._call(self.frontier_client.stop, run_id)
             # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
             await self._call(self.consent_manager.cancel, run_id)
 
@@ -328,7 +330,9 @@ class Main:
 
             # 6) 검사를 통과한 요청문만 프론티어로 보낸다.
             try:
-                reply = await self._call(self.frontier_client.send, request_text)
+                reply = await self._call(
+                    self.frontier_client.send, run_id, request_text, pd_table
+                )
             except ConnectionError:
                 return EndReason.OFFLINE
             frontier_calls += 1
@@ -422,6 +426,8 @@ class Main:
             # 최종 메모를 읽는다. 실패하면 None으로 기록한다.
             memo_final = await self._try(errors, self.memo_manager.read_all)
             await self._try(errors, self.memo_manager.clear)
+            # 이번 실행의 프론티어 대화를 지워 다음 실행·채팅과 섞이지 않게 한다.
+            await self._try(errors, self.frontier_client.clear, run_id)
             await self._try(
                 errors,
                 self.chat_manager.finish_run,

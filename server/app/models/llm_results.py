@@ -34,6 +34,17 @@ class ConsentText(BaseModel):
     risk: str  # 동의 시 예상 위험
 
 
+class FrontierReply(BaseModel):
+    # FrontierClient.send() 결과. Main은 answer·cost 사용
+    answer: str  # 프론티어 답변
+    cost: float  # 이번 질의 비용(달러)
+    input_tokens: int | None  # 입력 토큰 수. 사용량을 받지 못하면 None
+    output_tokens: int | None  # 출력 토큰 수
+    elapsed_ms: int  # 재시도를 포함한 소요 시간(ms)
+    context_mode: ContextMode  # 이전 프론티어 대화 유지(keep)·초기화(reset)
+    model: str  # 호출한 모델 이름
+
+
 ParsedResult = (
     str
     | list[DetectedItem]
