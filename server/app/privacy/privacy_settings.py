@@ -145,9 +145,17 @@ class PrivacySettings:
                 },
                 ensure_ascii=False,
             )
-            result, ok, *_ = self._runner.request(
-                run_id, match_input, PromptIdx.MATCH_RULES, chat_id, use_context=False
-            )
+            try:
+                result, ok, *_ = self._runner.request(
+                    run_id,
+                    match_input,
+                    PromptIdx.MATCH_RULES,
+                    chat_id,
+                    use_context=False,
+                )
+            except ConnectionError:
+                # Runner 종료·대기 시간 초과도 항목 대응 실패로 기본 금지를 유지한다.
+                result, ok = None, False
             # 오류가 있는 항목만 금지한다. DB ID와 입력 목록의 인덱스는 다르다.
             if ok:
                 matches = self._valid_matches(result, len(pd_table), len(setting.rules))
