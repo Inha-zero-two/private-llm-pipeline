@@ -42,15 +42,15 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-# 화면으로 이벤트(SSE)를 보내는 함수. (이벤트 이름, 데이터) 형태로 부른다.
+# 화면으로 이벤트(SSE)를 보내는 함수. (이벤트 이름, 데이터, 저장된 이벤트 ID).
 # 7장 Chat API를 만들 때 실제 전송 함수를 Main에 넘겨준다.
-EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
+EmitFn = Callable[[str, dict[str, Any], int | None], Awaitable[None]]
 
 # 7) 답변 도중 중지했을 때 저장하는 부분 답변 뒤에 붙이는 표시
 STOPPED_MARK = "\n\n(중지됨)"
 
 
-async def _no_emit(event: str, data: dict[str, Any]) -> None:
+async def _no_emit(event: str, data: dict[str, Any], event_id: int | None) -> None:
     """Chat API가 연결되기 전의 기본값. 아무것도 보내지 않는다."""
 
 
@@ -117,14 +117,17 @@ class Main:
         self._runs: dict[int, _RunState] = {}
 
     async def _emit(self, event: str, data: dict[str, Any]) -> None:
-        """이벤트를 먼저 저장해 재접속·실행 상세에서 복원할 수 있게 한다."""
+        """먼저 저장하고 같은 ID를 전달한다. SSE의 id와 재전송 ID를 일치시킨다."""
         run_id = data.get("run_id")
+        event_id = None
         if run_id is not None:
-            await self._call(self.chat_manager.log_event, run_id, event, data)
+            event_id = await self._call(
+                self.chat_manager.log_event, run_id, event, data
+            )
             if event == "error":
                 # 종료 상태와 최종 error 이벤트는 finish_run에서 함께 확정한다.
                 return
-        await self._send_event(event, data)
+        await self._send_event(event, data, event_id)
 
     async def init(self) -> None:
         """init: 로컬 LLM 초기화, 프론티어 API 수립(통신 테스트) 후
@@ -158,14 +161,11 @@ class Main:
         try:
             # 1) 실행 준비
             # 질문을 대화 기록에 저장하고, 이번 실행의 기록(run)을 만든다. run_id는 여기서 생긴다.
-            user_message_id = await self._call(
-                self.chat_manager.save_message, chat_id, "user", question
-            )
             starting = asyncio.create_task(
                 self._call(
-                    self.chat_manager.start_run,
+                    self.chat_manager.start_turn,
                     chat_id,
-                    user_message_id,
+                    question,
                     self.privacy_settings.setting_id,
                     self._run_config(),
                 )
@@ -173,14 +173,15 @@ class Main:
             cancelled = False
             while True:
                 try:
-                    run_id = await asyncio.shield(starting)
+                    started = await asyncio.shield(starting)
+                    user_message_id, run_id = started.user_message_id, started.run_id
                     break
                 except asyncio.CancelledError:
                     if starting.cancelled():
                         raise
                     cancelled = True
             if cancelled:
-                # 취소 중에도 생성된 ID를 확보해 finally에서 종료 기록을 남긴다.
+                # 질문 저장 중 취소돼도 두 ID를 확보해 finally에서 종료 기록을 남긴다.
                 raise asyncio.CancelledError
             task = asyncio.current_task()
             assert task is not None  # run_pipeline은 항상 asyncio 작업 안에서 돈다
@@ -399,6 +400,10 @@ class Main:
             )
             frontier_calls += 1
             spent_cost += reply.cost
+            await self._emit(
+                "frontier",
+                {"run_id": run_id, "request": request_text, "answer": reply.answer},
+            )
             await self._call(self.memo_manager.add_answer, plan.need, reply.answer)
             # 다시 2)로 돌아가 판단한다.
 
@@ -512,7 +517,9 @@ class Main:
             if isinstance(terminal, RunEvent) and isinstance(terminal.payload, dict):
                 try:
                     # 저장은 finish_run이 수행했으므로 전달 과정에서 다시 기록하지 않는다.
-                    await self._send_event(terminal.type, terminal.payload)
+                    await self._send_event(
+                        terminal.type, terminal.payload, terminal.event_id
+                    )
                 except Exception as error:
                     errors.append(error)
 

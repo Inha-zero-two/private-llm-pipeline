@@ -34,6 +34,11 @@ class RunConfig(Schema):
     budget_limit: float = Field(ge=0, allow_inf_nan=False)
 
 
+class StartedRun(Schema):
+    user_message_id: int
+    run_id: int
+
+
 class PrivacySetting(Schema):
     setting_id: int | None = None
     text: str = ""

@@ -32,6 +32,7 @@ from app.models.schemas import (
     RunDetail,
     RunEvent,
     RunSummary,
+    StartedRun,
 )
 
 SCHEMA_VERSION = 2
@@ -298,26 +299,29 @@ class ChatManager:
             db.execute("DELETE FROM chats WHERE chatId=?", (chat_id,))
 
     def save_message(self, chat_id: int, role: str, content: str) -> int:
+        with self._transaction():
+            return self._save_message(chat_id, role, content)
+
+    def _save_message(self, chat_id: int, role: str, content: str) -> int:
         if role not in {"user", "assistant", "context_compacted"}:
             raise ValueError("지원하지 않는 메시지 역할입니다.")
-        with self._transaction() as db:
-            self._require("chats", "chatId", chat_id)
-            now = _now()
-            first = (
-                role == "user"
-                and not db.execute(
-                    "SELECT 1 FROM messages WHERE chatId=? AND role='user'", (chat_id,)
-                ).fetchone()
-            )
-            message_id = db.execute(
-                "INSERT INTO messages(chatId, role, content, createdAt) VALUES (?, ?, ?, ?)",
-                (chat_id, role, content, now),
-            ).lastrowid
-            db.execute(
-                "UPDATE chats SET updatedAt=?, title=CASE WHEN ? THEN ? ELSE title END WHERE chatId=?",
-                (now, first, content[:30], chat_id),
-            )
-            return int(message_id)
+        self._require("chats", "chatId", chat_id)
+        now = _now()
+        first = (
+            role == "user"
+            and not self._db.execute(
+                "SELECT 1 FROM messages WHERE chatId=? AND role='user'", (chat_id,)
+            ).fetchone()
+        )
+        message_id = self._db.execute(
+            "INSERT INTO messages(chatId, role, content, createdAt) VALUES (?, ?, ?, ?)",
+            (chat_id, role, content, now),
+        ).lastrowid
+        self._db.execute(
+            "UPDATE chats SET updatedAt=?, title=CASE WHEN ? THEN ? ELSE title END WHERE chatId=?",
+            (now, first, content[:30], chat_id),
+        )
+        return int(message_id)
 
     def save_setting(self, text: str, rules: list[Rule]) -> PrivacySetting:
         rules = [Rule.model_validate(rule) for rule in rules]
@@ -373,22 +377,45 @@ class ChatManager:
         config: RunConfig,
     ) -> int:
         config = RunConfig.model_validate(config)
-        with self._transaction() as db:
-            self._message(chat_id, user_message_id, "user")
-            if setting_id is not None:
-                self._require("privacy_settings", "settingId", setting_id)
-            return int(
-                db.execute(
-                    "INSERT INTO runs(chatId, userMessageId, settingId, config, startedAt) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        chat_id,
-                        user_message_id,
-                        setting_id,
-                        config.model_dump_json(by_alias=True),
-                        _now(),
-                    ),
-                ).lastrowid
-            )
+        with self._transaction():
+            return self._start_run(chat_id, user_message_id, setting_id, config)
+
+    def _start_run(
+        self,
+        chat_id: int,
+        user_message_id: int,
+        setting_id: int | None,
+        config: RunConfig,
+    ) -> int:
+        self._message(chat_id, user_message_id, "user")
+        if setting_id is not None:
+            self._require("privacy_settings", "settingId", setting_id)
+        return int(
+            self._db.execute(
+                "INSERT INTO runs(chatId, userMessageId, settingId, config, startedAt) VALUES (?, ?, ?, ?, ?)",
+                (
+                    chat_id,
+                    user_message_id,
+                    setting_id,
+                    config.model_dump_json(by_alias=True),
+                    _now(),
+                ),
+            ).lastrowid
+        )
+
+    def start_turn(
+        self,
+        chat_id: int,
+        question: str,
+        setting_id: int | None,
+        config: RunConfig,
+    ) -> StartedRun:
+        """질문과 실행을 한 트랜잭션으로 생성한다. 실패하면 제목 변경까지 롤백한다."""
+        config = RunConfig.model_validate(config)
+        with self._transaction():
+            message_id = self._save_message(chat_id, "user", question)
+            run_id = self._start_run(chat_id, message_id, setting_id, config)
+            return StartedRun(user_message_id=message_id, run_id=run_id)
 
     def finish_run(
         self,

@@ -12,6 +12,7 @@ import pytest
 from app.data.memo_manager import MemoManager
 from app.main import STOPPED_MARK, Main
 from app.models.enums import EndReason
+from app.models.schemas import RunConfig, RunEvent, StartedRun
 
 
 class Recorder:
@@ -27,11 +28,16 @@ class Recorder:
 class FakeChatManager(Recorder):
     # 저장소 상세 동작은 외부 ChatManager 테스트에서 검사한다.
     # 이 대역은 Main의 새 저장 인터페이스만 제공한다.
+    def __init__(self, log: list[tuple[Any, ...]]) -> None:
+        super().__init__(log)
+        self.event_id = 0
+
     def recover_interrupted_runs(self) -> int:
         return 0
 
     def log_event(self, *args: Any) -> int:
-        return 1
+        self.event_id += 1
+        return self.event_id
 
     def save_frontier_query(self, *args: Any) -> int:
         return 1
@@ -42,15 +48,26 @@ class FakeChatManager(Recorder):
     def record_regeneration(self, *args: Any) -> None:
         pass
 
-    def save_message(self, chat_id: str, role: str, content: str) -> str:
+    def save_message(self, chat_id: int, role: str, content: str) -> int:
         self.record("save_message", role, content)
-        return f"msg-{role}"
+        return 1 if role == "user" else 2
 
     def start_run(
-        self, chat_id: str, message_id: str, setting_id: int, config: dict[str, Any]
-    ) -> str:
+        self, chat_id: int, message_id: int, setting_id: int | None, config: RunConfig
+    ) -> int:
         self.record("start_run", chat_id)
-        return "run-1"
+        return 1
+
+    def start_turn(
+        self,
+        chat_id: int,
+        question: str,
+        setting_id: int | None,
+        config: RunConfig,
+    ) -> StartedRun:
+        message_id = self.save_message(chat_id, "user", question)
+        run_id = self.start_run(chat_id, message_id, setting_id, config)
+        return StartedRun(user_message_id=message_id, run_id=run_id)
 
     def set_pd_items(self, chat_id: str, message_id: str, items: list[Any]) -> None:
         self.record("set_pd_items")
@@ -60,12 +77,28 @@ class FakeChatManager(Recorder):
 
     def finish_run(
         self,
-        run_id: str,
+        run_id: int,
         end_reason: EndReason | None,
-        answer_message_id: str | None,
+        answer_message_id: int | None,
         memo_final: str,
-    ) -> None:
+    ) -> RunEvent:
         self.record("finish_run", end_reason, answer_message_id)
+        self.event_id += 1
+        return RunEvent(
+            event_id=self.event_id,
+            run_id=run_id,
+            type="error" if end_reason is None else "done",
+            payload=(
+                {"code": "INTERNAL_ERROR", "message": "실행 오류"}
+                if end_reason is None
+                else {
+                    "endReason": end_reason,
+                    "limited": None,
+                    "answerMessageId": answer_message_id,
+                }
+            ),
+            created_at="2026-11-12T00:00:00+00:00",
+        )
 
 
 class FakeMemoManager(Recorder):
@@ -286,14 +319,14 @@ def test_init_loads_model_prompts_and_rules() -> None:
 
 def test_enough_from_start_answers_without_frontier() -> None:
     log: list[tuple[Any, ...]] = []
-    asyncio.run(make_main(log).run_pipeline("chat-1", "질문"))
+    asyncio.run(make_main(log).run_pipeline(1, "질문"))
 
     assert "send" not in names(log)
     assert ("save_message", "assistant", "최종 답변") in log
     assert "notify_limited" not in names(log)
     assert finished_with(log) == EndReason.INFO_ENOUGH
-    assert ("list_needs", "run-1", "chat-1") in log
-    assert ("judge", "run-1", "chat-1") in log
+    assert ("list_needs", 1, 1) in log
+    assert ("judge", 1, 1) in log
     # 정리는 release → clear → finish_run 순서
     tail = names(log)[-3:]
     assert tail == ["consent_release", "memo_clear", "finish_run"]
@@ -302,7 +335,7 @@ def test_enough_from_start_answers_without_frontier() -> None:
 def test_one_round_trip_then_enough() -> None:
     log: list[tuple[Any, ...]] = []
     main = make_main(log, planner=FakePlanner(log, enough_after=1))
-    asyncio.run(main.run_pipeline("chat-1", "질문"))
+    asyncio.run(main.run_pipeline(1, "질문"))
 
     assert names(log).count("send") == 1
     assert ("add_answer", ["경력"], "답") in log
@@ -334,7 +367,7 @@ def test_round_trip_links_reply_to_selected_needs(selected_needs: list[str]) -> 
         answer_generator=answer_generator,
     )
 
-    asyncio.run(main.run_pipeline("chat-1", "질문"))
+    asyncio.run(main.run_pipeline(1, "질문"))
 
     memo_manager.add_answer.assert_called_once_with(selected_needs, "답")
     assert planner.judge.call_count == 2
@@ -357,7 +390,7 @@ def test_round_trip_links_reply_to_selected_needs(selected_needs: list[str]) -> 
 def test_call_limit_stops_round_trips() -> None:
     log: list[tuple[Any, ...]] = []
     main = make_main(log, call_limit=2, planner=FakePlanner(log, enough_after=99))
-    asyncio.run(main.run_pipeline("chat-1", "질문"))
+    asyncio.run(main.run_pipeline(1, "질문"))
 
     assert names(log).count("send") == 2
     assert finished_with(log) == EndReason.CALL_LIMIT
@@ -372,7 +405,7 @@ def test_leak_guard_failures_end_with_regen_limit() -> None:
         planner=FakePlanner(log, enough_after=99),
         leak_guard=FakeLeakGuard(log, hits=["pd-1"]),
     )
-    asyncio.run(main.run_pipeline("chat-1", "질문"))
+    asyncio.run(main.run_pipeline(1, "질문"))
 
     assert names(log).count("rewrite") == 2
     assert "send" not in names(log)  # 통과하지 못한 요청문은 보내지 않는다
@@ -384,7 +417,7 @@ def test_guard_format_failure_does_not_rewrite() -> None:
     guard = FakeLeakGuard(log)
     guard.passed = False  # hits 없이 실패 = 검사 모델이 형식을 못 맞춤
     main = make_main(log, planner=FakePlanner(log, enough_after=99), leak_guard=guard)
-    asyncio.run(main.run_pipeline("chat-1", "질문"))
+    asyncio.run(main.run_pipeline(1, "질문"))
 
     assert "rewrite" not in names(log)
     assert finished_with(log) == EndReason.REGEN_LIMIT
@@ -397,7 +430,7 @@ def test_consent_denied() -> None:
     main = make_main(
         log, planner=planner, consent_manager=FakeConsentManager(log, allow=False)
     )
-    asyncio.run(main.run_pipeline("chat-1", "질문"))
+    asyncio.run(main.run_pipeline(1, "질문"))
 
     assert "consent_apply" not in names(log)
     assert "send" not in names(log)
@@ -411,7 +444,7 @@ def test_send_failure_ends_offline() -> None:
     main = make_main(
         log, planner=FakePlanner(log, enough_after=99), frontier_client=frontier
     )
-    asyncio.run(main.run_pipeline("chat-1", "질문"))
+    asyncio.run(main.run_pipeline(1, "질문"))
 
     assert finished_with(log) == EndReason.OFFLINE
     assert "generate" in names(log)  # 연결이 끊겨도 로컬 모델로 답한다
@@ -426,16 +459,16 @@ def test_stop_while_waiting_for_consent() -> None:
     main = make_main(log, planner=planner, consent_manager=consent)
 
     async def scenario() -> None:
-        task = asyncio.create_task(main.run_pipeline("chat-1", "질문"))
+        task = asyncio.create_task(main.run_pipeline(1, "질문"))
         while "consent_request" not in names(log):
             await asyncio.sleep(0.01)
-        await main.stop("run-1")
+        await main.stop(1)
         assert task.cancelled()
 
     asyncio.run(scenario())
 
     assert "consent_cancel" in names(log)
-    assert ("local_stop", "run-1") in log
+    assert ("local_stop", 1) in log
     assert "generate" not in names(log)  # 1)~6) 도중 중지면 7)을 하지 않는다
     assert finished_with(log) == EndReason.STOPPED
     assert "consent_release" in names(log)
@@ -448,15 +481,15 @@ def test_stop_during_answer_keeps_partial_answer() -> None:
     async def scenario() -> None:
         first_token = asyncio.Event()
 
-        async def emit(event: str, data: dict[str, Any]) -> None:
+        async def emit(event: str, data: dict[str, Any], event_id: int | None) -> None:
             if event == "token":
                 first_token.set()
                 await asyncio.sleep(10)  # 다음 토큰 전에 멈춰서 중지를 기다린다
 
-        main._emit = emit
-        task = asyncio.create_task(main.run_pipeline("chat-1", "질문"))
+        main._send_event = emit
+        task = asyncio.create_task(main.run_pipeline(1, "질문"))
         await first_token.wait()
-        await main.stop("run-1")
+        await main.stop(1)
         assert task.cancelled()
 
     asyncio.run(scenario())
@@ -476,15 +509,15 @@ def test_unexpected_error_still_cleans_up() -> None:
     main = make_main(log, planner=planner)
     events: list[str] = []
 
-    async def emit(event: str, data: dict[str, Any]) -> None:
+    async def emit(event: str, data: dict[str, Any], event_id: int | None) -> None:
         events.append(event)
 
-    main._emit = emit
+    main._send_event = emit
 
     with pytest.raises(RuntimeError, match="boom"):
-        asyncio.run(main.run_pipeline("chat-1", "질문"))
+        asyncio.run(main.run_pipeline(1, "질문"))
 
-    assert "error" in events
+    assert events.count("error") == 1
     assert names(log)[-3:] == ["consent_release", "memo_clear", "finish_run"]
     assert main._runs == {}
 
@@ -498,15 +531,25 @@ class FailingReleaseConsentManager(FakeConsentManager):
 def test_cleanup_continues_after_release_failure() -> None:
     log: list[tuple[Any, ...]] = []
     main = make_main(log, consent_manager=FailingReleaseConsentManager(log))
+    terminal_events: list[tuple[str, int | None]] = []
+
+    async def emit(event: str, data: dict[str, Any], event_id: int | None) -> None:
+        if event in {"done", "error"}:
+            terminal_events.append((event, event_id))
+
+    main._send_event = emit
 
     # 본 흐름은 성공했으므로 정리 오류가 호출자에게 올라간다.
     with pytest.raises(RuntimeError, match="release 실패"):
-        asyncio.run(main.run_pipeline("chat-1", "질문"))
+        asyncio.run(main.run_pipeline(1, "질문"))
 
     assert "memo_clear" in names(log)
     # 개인정보 복구 실패도 오류 종료로 기록한다.
     assert finished_with(log) is None
     assert main._runs == {}
+    assert len(terminal_events) == 1
+    assert terminal_events[0][0] == "error"
+    assert terminal_events[0][1] is not None
 
 
 class SlowReleaseConsentManager(FakeConsentManager):
@@ -527,10 +570,10 @@ def test_stop_during_cleanup_does_not_interrupt() -> None:
     main = make_main(log, consent_manager=consent)
 
     async def scenario() -> None:
-        task = asyncio.create_task(main.run_pipeline("chat-1", "질문"))
+        task = asyncio.create_task(main.run_pipeline(1, "질문"))
         while "consent_release" not in names(log):
             await asyncio.sleep(0.01)
-        stopping = asyncio.create_task(main.stop("run-1"))
+        stopping = asyncio.create_task(main.stop(1))
         await asyncio.sleep(0.05)
         consent.go.set()
         await stopping
@@ -564,10 +607,10 @@ def test_stop_after_answer_completes_saves_once() -> None:
     main = make_main(log, chat_manager=chat)
 
     async def scenario() -> None:
-        task = asyncio.create_task(main.run_pipeline("chat-1", "질문"))
+        task = asyncio.create_task(main.run_pipeline(1, "질문"))
         while ("save_message", "assistant", "최종 답변") not in log:
             await asyncio.sleep(0.01)
-        stopping = asyncio.create_task(main.stop("run-1"))
+        stopping = asyncio.create_task(main.stop(1))
         await asyncio.sleep(0.05)
         chat.go.set()
         await stopping

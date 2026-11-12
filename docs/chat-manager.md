@@ -18,11 +18,11 @@ with ChatManager("chat.sqlite3") as chats:
     # 단일 서버 부팅 때만 실행. Main.init()에서도 호출한다.
     chats.recover_interrupted_runs()
     chat_id = chats.create_chat()
-    message_id = chats.save_message(chat_id, "user", "질문")
-    run_id = chats.start_run(
-        chat_id, message_id, None,
+    started = chats.start_turn(
+        chat_id, "질문", None,
         RunConfig(call_limit=3, regen_limit=2, budget_limit=1.0),
     )
+    run_id = started.run_id
     answer_id = chats.save_message(chat_id, "assistant", "답변")
     chats.finish_run(run_id, EndReason.INFO_ENOUGH, answer_id, "최종 메모")
     detail = chats.get_run(run_id)
@@ -51,7 +51,7 @@ with ChatManager("chat.sqlite3") as chats:
 | 담당 | 메서드 | 책임 |
 | --- | --- | --- |
 | Chat API | `create_chat`, `list_chats`, `get_chat`, `delete_chat` | 채팅 CRUD, 메시지·실행 요약 복원 |
-| Main | `save_message`, `start_run`, `finish_run` | 질문·답변, 실행 설정·종료 사유·최종 메모 |
+| Main / Chat API | `start_turn`, `save_message`, `finish_run` | 질문과 실행의 원자적 생성, 답변·종료 사유·최종 메모 |
 | Main | `set_pd_items`, `get_pd_table` | 검출 결과 저장 후 DB ID가 있는 개인정보 테이블 조회 |
 | PrivacySettings | `save_setting`, `load_setting`, `load_settings` | 해석 완료된 규칙 저장과 조회 |
 | PrivacySettings | `load_run_setting`, `update_pd_allowed` | 실행 시작 시 고정된 설정과 사전 설정 기반 허용 상태 |
@@ -102,6 +102,13 @@ FrontierClient가 토큰·컨텍스트 정보를 제공하면 `FrontierQueryInpu
 
 Main은 실행·토큰·중지 이벤트를 외부로 보내기 전에 저장한다. 오류 정보는 `run_error` 동작 로그로
 기록하고, 마지막 `error` 이벤트는 실행 종료와 함께 확정한다.
+성공한 프론티어 질의·답변은 저장 후 `frontier` 이벤트로 기록·전달한다. 실패한 질의에는
+답변이 없으므로 `frontier` 이벤트를 발행하지 않는다.
+
+Main에 주입하는 전송 함수의 계약은 `async emit(event, data, event_id)`다. 일반 이벤트는
+`log_event()`가 반환한 ID를, 마지막 이벤트는 `finish_run()`이 반환한 `RunEvent.event_id`를
+전달한다. 전송 계층은 이 값을 SSE의 `id:`로 사용해야 실시간 수신과 재전송의 중복 제거가
+일치한다. 실행 생성 전 오류처럼 저장된 실행이 없는 알림은 `event_id=None`이며 SSE ID를 붙이지 않는다.
 `LocalLLMRunner(chat_manager=chats, ...)`로 저장소를 주입하면 실행 ID가 있는 모델 호출 로그도
 저장한다. 인증키·시스템 프롬프트·이전 대화 전체는 로그에 추가하지 않는다.
 종료 후 새 로그는 `RUN_FINISHED`로 거부하며, 취소된 Runner의 늦은 호출 로그는 생략한다.
@@ -118,7 +125,11 @@ Main은 실행·토큰·중지 이벤트를 외부로 보내기 전에 저장한
 다시 저장하지 않고 실시간 연결에 전달한다. 전달에 실패해도 저장된 이벤트로 재전송할 수 있다.
 재시작 복구도 종료 상태와 마지막 오류 이벤트를 함께 저장한다.
 
-Main은 실행 생성 중 취소돼도 생성 작업의 결과 ID를 확보한 뒤 중지 상태로 종료한다.
+`start_turn()`은 질문 메시지·채팅 제목 변경·실행 생성을 한 트랜잭션으로 처리하고
+`StartedRun(user_message_id, run_id)`를 반환한다. 생성 실패 시 모두 롤백한다.
+기존 `save_message()`와 `start_run()`도 독립 호출 용도로 유지하지만, 질문 전송 경로는
+`start_turn()`을 사용해 실행 없는 질문이 남지 않게 한다.
+Main은 질문 저장·실행 생성 중 취소돼도 생성 작업의 두 ID를 확보한 뒤 중지 상태로 종료한다.
 메모를 시작하기 전이었다면 메모 조회·정리를 생략한다.
 
 실행 중 채팅 삭제는 `CHAT_RUNNING`으로 거부한다. 종료 후 삭제하면 메시지·개인정보·실행·동의·질의·

@@ -12,6 +12,7 @@ import pytest
 from app.data.prompt_manager import PromptManager
 from app.main import Main
 from app.models.enums import EndReason, PromptIdx
+from app.models.schemas import StartedRun
 from app.pipeline.planner import Plan, Planner
 from app.privacy.pd_detector import PDDetector, PDItem
 from app.runtime.local_llm_runner import LocalLLMRunner
@@ -202,8 +203,8 @@ def test_main_calls_connected_modules(
     )
     # dev에 없는 모듈만 대역으로 두어 Main → 실제 검출·분류·판단 경로 검사
     chat = Mock()
-    chat.save_message.side_effect = ["msg-user", "msg-answer"]
-    chat.start_run.return_value = "run-main"
+    chat.save_message.return_value = 2
+    chat.start_turn.return_value = StartedRun(user_message_id=1, run_id=1)
     chat.get_pd_table.return_value = []
     memo, frontier, answer = Mock(), Mock(), Mock()
     memo.read_all.return_value = "Answers: 설명"
@@ -226,13 +227,11 @@ def test_main_calls_connected_modules(
         leak_guard=Mock(),
         answer_generator=answer,
     )
-    asyncio.run(main.run_pipeline("chat-main", "질문"))
-    assert [entry.args[0] for entry in log_call.call_args_list] == ["run-main"] * 3
+    asyncio.run(main.run_pipeline(1, "질문"))
+    assert [entry.args[0] for entry in log_call.call_args_list] == [1] * 3
     memo.set_needs.assert_called_once_with(["설명"])
     chat.finish_run.assert_called_once_with(
-        "run-main", EndReason.INFO_ENOUGH, "msg-answer", "Answers: 설명"
+        1, EndReason.INFO_ENOUGH, 2, "Answers: 설명"
     )
-    assert chat.save_message.call_args_list[-1] == call(
-        "chat-main", "assistant", "답변"
-    )
+    assert chat.save_message.call_args_list[-1] == call(1, "assistant", "답변")
     frontier.send.assert_not_called()
