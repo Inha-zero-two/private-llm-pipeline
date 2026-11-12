@@ -16,9 +16,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from app.models.enums import EndReason
+from app.models.schemas import FrontierQueryInput, RunConfig, RunEvent
 
 if TYPE_CHECKING:
     # 타입 표시용으로만 import한다.
@@ -56,7 +58,7 @@ async def _no_emit(event: str, data: dict[str, Any]) -> None:
 class _RunState:
     """진행 중인 실행 하나의 상태. stop()이 이 정보를 보고 실행을 끊는다."""
 
-    chat_id: str
+    chat_id: int
     task: asyncio.Task[Any]  # run_pipeline()을 돌리고 있는 asyncio 작업
     answer_parts: list[str] = field(default_factory=list)  # 7)에서 나온 토큰들
     stopping: bool = False  # stop()이 이미 불렸는지
@@ -109,10 +111,20 @@ class Main:
         self.request_writer = request_writer
         self.leak_guard = leak_guard
         self.answer_generator = answer_generator
-        self._emit = emit
+        self._send_event = emit
 
         # 진행 중인 실행들. run_id → 상태. stop(run_id)이 여기서 실행을 찾는다.
-        self._runs: dict[str, _RunState] = {}
+        self._runs: dict[int, _RunState] = {}
+
+    async def _emit(self, event: str, data: dict[str, Any]) -> None:
+        """이벤트를 먼저 저장해 재접속·실행 상세에서 복원할 수 있게 한다."""
+        run_id = data.get("run_id")
+        if run_id is not None:
+            await self._call(self.chat_manager.log_event, run_id, event, data)
+            if event == "error":
+                # 종료 상태와 최종 error 이벤트는 finish_run에서 함께 확정한다.
+                return
+        await self._send_event(event, data)
 
     async def init(self) -> None:
         """init: 로컬 LLM 초기화, 프론티어 API 수립(통신 테스트) 후
@@ -120,6 +132,7 @@ class Main:
 
         앱 띄우기(웹 서버)와 DB 구동은 Chat API · chatManager 쪽에서 Main을 만들기 전에 한다.
         """
+        await self._call(self.chat_manager.recover_interrupted_runs)
         if not await self._call(self.local_llm_runner.model_load):
             raise RuntimeError("로컬 LLM 모델을 GPU에 불러오지 못했습니다.")
         # 연결이 안 돼도 앱은 뜬다. 실행마다 2)의 check_end()가 연결을 다시 확인하고,
@@ -129,17 +142,18 @@ class Main:
             raise RuntimeError("시스템 프롬프트 파일을 불러오지 못했습니다.")
         await self._call(self.privacy_settings.load_rules)
 
-    async def run_pipeline(self, chat_id: str, question: str) -> None:
+    async def run_pipeline(self, chat_id: int, question: str) -> None:
         """검출부터 최종 답변까지 전체 흐름을 실행한다.
 
         종료 사유(end_reason)를 실행 기록에 남긴다.
         Chat API는 이 함수를 asyncio.create_task()로 따로 돌려야 stop()으로 끊을 수 있다.
         """
-        run_id: str | None = None
+        run_id: int | None = None
         pd_table: PDTable | None = None
         end_reason: EndReason | None = None
-        answer_message_id: str | None = None
+        answer_message_id: int | None = None
         original: BaseException | None = None
+        memo_started = False
 
         try:
             # 1) 실행 준비
@@ -147,13 +161,27 @@ class Main:
             user_message_id = await self._call(
                 self.chat_manager.save_message, chat_id, "user", question
             )
-            run_id = await self._call(
-                self.chat_manager.start_run,
-                chat_id,
-                user_message_id,
-                self.privacy_settings.setting_id,
-                self._run_config(),
+            starting = asyncio.create_task(
+                self._call(
+                    self.chat_manager.start_run,
+                    chat_id,
+                    user_message_id,
+                    self.privacy_settings.setting_id,
+                    self._run_config(),
+                )
             )
+            cancelled = False
+            while True:
+                try:
+                    run_id = await asyncio.shield(starting)
+                    break
+                except asyncio.CancelledError:
+                    if starting.cancelled():
+                        raise
+                    cancelled = True
+            if cancelled:
+                # 취소 중에도 생성된 ID를 확보해 finally에서 종료 기록을 남긴다.
+                raise asyncio.CancelledError
             task = asyncio.current_task()
             assert task is not None  # run_pipeline은 항상 asyncio 작업 안에서 돈다
             self._runs[run_id] = _RunState(chat_id=chat_id, task=task)
@@ -172,8 +200,9 @@ class Main:
             await self._call(self.privacy_settings.apply_to_table, run_id, pd_table)
 
             # 임시 메모를 시작하고, 답하는 데 필요한 정보 목록을 적어 둔다.
+            memo_started = True
             await self._call(self.memo_manager.start, run_id, question)
-            needs = await self._call(self.planner.list_needs, question)
+            needs = await self._call(self.planner.list_needs, question, run_id, chat_id)
             await self._call(self.memo_manager.set_needs, needs)
 
             # 2)~6) 왕복: 끝날 때까지 정보를 모은다
@@ -203,6 +232,7 @@ class Main:
             # 예상하지 못한 오류: 화면에 알리고, 아래 finally에서 같은 정리를 한다.
             # 원래 오류가 뭔지 기록해 두고, finally에서 다시 raise한다.
             original = error
+            end_reason = None
             await self._emit("error", {"run_id": run_id, "message": str(error)})
             raise
 
@@ -216,7 +246,7 @@ class Main:
                 # 정리 중에 오류가 생기면 원래 오류가 없을 때만 그 오류를 올린다.
                 # (원래 오류가 있으면 그것을 살리고, 정리 오류는 메모로 붙인다)
                 cleanup_errors = await self._finish(
-                    run_id, pd_table, end_reason, answer_message_id
+                    run_id, pd_table, end_reason, answer_message_id, memo_started
                 )
                 if cleanup_errors and original is None:
                     # 본 흐름은 성공했는데 정리가 실패한 경우만 정리 오류를 올린다
@@ -246,7 +276,7 @@ class Main:
             return EndReason.BUDGET_LIMIT
         return None
 
-    async def stop(self, run_id: str) -> None:
+    async def stop(self, run_id: int) -> None:
         """사용자가 중지 버튼을 누르면(POST stop) 어느 단계에서든 실행을 즉시 끊는다.
 
         stop()은 진행 중인 일을 멈추게만 하고, 'stopped' 기록과 정리는
@@ -260,7 +290,7 @@ class Main:
 
         if not state.finishing:  # 이미 끝나는 중이면 모델 중지·동의 취소도 하지 않는다
             # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
-            await self._call(self.local_llm_runner.stop)
+            await self._call(self.local_llm_runner.stop, run_id)
             # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
             await self._call(self.consent_manager.cancel, run_id)
 
@@ -274,7 +304,7 @@ class Main:
     # run_pipeline()을 단계별로 나눈 내부 함수
 
     async def _collect(
-        self, run_id: str, question: str, pd_table: PDTable
+        self, run_id: int, question: str, pd_table: PDTable
     ) -> EndReason:
         """2)~6) 왕복을 반복하며 정보를 모은다. 끝나야 하는 이유가 생기면 그 사유를 반환한다."""
         frontier_calls = 0  # 이번 실행에서 프론티어에 물어본 횟수
@@ -291,7 +321,14 @@ class Main:
 
             # 지금까지 모은 메모로 답할 수 있는지 판단한다.
             memo = await self._call(self.memo_manager.read_all)
-            plan = await self._call(self.planner.judge, question, memo, pd_table)
+            plan = await self._call(
+                self.planner.judge,
+                question,
+                memo,
+                pd_table,
+                run_id,
+                self._runs[run_id].chat_id,
+            )
 
             # 3) 정보가 충분하면 정상 종료.
             if plan.enough:
@@ -327,10 +364,39 @@ class Main:
                 return EndReason.REGEN_LIMIT
 
             # 6) 검사를 통과한 요청문만 프론티어로 보낸다.
+            query_id = await self._call(
+                self.chat_manager.save_frontier_query,
+                run_id,
+                FrontierQueryInput(request=request_text),
+                pd_table,
+            )
+            started = monotonic()
             try:
                 reply = await self._call(self.frontier_client.send, request_text)
             except ConnectionError:
+                await self._call(
+                    self.chat_manager.finish_frontier_query,
+                    run_id,
+                    query_id,
+                    FrontierQueryInput(
+                        request=request_text,
+                        status="failed",
+                        elapsed_ms=(monotonic() - started) * 1000,
+                    ),
+                )
                 return EndReason.OFFLINE
+            await self._call(
+                self.chat_manager.finish_frontier_query,
+                run_id,
+                query_id,
+                FrontierQueryInput(
+                    request=request_text,
+                    answer=reply.answer,
+                    status="ok",
+                    cost=reply.cost,
+                    elapsed_ms=(monotonic() - started) * 1000,
+                ),
+            )
             frontier_calls += 1
             spent_cost += reply.cost
             await self._call(self.memo_manager.add_answer, plan.need, reply.answer)
@@ -338,7 +404,7 @@ class Main:
 
     async def _write_safe_request(
         self,
-        run_id: str,
+        run_id: int,
         question: str,
         memo: str,
         pd_table: PDTable,
@@ -371,6 +437,7 @@ class Main:
             if regen_count >= self.regen_limit:
                 return None
             regen_count += 1
+            await self._call(self.chat_manager.record_regeneration, run_id)
 
             if request_text is None:
                 request_text = await self._call(
@@ -382,8 +449,8 @@ class Main:
                 )
 
     async def _answer(
-        self, run_id: str, chat_id: str, question: str, end_reason: EndReason
-    ) -> str:
+        self, run_id: int, chat_id: int, question: str, end_reason: EndReason
+    ) -> int:
         """7) 모은 정보로 최종 답변을 만들어 화면에 흘려보내고 저장한다. 메시지 ID를 반환한다."""
         state = self._runs[run_id]
         memo = await self._call(self.memo_manager.read_all)
@@ -407,10 +474,11 @@ class Main:
 
     async def _finish(
         self,
-        run_id: str,
+        run_id: int,
         pd_table: PDTable | None,
         end_reason: EndReason | None,
-        answer_message_id: str | None,
+        answer_message_id: int | None,
+        memo_started: bool = True,
     ) -> list[Exception]:
         """실행 정리. 한 단계가 실패해도 나머지 단계는 모두 시도하고, 생긴 오류를 돌려준다."""
         errors: list[Exception] = []
@@ -420,9 +488,20 @@ class Main:
                 # 개인정보와 직결되므로 가장 먼저, 무조건 시도한다.
                 await self._try(errors, self.consent_manager.release, run_id, pd_table)
             # 최종 메모를 읽는다. 실패하면 None으로 기록한다.
-            memo_final = await self._try(errors, self.memo_manager.read_all)
-            await self._try(errors, self.memo_manager.clear)
-            await self._try(
+            memo_final = None
+            if memo_started:
+                memo_final = await self._try(errors, self.memo_manager.read_all)
+                await self._try(errors, self.memo_manager.clear)
+            if errors:
+                await self._try(
+                    errors,
+                    self.chat_manager.log_event,
+                    run_id,
+                    "error",
+                    {"code": "CLEANUP_ERROR", "message": str(errors[0])},
+                )
+                end_reason = None
+            terminal = await self._try(
                 errors,
                 self.chat_manager.finish_run,
                 run_id,
@@ -430,6 +509,12 @@ class Main:
                 answer_message_id,
                 memo_final,
             )
+            if isinstance(terminal, RunEvent) and isinstance(terminal.payload, dict):
+                try:
+                    # 저장은 finish_run이 수행했으므로 전달 과정에서 다시 기록하지 않는다.
+                    await self._send_event(terminal.type, terminal.payload)
+                except Exception as error:
+                    errors.append(error)
 
         finally:
             # 무슨 일이 있어도 진행 중 실행 목록에서 제거한다.
@@ -446,17 +531,25 @@ class Main:
             errors.append(error)
             return None
 
-    def _run_config(self) -> dict[str, Any]:
+    def _run_config(self) -> RunConfig:
         """startRun()에 함께 저장할 이번 실행의 설정값."""
-        return {
-            "call_limit": self.call_limit,
-            "regen_limit": self.regen_limit,
-            "budget_limit": self.budget_limit,
-        }
+        return RunConfig(
+            call_limit=self.call_limit,
+            regen_limit=self.regen_limit,
+            budget_limit=self.budget_limit,
+        )
 
     async def _call(self, func: Callable[..., T], *args: Any) -> T:
         """오래 걸리는 동기 함수(로컬 LLM · DB · API 호출)를 별도 스레드에서 실행한다.
 
         그동안 이벤트 루프가 막히지 않아야 중지(stop) 요청을 바로 받을 수 있다.
         """
-        return await asyncio.to_thread(func, *args)
+        task = asyncio.create_task(asyncio.to_thread(func, *args))
+        if getattr(func, "__self__", None) is self.chat_manager:
+            # 취소돼도 시작한 DB 트랜잭션을 먼저 마쳐 종료 기록과 순서가 뒤집히지 않게 한다.
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+        return await task

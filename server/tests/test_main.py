@@ -25,6 +25,23 @@ class Recorder:
 
 
 class FakeChatManager(Recorder):
+    # 저장소 상세 동작은 외부 ChatManager 테스트에서 검사한다.
+    # 이 대역은 Main의 새 저장 인터페이스만 제공한다.
+    def recover_interrupted_runs(self) -> int:
+        return 0
+
+    def log_event(self, *args: Any) -> int:
+        return 1
+
+    def save_frontier_query(self, *args: Any) -> int:
+        return 1
+
+    def finish_frontier_query(self, *args: Any) -> None:
+        pass
+
+    def record_regeneration(self, *args: Any) -> None:
+        pass
+
     def save_message(self, chat_id: str, role: str, content: str) -> str:
         self.record("save_message", role, content)
         return f"msg-{role}"
@@ -487,7 +504,8 @@ def test_cleanup_continues_after_release_failure() -> None:
         asyncio.run(main.run_pipeline("chat-1", "질문"))
 
     assert "memo_clear" in names(log)
-    assert finished_with(log) == EndReason.INFO_ENOUGH
+    # 개인정보 복구 실패도 오류 종료로 기록한다.
+    assert finished_with(log) is None
     assert main._runs == {}
 
 
