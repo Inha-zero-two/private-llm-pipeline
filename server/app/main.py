@@ -260,7 +260,7 @@ class Main:
 
         if not state.finishing:  # 이미 끝나는 중이면 모델 중지·동의 취소도 하지 않는다
             # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
-            await self._call(self.local_llm_runner.stop)
+            await self._call(self.local_llm_runner.stop, run_id)
             # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
             await self._call(self.consent_manager.cancel, run_id)
 
