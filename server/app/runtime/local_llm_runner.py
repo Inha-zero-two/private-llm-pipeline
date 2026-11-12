@@ -27,6 +27,10 @@ MAX_OUTPUT_TOKENS = 5000
 PROMPT_MARGIN = 1024
 
 
+class RunnerBusyError(RuntimeError):
+    """다른 요청의 생성·정리가 진행 중이어서 지금 호출할 수 없음."""
+
+
 class LocalLLMRunner:
     def __init__(
         self,
@@ -76,7 +80,7 @@ class LocalLLMRunner:
                 self._stop_event = stop_signal
                 self._active_run_id = run_id
             elif interruptible or self._active_run_id != run_id:
-                raise RuntimeError("A request is still running or being cleaned up")
+                raise RunnerBusyError("A request is still running or being cleaned up")
         try:
             yield stop_signal
         finally:
@@ -354,7 +358,7 @@ class LocalLLMRunner:
         출력 형식 오류, 연결·수신 오류, 타임아웃 또는 생성 실패 시 같은 입력으로 최대 3회 요청.
         중지 요청은 재시도 없이 반환. 타임아웃 뒤에는 이전 수신 정리 후 다음 요청 진행.
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
-        3회 모두 실패하면 마지막 실패에 따라 length_failed 또는 parse_failed 반환.
+        3회 모두 실패하면 마지막 실패에 따라 length_failed, parse_failed, unavailable 반환.
         입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
         프롬프트 미로드(RuntimeError)·미등록 키(KeyError)는 모델 재시도 없이 즉시 전달.
         """
@@ -436,7 +440,7 @@ class LocalLLMRunner:
                         if not generation_errors:
                             raise
                         input_tokens = output_tokens = None
-                        failure_reason = "parse_failed"
+                        failure_reason = "unavailable"
                         last_output = "".join(output) or last_output
                         if stop_signal.is_set():
                             return last_output, False, None, None, "stopped"
