@@ -169,12 +169,19 @@ class FakeConsentManager(Recorder):
 
 
 class FakeAnswerGenerator(Recorder):
-    def generate(self, question: str, memo: str) -> Iterator[str]:
+    def generate(
+        self,
+        question: str,
+        memo: str,
+        run_id: str = "",
+        chat_id: str | None = None,
+    ) -> Iterator[str]:
         self.record("generate")
         return iter(["최종", " 답변"])
 
-    def notify_limited(self, end_reason: EndReason) -> None:
+    def notify_limited(self, end_reason: EndReason) -> str | None:
         self.record("notify_limited", end_reason)
+        return None
 
 
 class FakeSimple(Recorder):
