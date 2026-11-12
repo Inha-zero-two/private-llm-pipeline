@@ -82,7 +82,8 @@ result = runner.request(
 **반환 순서:** `(결과, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유)`
 
 - 작업 성공: 첫 값은 파싱 결과. `manual_request()`와 `regen()`의 첫 값은 답변 문자열
-- 최대 3회 시도 후 모두 실패한 경우: `(None, False, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유)` 반환. 마지막 실패가 출력 상한 도달이면 `"length_failed"`, 나머지는 `"parse_failed"`
+- 최대 3회 시도 후 모두 실패한 경우: `(None, False, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유)` 반환. 마지막 실패가 출력 상한 도달이면 `"length_failed"`, 호출·수신 오류 또는 타임아웃이면 `"unavailable"`, 출력 형식 오류 등은 `"parse_failed"`
+- PARSE_RULES의 명시적인 해석 불가 응답은 `(RuleParseFailure, False, 입력 토큰 수, 출력 토큰 수, "interpretation_failed")`다. 정상적인 모델 판단이므로 재생성하지 않는다. 기존 성공 응답은 `list[Rule]`을 유지한다. 설정 해석은 실행 밖의 작업이므로 `run_id=None`, `chat_id=None`, `use_context=False`로 호출한다.
 - 입력·답변이 너무 길어 이전 대화에 저장할 수 없는 경우에도 `"length_failed"` 실패 튜플 반환. 결과는 None이며 기존 대화 유지. 저장 실패에 따른 재생성은 생략
 - `manual_request()`와 `regen()`도 length 종료만 최대 3회 재시도. 모두 실패하면 첫 값은 빈 문자열, 성공 여부는 False, 종료 사유는 `"length_failed"`. 나머지 요청 오류는 예외 전달
 - `context_full`: 시스템 프롬프트·입력·채팅 형식 여유분·최대 출력의 합계가 32,768토큰을 초과. 모델 요청 없이 실패값 반환

@@ -35,7 +35,7 @@ except OutputFormatError:
 | NEEDS | `{"needs":["…"]}` | `list[str]` |
 | JUDGE | `{"enough":true,"needConsent":false,"consentItems":[],"need":[]}` | `Plan` |
 | GUARD | `{"hits":[0,2]}` | `list[int]` |
-| PARSE_RULES | `{"rules":[{"target":"…","scope":"item","action":"deny"}]}` | `list[Rule]` |
+| PARSE_RULES | `{"rules":[{"target":"…","scope":"item","action":"deny"}]}` 또는 아래 해석 불가 응답 | `list[Rule]` 또는 `RuleParseFailure` |
 | MATCH_RULES | `{"matches":[{"item":0,"rules":[1]}]}` | `list[RuleMatch]` |
 | CONSENT | `{"purpose":"…","benefit":"…","risk":"…"}` | `ConsentText` |
 | DECIDE_CONTEXT | `{"context":"keep"}` 또는 reset | `"keep"` 또는 `"reset"` |
@@ -46,6 +46,8 @@ except OutputFormatError:
 - DetectedItem.category는 0 식별·1 민감·2 속성 중 하나. GUARD와 MATCH_RULES의 정수는 입력 목록에서 0부터 시작하는 항목 번호
 - 항목 번호를 데이터베이스 ID로 바꾸거나 입력 목록 범위 안의 번호인지 확인하는 역할은 호출자에서 처리
 - 형식에 맞는 빈 목록도 성공으로 반환. 텍스트의 줄바꿈·들여쓰기 유지
+- PARSE_RULES의 명시적 해석 불가는 `{"ok":false,"rules":[],"message":"수정 안내"}`다. 필수 필드와 빈 규칙 목록, 공백이 아닌 안내를 검증하고 `RuleParseFailure`를 반환한다. Runner는 재생성 없이 `interpretation_failed`로 전달한다. 기존 성공 형식은 유지하며 `ok:true`도 허용한다. 빈 성공 목록과 해석 불가를 구분한다.
+- MATCH_RULES의 `rules` 목록은 모델이 의미와 우선순위를 판단한 **최종 규칙 하나의 인덱스** 또는 빈 목록이다. 개인정보 항목마다 정확히 하나의 대응이 필요하다. 입력 범위·중복·누락·복수 선택 검사는 PrivacySettings가 담당한다.
 - JSON 전체를 감싼 코드 블록 표시만 제거. 설명문 속 JSON 추출, 잘못된 문법 수정 및 자동 자료형 변환은 생략
 - 알 수 없는 작업이나 외부 모델용 FRONTIER를 전달한 경우 `ValueError` 발생. 답변을 다시 생성할 오류와 구분
 
