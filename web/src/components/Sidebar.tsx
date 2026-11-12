@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { Chat } from '@/types'
 import { PlusIcon, ShieldIcon, SidebarIcon, TrashIcon } from './icons'
 import styles from './Sidebar.module.css'
@@ -12,6 +13,7 @@ type Props = {
   onSelect: (chatId: string) => void
   onDelete: (chat: Chat) => void
   onOpenSettings: () => void
+  children?: ReactNode
 }
 
 export function Sidebar({
@@ -24,11 +26,12 @@ export function Sidebar({
   onSelect,
   onDelete,
   onOpenSettings,
+  children,
 }: Props) {
   return (
     <>
       <div className={styles.scrim} data-open={open} onClick={onToggle} />
-      <aside className={styles.sidebar} data-open={open} aria-label="채팅 목록">
+      <aside className={styles.sidebar} data-open={open} aria-label="채팅 목록" inert={!open}>
         <div className={styles.header}>
           <span className={styles.brand}>
             <ShieldIcon size={20} />
@@ -70,6 +73,8 @@ export function Sidebar({
             )
           })}
         </nav>
+
+        {children}
 
         <div className={styles.footer}>
           <button className={styles.settings} onClick={onOpenSettings}>

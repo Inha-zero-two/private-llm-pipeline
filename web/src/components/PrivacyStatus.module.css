@@ -1,0 +1,44 @@
+.panel {
+  flex-shrink: 0;
+  max-height: 28%;
+  overflow-y: auto;
+  margin: 0 16px 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.row button {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-muted);
+}
+
+.row button:hover {
+  background: var(--bg-hover);
+}
+
+.panel p {
+  margin: 4px 0;
+  color: var(--text-muted);
+}
+
+.details {
+  margin-top: 4px;
+}
+
+.details summary {
+  cursor: pointer;
+}

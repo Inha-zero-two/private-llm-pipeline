@@ -7,6 +7,9 @@ import dialog from '@/components/Dialog.module.css'
 import { PlusIcon, ShieldIcon, SidebarIcon } from '@/components/icons'
 import { PrivacySettingsDialog } from '@/components/PrivacySettingsDialog'
 import { Sidebar } from '@/components/Sidebar'
+import { RunLogPanel } from '@/components/RunLogPanel'
+import { ModelResultPanel } from '@/components/ModelResultPanel'
+import { PrivacyStatus } from '@/components/PrivacyStatus'
 import { runDemo, type DemoRun } from '@/demo/run'
 import type { Chat, ConsentRequest, PrivacySetting, Turn } from '@/types'
 import styles from './App.module.css'
@@ -121,47 +124,58 @@ export default function App() {
         onSelect={openChat}
         onDelete={setDeleteTarget}
         onOpenSettings={() => setSettingsOpen(true)}
-      />
+      >
+        <RunLogPanel turns={current?.turns ?? []} consent={running ? consent : null} />
+      </Sidebar>
 
-      <main className={styles.main}>
-        <header className={styles.topbar}>
-          {!sidebarOpen && (
+      <div className={styles.workspace}>
+        <main className={styles.main}>
+          <header className={styles.topbar}>
+            {!sidebarOpen && (
+              <>
+                <button
+                  className={styles.iconButton}
+                  onClick={() => setSidebarOpen(true)}
+                  aria-label="사이드바 열기"
+                >
+                  <SidebarIcon />
+                </button>
+                <button
+                  className={styles.iconButton}
+                  onClick={() => openChat(null)}
+                  aria-label="새 채팅"
+                >
+                  <PlusIcon />
+                </button>
+              </>
+            )}
+            <h1 className={styles.title}>{current?.title ?? ''}</h1>
+          </header>
+          <PrivacyStatus
+            setting={setting}
+            turn={current?.turns.at(-1)}
+            pending={running && consent !== null}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+
+          {current ? (
             <>
-              <button
-                className={styles.iconButton}
-                onClick={() => setSidebarOpen(true)}
-                aria-label="사이드바 열기"
-              >
-                <SidebarIcon />
-              </button>
-              <button
-                className={styles.iconButton}
-                onClick={() => openChat(null)}
-                aria-label="새 채팅"
-              >
-                <PlusIcon />
-              </button>
+              <Conversation turns={current.turns} />
+              {composer}
             </>
-          )}
-          <h1 className={styles.title}>{current?.title ?? ''}</h1>
-        </header>
-
-        {current ? (
-          <>
-            <Conversation turns={current.turns} />
-            {composer}
-          </>
-        ) : (
-          <div className={styles.empty}>
-            <div className={styles.hero}>
-              <ShieldIcon size={36} />
-              <h2>무엇을 도와드릴까요?</h2>
-              <p>개인정보는 이 PC 안에서 지키고, 필요한 도움만 외부 모델에 물어봅니다.</p>
+          ) : (
+            <div className={styles.empty}>
+              <div className={styles.hero}>
+                <ShieldIcon size={36} />
+                <h2>무엇을 도와드릴까요?</h2>
+                <p>개인정보는 이 PC 안에서 지키고, 필요한 도움만 외부 모델에 물어봅니다.</p>
+              </div>
+              {composer}
             </div>
-            {composer}
-          </div>
-        )}
-      </main>
+          )}
+        </main>
+        <ModelResultPanel turns={current?.turns ?? []} />
+      </div>
 
       {settingsOpen && (
         <PrivacySettingsDialog

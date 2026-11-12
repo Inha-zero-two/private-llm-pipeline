@@ -19,6 +19,7 @@
 }
 
 .header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -51,6 +52,7 @@
 
 .newChat,
 .settings {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -68,6 +70,7 @@
 
 .list {
   flex: 1;
+  min-height: 60px;
   overflow-y: auto;
   margin: 12px -4px;
   padding: 0 4px;
@@ -150,6 +153,7 @@
 }
 
 .footer {
+  flex-shrink: 0;
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
