@@ -38,10 +38,11 @@ except OutputFormatError:
 | PARSE_RULES | `{"rules":[{"target":"…","scope":"item","action":"deny"}]}` | `list[Rule]` |
 | MATCH_RULES | `{"matches":[{"item":0,"rules":[1]}]}` | `list[RuleMatch]` |
 | CONSENT | `{"purpose":"…","benefit":"…","risk":"…"}` | `ConsentText` |
+| INTERPRET_CONSENT | `{"ok":true,"decisions":[{"pdId":11,"allow":true}],"message":"…"}` | `ConsentInterpretation` |
 | DECIDE_CONTEXT | `{"context":"keep"}` 또는 reset | `"keep"` 또는 `"reset"` |
 | WRITE / REWRITE / ANSWER / MEMO_SUMMARY | 비어 있지 않은 텍스트 | `str` |
 
-- `PromptIdx`는 `app.models.enums`, 결과 자료형은 `app.models.llm_results`에서 import. 기존 파서 경로의 import도 유지. 작업 종류는 위 표의 12개와 외부 모델용 FRONTIER
+- `PromptIdx`는 `app.models.enums`, 결과 자료형은 `app.models.llm_results`에서 import. ConsentInterpretation은 `app.models.consent_results`에 정의. 기존 파서 경로의 import도 유지. INTERPRET_CONSENT는 추가 필드와 자동 형변환을 금지하며 ID 범위·중복과 미언급 항목 처리는 ConsentManager에서 검사한다.
 - 반환 객체의 필드는 위 모델 출력 형식과 동일. `Plan`의 needConsent·consentItems는 파이썬에서 `need_consent`·`consent_items`로 접근. consent_items는 데이터베이스의 개인정보 ID 목록
 - DetectedItem.category는 0 식별·1 민감·2 속성 중 하나. GUARD와 MATCH_RULES의 정수는 입력 목록에서 0부터 시작하는 항목 번호
 - 항목 번호를 데이터베이스 ID로 바꾸거나 입력 목록 범위 안의 번호인지 확인하는 역할은 호출자에서 처리

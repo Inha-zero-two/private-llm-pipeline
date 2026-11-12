@@ -9,7 +9,7 @@
 - 데이터베이스 테이블 대신 `app/prompts/prompts.json` 파일에서 시스템 프롬프트를 관리
 - 버전(`version`)은 개별 프롬프트마다 두지 않고 파일 맨 앞에 전체 버전 하나만 기록
 - 각 프롬프트 항목은 `idx`(0 이상의 정수), `name`(단계 이름), `prompt`(시스템 프롬프트) 세 필드로 구성
-- 기본 13개 단계(`0: DETECT` ~ `12: MEMO_SUMMARY`)의 번호와 이름이 표와 일치해야 하며, 추후 새로운 단계(`idx >= 13`)가 생기면 JSON의 `prompts` 목록에 `idx`, `name`, `prompt`를 추가한 뒤 `PromptManager`를 다시 생성하면 코드 수정 없이 숫자 `idx`나 `name` 문자열로 조회 가능. 기존 인스턴스는 JSON 변경을 자동으로 다시 읽지 않으며, 로드에 성공한 인스턴스는 `load_prompts()`를 다시 호출해도 파일을 다시 읽지 않음
+- 필수 14개 단계(`0: DETECT` ~ `13: INTERPRET_CONSENT`)의 번호와 이름이 표와 일치해야 하며, 추후 새로운 단계(`idx >= 14`)가 생기면 JSON의 `prompts` 목록에 `idx`, `name`, `prompt`를 추가한 뒤 `PromptManager`를 다시 생성하면 코드 수정 없이 숫자 `idx`나 `name` 문자열로 조회 가능. 기존 인스턴스는 JSON 변경을 자동으로 다시 읽지 않으며, 로드에 성공한 인스턴스는 `load_prompts()`를 다시 호출해도 파일을 다시 읽지 않음
 - `prompt` 값은 일반 문자열(`str`)과 줄 단위 문자열 배열(`list[str]`)을 모두 허용하며, 배열로 작성한 경우 로드 시 `\n`으로 결합해 하나의 문자열로 보관
 
 ```json
@@ -21,9 +21,9 @@
       "name": "DETECT",
       "prompt": "여기에 시스템 프롬프트 입력"
     },
-    "... (기본 0 ~ 12번 항목 포함) ...",
+    "... (필수 0 ~ 13번 항목 포함) ...",
     {
-      "idx": 13,
+      "idx": 14,
       "name": "NEW_STAGE",
       "prompt": [
         "첫 번째 줄 지시문",
@@ -34,7 +34,7 @@
 }
 ```
 
-### 기본 등록 단계 (`0` ~ `12`)
+### 기본 등록 단계 (`0` ~ `13`)
 
 | `idx` | `name` (`PromptIdx`) | 사용 위치 |
 | :---: | --- | --- |
@@ -51,6 +51,7 @@
 | `10` | `DECIDE_CONTEXT` | `FrontierClient.decide_context()` |
 | `11` | `FRONTIER` | `FrontierClient.send()` |
 | `12` | `MEMO_SUMMARY` | `MemoManager.compact_answer()` |
+| `13` | `INTERPRET_CONSENT` | `ConsentManager.receive()` |
 
 ## 처리 흐름
 

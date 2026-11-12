@@ -52,7 +52,9 @@ class PrivacySettings:
 
 이름은 그대로 쓰고, `app/models/`에 둡니다. 위치 기준은 [코드 컨벤션](convention-code.md#각-모듈에서-주고받는-데이터-형식)을 따릅니다.
 
-`PDItem`, `PDTable`, `PDId`, `Rule`, `SaveResult`, `ConsentRequest`, `ConsentResult`, `GuardResult`, `Memo`, `ChatSummary`, `ChatDetail`, `EndReason`, `PromptIdx`
+`PDItem`, `PDTable`, `PDId`, `Rule`, `SaveResult`, `ConsentRequest`, `ConsentMessage`, `ConsentTarget`, `ConsentDecision`, `ConsentInterpretation`, `ConsentReply`, `ConsentResult`, `GuardResult`, `Memo`, `ChatSummary`, `ChatDetail`, `EndReason`, `PromptIdx`
+
+동의의 실행 자료형은 `app/models/consent_results.py`에 둔다. ConsentMessage는 저장 전 안내, ConsentResult는 요청 ID와 항목별 결정이다. 설계서의 전체 일괄 allow 대신 최신 API 명세의 decisions를 사용한다. ConsentRequest는 ChatManager의 저장 이력 자료형이다.
 
 | 설계서 `EndReason` 항목 | 코드 |
 | --- | --- |
