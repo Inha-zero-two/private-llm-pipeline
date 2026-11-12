@@ -14,6 +14,7 @@ Main은 실행 하나를 처음부터 끝까지 진행하는 컨트롤러다. �
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -173,7 +174,7 @@ class Main:
 
             # 임시 메모를 시작하고, 답하는 데 필요한 정보 목록을 적어 둔다.
             await self._call(self.memo_manager.start, run_id, question)
-            needs = await self._call(self.planner.list_needs, question)
+            needs = await self._call(self.planner.list_needs, question, run_id, chat_id)
             await self._call(self.memo_manager.set_needs, needs)
 
             # 2)~6) 왕복: 끝날 때까지 정보를 모은다
@@ -260,7 +261,7 @@ class Main:
 
         if not state.finishing:  # 이미 끝나는 중이면 모델 중지·동의 취소도 하지 않는다
             # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
-            await self._call(self.local_llm_runner.stop)
+            await self._call(self.local_llm_runner.stop, run_id)
             # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
             await self._call(self.consent_manager.cancel, run_id)
 
@@ -291,7 +292,14 @@ class Main:
 
             # 지금까지 모은 메모로 답할 수 있는지 판단한다.
             memo = await self._call(self.memo_manager.read_all)
-            plan = await self._call(self.planner.judge, question, memo, pd_table)
+            plan = await self._call(
+                self.planner.judge,
+                question,
+                memo,
+                pd_table,
+                run_id,
+                self._runs[run_id].chat_id,
+            )
 
             # 3) 정보가 충분하면 정상 종료.
             if plan.enough:
@@ -309,7 +317,7 @@ class Main:
                 if consent_req is not None:  # None이면 실제로 물어볼 항목이 없다
                     # 사용자가 응답할 때까지 기다린다. (중지되면 stop()이 이 대기를 끊는다)
                     consent_result = await self.consent_manager.request(consent_req)
-                    if not consent_result.allow:
+                    if not any(d.allow for d in consent_result.decisions):
                         return EndReason.CONSENT_DENIED
                     # 허용한 항목은 이번 실행 동안만 허용으로 바뀐다.
                     await self._call(
@@ -318,6 +326,9 @@ class Main:
                         consent_req,
                         pd_table,
                     )
+                    # 일부 거절된 정보를 전제로 만든 계획은 다시 판단한다.
+                    if not all(d.allow for d in consent_result.decisions):
+                        continue
 
             # 5) 개인정보가 새지 않는 요청문을 만든다.
             request_text = await self._write_safe_request(
@@ -459,4 +470,6 @@ class Main:
 
         그동안 이벤트 루프가 막히지 않아야 중지(stop) 요청을 바로 받을 수 있다.
         """
+        if inspect.iscoroutinefunction(func):
+            return await func(*args)
         return await asyncio.to_thread(func, *args)
