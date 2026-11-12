@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from queue import Empty, Queue
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread, get_ident
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from ..models.enums import PromptIdx
-from ..models.llm_results import ParsedRequestResult, RequestResult
+from ..models.llm_results import ParsedRequestResult, RequestResult, RuleParseFailure
 from .local_res_parser import OutputFormatError, parser
 
 if TYPE_CHECKING:
@@ -25,6 +26,10 @@ N_CTX = 32768
 MAX_OUTPUT_TOKENS = 5000
 # 채팅 형식, 역할 구분 및 시작·종료 토큰의 여유분
 PROMPT_MARGIN = 1024
+
+
+class RunnerUnavailableError(ConnectionError):
+    """Runner 종료 또는 요청 대기 시간 초과. 내부 구현 오류와 구분한다."""
 
 
 class LocalLLMRunner:
@@ -48,9 +53,12 @@ class LocalLLMRunner:
         self.prompt_manager = prompt_manager
         self._busy = Lock()  # 모델 사용 중 중복 접근 방지용 잠금
         self._state_lock = Lock()  # 종료 상태와 중지 신호 변경용 잠금
+        self._request_condition = Condition(self._state_lock)
+        self._pending_requests: deque[tuple[int | str | None, Event]] = deque()
+        self._request_thread: int | None = None
         self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
         self._stop_event: Event | None = None  # 진행 중인 요청의 중지 신호
-        self._active_run_id: str | None = None  # 진행 중인 요청의 실행 ID
+        self._active_run_id: int | str | None = None  # 진행 중인 요청의 실행 ID
         self._closed = False
         self._llm: Any = None
         # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
@@ -59,31 +67,64 @@ class LocalLLMRunner:
 
     @contextmanager
     def _request_scope(
-        self, run_id: str | None, *, interruptible: bool = True
+        self, run_id: int | str | None, *, interruptible: bool = True
     ) -> Iterator[Event]:
         """요청의 실행 ID와 중지 신호 등록 후 요청 종료 시 정리.
 
         파싱·재생성·대화 저장까지 같은 실행으로 관리.
-        같은 실행의 대화 압축은 기존 중지 신호를 공유하고 완료까지 처리.
+        요청은 도착 순서로 timeout초까지 대기하며 대기 중에도 stop으로 취소 가능.
+        같은 스레드·실행의 대화 압축만 기존 중지 신호를 공유하고 완료까지 처리.
         """
-        with self._state_lock:
+        with self._request_condition:
             if self._closed:
-                raise RuntimeError("Runner is closed")
-            stop_signal = self._stop_event
-            owns_request = stop_signal is None  # 실행 ID와 중지 신호 정리 담당 여부
-            if stop_signal is None:
+                raise RunnerUnavailableError("Runner is closed")
+            owns_request = False
+            if self._request_thread == get_ident():
+                if interruptible or self._active_run_id != run_id:
+                    raise RuntimeError("Only context compaction may nest a request")
+                stop_signal = self._stop_event
+                assert stop_signal is not None
+            else:
                 stop_signal = Event()
-                self._stop_event = stop_signal
-                self._active_run_id = run_id
-            elif interruptible or self._active_run_id != run_id:
-                raise RuntimeError("A request is still running or being cleaned up")
+                ticket = (run_id, stop_signal)
+                self._pending_requests.append(ticket)
+                self._request_condition.notify_all()
+                deadline = monotonic() + self._timeout
+                try:
+                    while True:
+                        if self._closed:
+                            raise RunnerUnavailableError("Runner is closed")
+                        if stop_signal.is_set():
+                            break
+                        if (
+                            self._stop_event is None
+                            and self._pending_requests[0] is ticket
+                            and not self._busy.locked()
+                        ):
+                            self._stop_event = stop_signal
+                            self._active_run_id = run_id
+                            self._request_thread = get_ident()
+                            owns_request = True
+                            break
+                        remaining = deadline - monotonic()
+                        if remaining <= 0:
+                            raise RunnerUnavailableError(
+                                "Model request queue timed out"
+                            )
+                        # 이전 수신 정리는 별도 스레드에서 끝날 수 있으므로 주기적으로 확인.
+                        self._request_condition.wait(timeout=min(0.05, remaining))
+                finally:
+                    self._pending_requests.remove(ticket)
+                    self._request_condition.notify_all()
         try:
             yield stop_signal
         finally:
             if owns_request:
-                with self._state_lock:
+                with self._request_condition:
                     self._stop_event = None
                     self._active_run_id = None
+                    self._request_thread = None
+                    self._request_condition.notify_all()
 
     def get_context_manager(self, run_id: str) -> ContextManager:
         """실행 ID에 해당하는 ContextManager 조회 또는 생성.
@@ -148,6 +189,10 @@ class LocalLLMRunner:
         출력 상한(length)으로 끝나면 같은 입력으로 최대 3회 요청 후 length_failed 반환.
         """
         with self._request_scope(run_id, interruptible=interruptible) as stop_signal:
+            if stop_signal.is_set() and (
+                interruptible or self._stop_event is not stop_signal
+            ):
+                return "", False, 0, 0, "stopped"
             input_tokens: int | None = 0
             output_tokens: int | None = 0
             last_output = ""
@@ -216,12 +261,19 @@ class LocalLLMRunner:
             generation_errors = []
         if not 0 < max_tokens <= MAX_OUTPUT_TOKENS:
             raise ValueError("max_tokens must be between 1 and 5000")
-        if not self._busy.acquire(blocking=False):
-            raise RuntimeError("A request is still running or being cleaned up")
+        deadline = monotonic() + self._timeout
+        while not self._busy.acquire(timeout=0.05):
+            with self._state_lock:
+                if self._closed:
+                    raise RunnerUnavailableError("Runner is closed")
+            if interruptible and stop_signal.is_set():
+                return "", False, 0, 0, "stopped"
+            if monotonic() >= deadline:
+                raise RunnerUnavailableError("Model cleanup wait timed out")
         with self._state_lock:
             if self._closed:
                 self._busy.release()
-                raise RuntimeError("Runner is closed")
+                raise RunnerUnavailableError("Runner is closed")
             if interruptible and stop_signal.is_set():
                 self._busy.release()
                 return "", False, 0, 0, "stopped"
@@ -336,10 +388,10 @@ class LocalLLMRunner:
 
     def request(
         self,
-        run_id: str,
+        run_id: int | str | None,
         input_: str,
         prompt_idx: PromptIdx | str,
-        chat_id: str | None,
+        chat_id: int | str | None,
         *,
         use_context: bool = False,
         system_prompt: str | None = None,
@@ -354,7 +406,8 @@ class LocalLLMRunner:
         출력 형식 오류, 연결·수신 오류, 타임아웃 또는 생성 실패 시 같은 입력으로 최대 3회 요청.
         중지 요청은 재시도 없이 반환. 타임아웃 뒤에는 이전 수신 정리 후 다음 요청 진행.
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
-        3회 모두 실패하면 마지막 실패에 따라 length_failed 또는 parse_failed 반환.
+        3회 모두 실패하면 마지막 실패에 따라 length_failed, parse_failed, unavailable 반환.
+        PARSE_RULES의 명시적 해석 불가는 interpretation_failed로 재시도 없이 반환.
         입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
         프롬프트 미로드(RuntimeError)·미등록 키(KeyError)는 모델 재시도 없이 즉시 전달.
         """
@@ -369,6 +422,8 @@ class LocalLLMRunner:
             if prompt_version is None:
                 prompt_version = self.prompt_manager.get_version()
         with self._request_scope(run_id) as stop_signal:
+            if stop_signal.is_set():
+                return None, False, 0, 0, "stopped"
             context_id = None
             manager = None
             model_input = input_
@@ -401,21 +456,9 @@ class LocalLLMRunner:
             output_tokens: int | None = 0
             last_output = ""
             failure_reason = "parse_failed"
-            for attempt in range(MAX_ATTEMPTS):
+            for _ in range(MAX_ATTEMPTS):
                 if stop_signal.is_set():
                     return last_output, False, input_tokens, output_tokens, "stopped"
-                if attempt:
-                    # 이전 수신이 끝난 후 재요청. 대기 중에도 해당 실행의 중지 신호 확인
-                    while not self._busy.acquire(timeout=0.05):
-                        if stop_signal.is_set():
-                            return (
-                                last_output,
-                                False,
-                                input_tokens,
-                                output_tokens,
-                                "stopped",
-                            )
-                    self._busy.release()
                 output: list[str] = []
                 generation_errors: list[Exception] = []  # 모델 요청·수신 중 발생한 오류
                 format_valid = None
@@ -436,7 +479,7 @@ class LocalLLMRunner:
                         if not generation_errors:
                             raise
                         input_tokens = output_tokens = None
-                        failure_reason = "parse_failed"
+                        failure_reason = "unavailable"
                         last_output = "".join(output) or last_output
                         if stop_signal.is_set():
                             return last_output, False, None, None, "stopped"
@@ -492,6 +535,16 @@ class LocalLLMRunner:
                             )
                         continue
                     format_valid = True
+                    if isinstance(parsed, RuleParseFailure):
+                        if stop_signal.is_set():
+                            return None, False, input_tokens, output_tokens, "stopped"
+                        return (
+                            parsed,
+                            False,
+                            input_tokens,
+                            output_tokens,
+                            "interpretation_failed",
+                        )
                 finally:
                     # 요청마다 새 입력, 모델이 생성한 답변 및 형식 검사 결과로 로그 함수 호출
                     self._log_call(
@@ -551,6 +604,8 @@ class LocalLLMRunner:
                     f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                 )
         with self._request_scope(run_id) as stop_signal:
+            if stop_signal.is_set():
+                return "", False, 0, 0, "stopped"
             input_tokens: int | None = 0
             output_tokens: int | None = 0
             last_output = ""
@@ -641,16 +696,20 @@ class LocalLLMRunner:
                 raise RuntimeError("Runner is closed")
             return self._llm.tokenize(text.encode("utf-8"), add_bos=False, special=True)
 
-    def stop(self, run_id: str) -> None:
-        """실행 ID가 일치하는 현재 요청에 중지 신호 전달 후 즉시 반환.
+    def stop(self, run_id: int | str) -> None:
+        """실행 ID가 일치하는 진행·대기 요청에 중지 신호 전달 후 즉시 반환.
 
         다른 스레드에서 호출 가능. 생성 함수에서 신호 확인 후 받은 답변까지 반환.
         다른 실행 ID 또는 진행 중인 요청이 없는 경우 생략.
         대화 압축 중에는 압축 완료 후 중지 처리. 원격 서버의 생성 작업 취소는 별도 기능.
         """
-        with self._state_lock:
+        with self._request_condition:
             if self._active_run_id == run_id and self._stop_event is not None:
                 self._stop_event.set()
+            for pending_run_id, stop_signal in self._pending_requests:
+                if pending_run_id == run_id:
+                    stop_signal.set()
+            self._request_condition.notify_all()
 
     def close(self) -> None:
         """Runner 사용을 종료하고 진행 중인 수신이 끝나면 모델 자원 해제.
@@ -658,10 +717,11 @@ class LocalLLMRunner:
         중지 신호 전달 후 모델 접근 잠금을 얻을 때까지 대기.
         프로그램 종료 시 호출. 종료 후 같은 객체로 새 요청 불가.
         """
-        with self._state_lock:
+        with self._request_condition:
             self._closed = True
             if self._stop_event is not None:
                 self._stop_event.set()
+            self._request_condition.notify_all()
         # 진행 중인 생성·토큰화가 끝난 후 모델 메모리 해제
         # stop은 즉시 반환. close는 진행 중인 작업이 끝날 때까지 대기
         with self._busy:

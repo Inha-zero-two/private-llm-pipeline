@@ -13,6 +13,7 @@ from ..models.llm_results import (
     ParsedResult,
     Rule,
     RuleMatch,
+    RuleParseFailure,
 )
 from ..pipeline.planner import Plan
 
@@ -79,6 +80,17 @@ def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
         raise OutputFormatError(str(exc)) from exc
     if not isinstance(data, dict):
         raise OutputFormatError("JSON 최상위 값은 객체여야 함")
+    if prompt_idx == PromptIdx.PARSE_RULES and "ok" in data:
+        if data["ok"] is False:
+            try:
+                failure = RuleParseFailure.model_validate(data, strict=True)
+            except ValidationError as exc:
+                raise OutputFormatError(str(exc)) from exc
+            if not failure.message.strip():
+                raise OutputFormatError("해석 실패 안내가 비어 있음")
+            return failure
+        if data["ok"] is not True:
+            raise OutputFormatError("ok는 boolean이어야 함")
     adapter, field = output_format
     if field is not None:
         if field not in data:
