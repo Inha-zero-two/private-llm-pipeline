@@ -97,13 +97,25 @@ class FakePlanner(Recorder):
 
 class FakeRequestWriter(Recorder):
     def write(
-        self, question: str, memo: str, pd_table: list[Any], need: list[str]
+        self,
+        question: str,
+        memo: str,
+        pd_table: list[Any],
+        need: list[str],
+        run_id: str = "",
+        chat_id: str | None = None,
     ) -> str:
         self.record("write")
         return "요청문"
 
     def rewrite(
-        self, previous: str, hits: list[Any], need: list[str], pd_table: list[Any]
+        self,
+        previous: str,
+        hits: list[Any],
+        need: list[str],
+        pd_table: list[Any],
+        run_id: str = "",
+        chat_id: str | None = None,
     ) -> str:
         self.record("rewrite", hits)
         return "고친 요청문"

@@ -348,8 +348,11 @@ class Main:
 
         통과한 요청문을 반환한다. regen_limit번 고쳐도 안 되면 None을 반환한다.
         """
+        # 중지 버튼이 로컬 생성을 끊을 수 있도록 실행 ID와 채팅 ID를 함께 넘긴다.
+        state = self._runs.get(run_id)
+        chat_id = state.chat_id if state is not None else None
         request_text = await self._call(
-            self.request_writer.write, question, memo, pd_table, need
+            self.request_writer.write, question, memo, pd_table, need, run_id, chat_id
         )
         regen_count = 0  # 이 요청문을 다시 쓴 횟수
 
@@ -374,11 +377,23 @@ class Main:
 
             if request_text is None:
                 request_text = await self._call(
-                    self.request_writer.write, question, memo, pd_table, need
+                    self.request_writer.write,
+                    question,
+                    memo,
+                    pd_table,
+                    need,
+                    run_id,
+                    chat_id,
                 )
             else:
                 request_text = await self._call(
-                    self.request_writer.rewrite, request_text, hits, need, pd_table
+                    self.request_writer.rewrite,
+                    request_text,
+                    hits,
+                    need,
+                    pd_table,
+                    run_id,
+                    chat_id,
                 )
 
     async def _answer(
