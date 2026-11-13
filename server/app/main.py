@@ -61,6 +61,8 @@ class _RunState:
     stopping: bool = False  # stop()이 이미 불렸는지
     # 이 시점 이후로는 취소하지 않는다 (답변 완료 또는 정리 시작)
     finishing: bool = False
+    # 정상 종료가 아닐 때 답변 아래에 보일 제한 안내 (SSE done의 limited)
+    limited: str | None = None
 
 
 class Main:
@@ -418,7 +420,10 @@ class Main:
         state = self._runs[run_id]
         await self._step(run_id, "최종 답변 생성 중")
         memo = await self._call(self.memo_manager.read_all)
-        tokens = await self._call(self.answer_generator.generate, question, memo)
+        # 중지 버튼이 답변 생성을 끊을 수 있도록 실행 ID와 채팅 ID를 함께 넘긴다.
+        tokens = await self._call(
+            self.answer_generator.generate, question, memo, run_id, chat_id
+        )
 
         # 토큰을 하나씩 꺼내 화면에 보낸다. 중지되면 그때까지의 토큰이 answer_parts에 남는다.
         while (token := await self._call(next, tokens, None)) is not None:
@@ -429,7 +434,9 @@ class Main:
 
         # 정상 종료가 아니면 어떤 이유로 제한된 답인지 답변 아래에 안내한다.
         if end_reason != EndReason.INFO_ENOUGH:
-            await self._call(self.answer_generator.notify_limited, end_reason)
+            state.limited = await self._call(
+                self.answer_generator.notify_limited, end_reason
+            )
 
         answer = "".join(state.answer_parts)
         return await self._call(
