@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { interpretSetting } from '@/demo/rules'
+import type { SettingReply } from '@/backend/types'
 import type { PrivacySetting } from '@/types'
 import { Dialog } from './Dialog'
 import dialog from './Dialog.module.css'
@@ -7,6 +7,8 @@ import styles from './PrivacySettingsDialog.module.css'
 
 type Props = {
   setting: PrivacySetting
+  /** 설정문을 해석해 저장한다 (서버 API-10 또는 데모) */
+  submit: (text: string) => Promise<SettingReply>
   onSave: (setting: PrivacySetting) => void
   onClose: () => void
 }
@@ -14,7 +16,7 @@ type Props = {
 const PLACEHOLDER = '예: 직무와 경력 기간은 공개해도 됩니다.\n회사명과 연락처는 공개하지 마세요.'
 
 // 개인정보 공개 허용 설정 (설계서 9장 8.3). 열 때마다 새로 그린다
-export function PrivacySettingsDialog({ setting, onSave, onClose }: Props) {
+export function PrivacySettingsDialog({ setting, submit, onSave, onClose }: Props) {
   // 지금 설정을 입력칸에 채워 둔다. 저장은 규칙을 통째로 바꾸기 때문
   const [text, setText] = useState(setting.text)
   const [rules, setRules] = useState(setting.rules)
@@ -25,7 +27,7 @@ export function PrivacySettingsDialog({ setting, onSave, onClose }: Props) {
   const save = async () => {
     setSaving(true)
     setError('')
-    const result = await interpretSetting(text)
+    const result = await submit(text)
     setSaving(false)
     if (!result.ok) {
       setError(result.message)

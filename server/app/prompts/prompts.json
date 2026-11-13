@@ -1,5 +1,5 @@
 {
-  "version": "0.2",
+  "version": "0.3",
   "prompts": [
     {
       "idx": 0,
@@ -48,25 +48,28 @@
       "name": "JUDGE",
       "prompt": [
         "Evaluate whether the collected answers in [메모] are sufficient to answer [질문].",
-        "Return ONLY valid JSON matching: {\"enough\": <bool>, \"needConsent\": <bool>, \"consentItems\": [<int>, ...], \"need\": [\"<str>\", ...]}",
+        "Return ONLY valid JSON matching: {\"enough\": <bool>, \"needConsent\": <bool>, \"consentItems\": [<int>, ...], \"needIdx\": [<int>, ...]}",
         "Rules:",
-        "- If [메모] Answers already cover the required topics, set \"enough\": true, \"needConsent\": false, \"consentItems\": [], \"need\": [].",
-        "- Otherwise, set \"enough\": false and list the remaining unresolved topics in \"need\" (in Korean).",
+        "- [필요 정보] lists the topics needed to answer, each with a 0-based number.",
+        "- If [메모] Answers already cover the required topics, set \"enough\": true, \"needConsent\": false, \"consentItems\": [], \"needIdx\": [].",
+        "- Otherwise, set \"enough\": false and put the numbers of the still unresolved topics from [필요 정보] in \"needIdx\". Use ONLY numbers listed in [필요 정보]; never write topic names or new topics.",
         "- Set \"needConsent\": true ONLY when sharing disallowed personal data (allowed=False in [개인정보]) is strictly necessary for the next query; put ONLY those integer id values from [개인정보] in \"consentItems\" and exclude unrelated identifiers (e.g., person names not needed for the query).",
         "",
         "Example 1:",
         "Input:",
         "[질문]\n네이버 백엔드 자소서 지원동기를 어떻게 쓸까?",
+        "[필요 정보]\n0. 백엔드 핵심 역량\n1. 지원동기 구성 방법",
         "[메모]\nQuestion: 네이버 백엔드 자소서 지원동기를 어떻게 쓸까?\nNeeds:\n- 백엔드 핵심 역량\n- 지원동기 구성 방법\nAnswers:",
         "[개인정보]\n- id=1, category=0, text=김민수, allowed=False\n- id=2, category=2, text=네이버, allowed=False",
-        "Output: {\"enough\": false, \"needConsent\": true, \"consentItems\": [2], \"need\": [\"백엔드 핵심 역량\", \"지원동기 구성 방법\"]}",
+        "Output: {\"enough\": false, \"needConsent\": true, \"consentItems\": [2], \"needIdx\": [0, 1]}",
         "",
         "Example 2:",
         "Input:",
         "[질문]\n파이썬 비동기 처리 방법을 알려줘.",
+        "[필요 정보]\n0. asyncio 기본 개념\n1. async/await 사용 예시",
         "[메모]\nQuestion: 파이썬 비동기 처리 방법을 알려줘.\nNeeds:\n- asyncio 기본 개념\n- async/await 사용 예시\nAnswers:\n- asyncio는 이벤트 루프 기반 비동기 라이브러리이며 async def와 await로 코루틴을 실행합니다.",
         "[개인정보]\n없음",
-        "Output: {\"enough\": true, \"needConsent\": false, \"consentItems\": [], \"need\": []}"
+        "Output: {\"enough\": true, \"needConsent\": false, \"consentItems\": [], \"needIdx\": []}"
       ]
     },
     {
