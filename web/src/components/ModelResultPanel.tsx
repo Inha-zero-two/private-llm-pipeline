@@ -1,47 +1,59 @@
-import type { Turn } from '@/types'
 import styles from './ModelResultPanel.module.css'
 
-export function ModelResultPanel({ turns }: { turns: Turn[] }) {
-  const count = turns.reduce((n, turn) => n + turn.frontier.length, 0)
+/** 파이프라인 내부 호출 기록과 별개로 전달받는 비교 결과. 이 컴포넌트는 호출하지 않는다. */
+export type ModelComparisonResult = {
+  question: string
+  answer: string
+}
+
+type ModelResultPanelProps = {
+  localResult?: ModelComparisonResult | null
+  frontierResult?: ModelComparisonResult | null
+}
+
+function ComparisonSection({
+  model,
+  result,
+}: {
+  model: 'local' | 'frontier'
+  result?: ModelComparisonResult | null
+}) {
+  const title = `비교용 ${model === 'local' ? 'Local SLM' : 'Frontier LLM'} 결과`
+  const titleId = `${model}-result-title`
+
   return (
-    <aside className={styles.panel} aria-label="모델 결과">
-      <section className={styles.section} aria-labelledby="local-result-title">
-        <header className={styles.header}>
-          <h2 id="local-result-title">Local SLM 결과</h2>
-          <span className={styles.badge}>연결 전</span>
-        </header>
-        <div className={styles.scroll} tabIndex={0}>
-          <p className={styles.placeholder}>
-            내부 출력 API 연결 전입니다. 표시할 Local SLM 출력이 없습니다.
-          </p>
-        </div>
-      </section>
-      <section className={styles.section} aria-labelledby="frontier-result-title">
-        <header className={styles.header}>
-          <h2 id="frontier-result-title">Frontier LLM 결과</h2>
-          <span className={styles.badge}>{count > 0 ? `데모 ${count}건` : '대기'}</span>
-        </header>
-        <div className={styles.scroll} tabIndex={0}>
-          <p className={styles.placeholder}>
-            선택한 채팅의 데모 질의·응답입니다. 실제 모델 API는 연결되지 않았습니다.
-          </p>
-          {count === 0 && <p className={styles.placeholder}>아직 수신한 데모 응답이 없습니다.</p>}
-          {turns.map((turn, index) =>
-            turn.frontier.map((query) => (
-              <article className={styles.result} key={`${turn.id}-${query.round}`}>
-                <h3>
-                  질문 {index + 1} · {query.round}회차{' '}
-                  <span className={styles.badge}>응답 수신</span>
-                </h3>
-                <h4>보낸 요청문</h4>
-                <p>{query.request}</p>
-                <h4>받은 응답</h4>
-                <p>{query.answer}</p>
-              </article>
-            )),
-          )}
-        </div>
-      </section>
+    <section className={styles.section} data-model={model} aria-labelledby={titleId}>
+      <header className={styles.header}>
+        <h2 id={titleId}>{title}</h2>
+        <span className={styles.badge}>{result ? '결과 수신' : '연결 전'}</span>
+      </header>
+      <div className={styles.scroll} tabIndex={0}>
+        {result ? (
+          <article className={styles.result}>
+            <h3>사용자 질문 원문</h3>
+            <p>{result.question}</p>
+            <h3>비교 답변</h3>
+            <p>{result.answer}</p>
+          </article>
+        ) : (
+          <>
+            <p className={styles.placeholder}>비교 결과 없음</p>
+            <p className={styles.placeholder}>
+              동일한 사용자 질문 원문에 대한 독립 비교 결과를 표시할 영역입니다. 아직 연결되지
+              않았습니다.
+            </p>
+          </>
+        )}
+      </div>
+    </section>
+  )
+}
+
+export function ModelResultPanel({ localResult, frontierResult }: ModelResultPanelProps) {
+  return (
+    <aside className={styles.panel} aria-label="모델 비교 결과">
+      <ComparisonSection model="local" result={localResult} />
+      <ComparisonSection model="frontier" result={frontierResult} />
     </aside>
   )
 }

@@ -174,7 +174,7 @@ export default function App() {
             </div>
           )}
         </main>
-        <ModelResultPanel turns={current?.turns ?? []} />
+        <ModelResultPanel />
       </div>
 
       {settingsOpen && (
