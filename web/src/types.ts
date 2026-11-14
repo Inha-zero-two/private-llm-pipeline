@@ -20,6 +20,8 @@ export type ConsentItem = {
 
 /** 추가 개인정보 공개 요청 */
 export type ConsentRequest = {
+  /** 서버의 동의 요청 ID (데모에는 없음) */
+  consentId?: number
   items: ConsentItem[]
   purpose: string
   benefit: string
@@ -44,6 +46,8 @@ export type Notice = { kind: 'limited' | 'stopped' | 'error'; text: string }
 /** 질문 하나와 그에 대한 답변 */
 export type Turn = {
   id: string
+  /** 서버의 실행 ID. 질문을 보낸 뒤 채워진다 (데모에는 없음) */
+  runId?: number
   question: string
   running: boolean
   /** 진행 중인 단계 이름 */

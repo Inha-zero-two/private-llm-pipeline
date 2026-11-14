@@ -33,7 +33,7 @@ except OutputFormatError:
 | --- | --- | --- |
 | DETECT | `{"items":[{"text":"…","category":0}]}` | `list[DetectedItem]` |
 | NEEDS | `{"needs":["…"]}` | `list[str]` |
-| JUDGE | `{"enough":true,"needConsent":false,"consentItems":[],"need":[]}` | `Plan` |
+| JUDGE | `{"enough":false,"needConsent":false,"consentItems":[],"needIdx":[0]}` | `JudgeResult` |
 | GUARD | `{"hits":[0,2]}` | `list[int]` |
 | PARSE_RULES | `{"rules":[{"target":"…","scope":"item","action":"deny"}]}` | `list[Rule]` |
 | MATCH_RULES | `{"matches":[{"item":0,"rules":[1]}]}` | `list[RuleMatch]` |
@@ -42,8 +42,8 @@ except OutputFormatError:
 | WRITE / REWRITE / ANSWER / MEMO_SUMMARY | 비어 있지 않은 텍스트 | `str` |
 
 - `PromptIdx`는 `app.models.enums`, 결과 자료형은 `app.models.llm_results`에서 import. 기존 파서 경로의 import도 유지. 작업 종류는 위 표의 12개와 외부 모델용 FRONTIER
-- 반환 객체의 필드는 위 모델 출력 형식과 동일. `Plan`의 needConsent·consentItems는 파이썬에서 `need_consent`·`consent_items`로 접근. consent_items는 데이터베이스의 개인정보 ID 목록
-- DetectedItem.category는 0 식별·1 민감·2 속성 중 하나. GUARD와 MATCH_RULES의 정수는 입력 목록에서 0부터 시작하는 항목 번호
+- 반환 객체의 필드는 위 모델 출력 형식과 동일. `JudgeResult`의 needConsent·consentItems·needIdx는 파이썬에서 `need_consent`·`consent_items`·`need_idx`로 접근. consent_items는 데이터베이스의 개인정보 ID 목록, need_idx는 JUDGE 입력 `[필요 정보]`에서 0부터 시작하는 번호. 판단 필드 네 개는 모두 필수
+- DetectedItem.category는 0 식별·1 민감·2 속성 중 하나. GUARD·MATCH_RULES의 정수와 JUDGE의 needIdx는 입력 목록에서 0부터 시작하는 항목 번호
 - 항목 번호를 데이터베이스 ID로 바꾸거나 입력 목록 범위 안의 번호인지 확인하는 역할은 호출자에서 처리
 - 형식에 맞는 빈 목록도 성공으로 반환. 텍스트의 줄바꿈·들여쓰기 유지
 - JSON 전체를 감싼 코드 블록 표시만 제거. 설명문 속 JSON 추출, 잘못된 문법 수정 및 자동 자료형 변환은 생략

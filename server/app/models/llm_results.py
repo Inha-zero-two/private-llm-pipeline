@@ -2,9 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
-
-from ..pipeline.planner import Plan
+from pydantic import BaseModel, ConfigDict, Field
 
 Index = Annotated[int, Field(ge=0)]
 ContextMode = Literal["keep", "reset"]
@@ -28,6 +26,20 @@ class RuleMatch(BaseModel):
     rules: list[Index]  # 일치하는 규칙 번호 목록
 
 
+class JudgeResult(BaseModel):
+    """JUDGE 모델 출력. need는 이름 대신 [필요 정보]의 0부터 시작하는 번호로 고른다.
+
+    번호가 필요 정보 목록 범위 안인지 확인하고 이름으로 바꾸는 일은 Planner.judge가 한다.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True, strict=True)
+
+    enough: bool  # 지금 메모로 답할 수 있는지
+    need_consent: bool = Field(default=False, alias="needConsent")  # 추가 동의 필요
+    consent_items: list[int] = Field(default_factory=list, alias="consentItems")
+    need_idx: list[Index] = Field(default_factory=list, alias="needIdx")  # 남은 need
+
+
 class ConsentText(BaseModel):
     purpose: str  # 개인정보 사용 목적
     benefit: str  # 동의 시 기대 효과
@@ -38,7 +50,7 @@ ParsedResult = (
     str
     | list[DetectedItem]
     | list[str]
-    | Plan
+    | JudgeResult
     | list[int]
     | list[Rule]
     | list[RuleMatch]
