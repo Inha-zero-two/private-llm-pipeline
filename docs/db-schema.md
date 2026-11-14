@@ -1,6 +1,6 @@
 # DB 스키마
 
-구현 기준은 `server/app/data/chat_manager.py`의 `SCHEMA_SQL`이다.
+구현 기준은 `server/app/data/schema.sql`이다.
 최신 화면 API에 맞춰 모든 ID와 참조 ID는 INTEGER로 통일한다. 시간은 UTC 오프셋을 포함한 ISO 8601 TEXT다.
 사용법과 저장 책임은 [ChatManager](chat-manager.md)를 참고한다.
 
