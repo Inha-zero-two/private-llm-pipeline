@@ -1,6 +1,6 @@
 # DB 스키마
 
-구현 기준은 `server/app/data/chat_manager.py`의 `SCHEMA_SQL`, 버전은 `PRAGMA user_version = 2`이다.
+구현 기준은 `server/app/data/chat_manager.py`의 `SCHEMA_SQL`이다.
 최신 화면 API에 맞춰 모든 ID와 참조 ID는 INTEGER로 통일한다. 시간은 UTC 오프셋을 포함한 ISO 8601 TEXT다.
 사용법과 저장 책임은 [ChatManager](chat-manager.md)를 참고한다.
 
@@ -9,9 +9,8 @@ pd_items의 allowed/allowedBy는 사전 설정 상태만 저장한다. 임시 �
 전송 당시 허용 상태는 query_items에 보존한다. 항목별 동의 결정은 JSON으로 저장한다.
 오류는 status=finished, endReason=NULL, errorCode/notice로 기록한다.
 
-빈 DB에서는 스키마를 초기화한다. v1은 이벤트를 실행별 순번으로 옮기고 종료 이벤트를 보완하는
-명시적인 마이그레이션으로 v2에 올린다. 버전 없는 기존 DB와 지원하지 않는 버전은 거부한다.
-v1 이벤트 ID는 변경되므로 기존 스트림 커서는 버리고 처음부터 재전송한다.
+스키마 버전과 마이그레이션은 관리하지 않는다. 빈 DB에서만 스키마를 초기화하고,
+스키마가 바뀌면 기존 DB 파일을 수동으로 지운 뒤 새로 만든다.
 
 실행 종료 후 채팅을 삭제할 때 runs를 먼저 삭제하고 chats를 삭제한다.
 채팅 관련 하위 기록은 ON DELETE CASCADE로 제거한다. 앱 공통 privacy_settings는 유지한다.

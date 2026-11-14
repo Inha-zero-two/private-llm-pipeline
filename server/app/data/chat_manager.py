@@ -35,7 +35,6 @@ from app.models.schemas import (
     StartedRun,
 )
 
-SCHEMA_VERSION = 2
 SCHEMA_SQL = """
 CREATE TABLE chats (
     chatId INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '',
@@ -152,51 +151,19 @@ class ChatManager:
         try:
             self._db.execute("PRAGMA foreign_keys = ON")
             self._db.execute("PRAGMA journal_mode = WAL")
-            version = self._db.execute("PRAGMA user_version").fetchone()[0]
+            # 스키마 버전은 관리하지 않는다. 빈 DB에만 스키마를 만들고, 스키마가 바뀌면
+            # 기존 DB 파일을 수동으로 지우고 다시 만든다.
             tables = self._db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
-            if version == 0 and not tables:
-                self._db.executescript(
-                    "BEGIN IMMEDIATE;\n"
-                    + SCHEMA_SQL
-                    + f"\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
-                )
-            elif version == 1:
-                self._migrate_v1()
-            elif version != SCHEMA_VERSION:
-                raise StorageError("SCHEMA_VERSION", "지원하지 않는 DB 스키마입니다.")
+            if not tables:
+                self._db.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_SQL + "\nCOMMIT;")
         except BaseException:
             self._db.close()
             raise
 
     def __enter__(self) -> Self:
         return self
-
-    def _migrate_v1(self) -> None:
-        """기존 이벤트를 실행별 순번으로 옮기고 종료 이벤트를 보완한다."""
-        with self._transaction() as db:
-            db.execute("ALTER TABLE run_events RENAME TO old_run_events")
-            db.execute("DROP INDEX events_run")
-            db.execute(
-                "CREATE TABLE run_events (eventId INTEGER NOT NULL, "
-                "runId INTEGER NOT NULL REFERENCES runs ON DELETE CASCADE, "
-                "type TEXT NOT NULL, payload TEXT NOT NULL, createdAt TEXT NOT NULL, "
-                "PRIMARY KEY(runId, eventId))"
-            )
-            db.execute(
-                "INSERT INTO run_events SELECT ROW_NUMBER() OVER "
-                "(PARTITION BY runId ORDER BY eventId), runId, "
-                "CASE WHEN type='error' THEN 'run_error' ELSE type END, payload, createdAt "
-                "FROM old_run_events"
-            )
-            db.execute("DROP TABLE old_run_events")
-            db.execute("CREATE INDEX events_run ON run_events(runId, eventId)")
-            for row in db.execute(
-                "SELECT * FROM runs WHERE status='finished'"
-            ).fetchall():
-                self._terminal_event(row)
-            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def __exit__(self, *args: object) -> None:
         self.close()

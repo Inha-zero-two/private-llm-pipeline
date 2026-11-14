@@ -40,11 +40,10 @@ with ChatManager("chat.sqlite3") as chats:
 - 실제 서버 재시작 시 `recover_interrupted_runs()`는 이전 실행을 `finished`와
   `RUN_INTERRUPTED`로 종료하고 미응답 동의를 취소한다. 이전 모델 작업을 재개하지 않는다.
   실행 작업을 받기 전에 한 번 호출한다. 다른 서버가 같은 DB로 실행 중일 때 호출하면 안 된다.
-- `close()`는 여러 번 호출할 수 있다. 버전 없는 기존 테이블 또는 지원하지 않는 버전의 DB는
-  `SCHEMA_VERSION` 오류로 열기를 거부하며 기존 데이터를 덮어쓰지 않는다.
-- 스키마 v1은 열 때 v2로 원자적으로 마이그레이션한다. 기존 이벤트 순서를 유지하면서 실행별로
-  번호를 다시 부여하고, 끝난 실행의 종료 이벤트를 보완한다. 엔티티와 실행 기록은 유지한다.
-  마이그레이션 후 이전 이벤트 커서는 재사용하지 않고 처음부터 재전송해야 한다.
+- `close()`는 여러 번 호출할 수 있다.
+- 스키마 버전은 관리하지 않는다. 테이블이 없는 빈 DB에서만 스키마를 만들고, 이미 테이블이 있으면
+  그대로 사용한다. 스키마가 바뀌면 기존 DB 파일(`chat.sqlite3`와 `-wal`·`-shm` 보조 파일)을
+  수동으로 지운 뒤 다시 실행한다.
 
 ## 저장 책임과 인터페이스
 
@@ -137,7 +136,7 @@ Main은 질문 저장·실행 생성 중 취소돼도 생성 작업의 두 ID를
 다른 채팅의 메시지·개인정보를 연결하려 하면 저장을 취소한다.
 
 `StorageError.code`는 `NOT_FOUND`, `CHAT_RUNNING`, `RUN_FINISHED`, `CONSENT_PENDING`,
-`NO_PENDING_CONSENT`, `QUERY_FINISHED`, `SCHEMA_VERSION`을 구분한다. HTTP 상태로의 변환은 API 계층의 책임이다.
+`NO_PENDING_CONSENT`, `QUERY_FINISHED`를 구분한다. HTTP 상태로의 변환은 API 계층의 책임이다.
 
 ## 후속 작업
 
