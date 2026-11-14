@@ -2,7 +2,7 @@
   flex-shrink: 0;
   max-height: 65%;
   overflow-y: auto;
-  width: 100%;
+  width: min(100%, var(--content-w));
   max-width: var(--content-w);
   margin: 0 auto;
   padding: 0 16px 12px;
