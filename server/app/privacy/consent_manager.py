@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from app.models.consent_results import (
     ConsentDecision,
-    ConsentInterpretation,
     ConsentMessage,
     ConsentReply,
     ConsentResult,
@@ -20,7 +19,6 @@ from app.models.consent_results import (
 from app.models.enums import PromptIdx
 from app.models.llm_results import ConsentText
 from app.privacy.pd_detector import CATEGORY_LABEL, PDTable
-from app.runtime.local_llm_runner import RunnerBusyError
 
 if TYPE_CHECKING:
     from app.models.schemas import ConsentRequest
@@ -29,6 +27,15 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 RunId = int | str
 EmitFn = Callable[[str, dict[str, Any], int], Awaitable[None]]
+
+# 화면의 빠른 응답 버튼이 보내는 문장. 답이 정해져 있으므로 모델을 부르지 않는다.
+# web/src/components/ConsentPrompt.tsx의 QUICK_ANSWERS와 같은 문장이어야 한다.
+QUICK_ANSWERS: dict[str, bool] = {
+    "모두 공개해도 돼": True,
+    "모두 공개하지 마": False,
+}
+# 모델이 결정을 하나도 고르지 못했을 때 화면에 보여 줄 고정 안내
+UNCLEAR_MESSAGE = "공개할 정보를 명확히 답해 주세요."
 
 
 class _ConsentStore(Protocol):
@@ -143,7 +150,7 @@ class ConsentManager:
                 )
             ):
                 text = parsed
-        except (ConnectionError, TimeoutError, RunnerBusyError):
+        except (ConnectionError, TimeoutError):
             pass
         return ConsentMessage(run_id=run_id, items=items, **text.model_dump())
 
@@ -222,11 +229,8 @@ class ConsentManager:
             return pending
 
     async def receive(self, run_id: RunId, consent_id: int, text: str) -> ConsentReply:
-        """API-08 진입점. 모델 의미 판단 후 ID·중복·결과 형식을 검증한다."""
-        try:
-            return await self._settle(self._receive(run_id, consent_id, text))
-        except RunnerBusyError as error:
-            raise ConnectionError("로컬 LLM이 다른 요청을 처리 중입니다.") from error
+        """API-08 진입점. 빠른 응답 버튼은 바로, 그 밖의 자연어는 모델로 해석한다."""
+        return await self._settle(self._receive(run_id, consent_id, text))
 
     async def _receive(self, run_id: RunId, consent_id: int, text: str) -> ConsentReply:
         if type(consent_id) is not int or not isinstance(text, str) or not text.strip():
@@ -242,45 +246,18 @@ class ConsentManager:
                 raise NoPendingConsentError("현재 응답할 수 있는 동의 요청이 아닙니다.")
             pending.interpreting = True
         try:
-            parsed, ok, *_, reason = await asyncio.to_thread(
-                self._runner.request,
-                run_id,
-                json.dumps(
-                    {
-                        "items": [
-                            i.model_dump(by_alias=True) for i in pending.message.items
-                        ],
-                        "text": text,
-                    },
-                    ensure_ascii=False,
-                ),
-                PromptIdx.INTERPRET_CONSENT,
-                None,
-                use_context=False,
+            selected, unavailable = await self._interpret(
+                run_id, pending.message.items, text
             )
             async with self._lock:
                 if self._pending.get(run_id) is not pending or pending.cancelled:
                     raise NoPendingConsentError(
                         "동의 요청이 취소되거나 종료되었습니다."
                     )
-                if reason == "unavailable":
+                if unavailable:
                     raise ConnectionError("로컬 LLM에 동의 해석을 요청하지 못했습니다.")
-                if (
-                    not ok
-                    or not isinstance(parsed, ConsentInterpretation)
-                    or not parsed.ok
-                    or not parsed.decisions
-                ):
-                    return ConsentReply(
-                        ok=False, message="공개할 정보를 명확히 답해 주세요."
-                    )
-                requested = {item.pd_id for item in pending.message.items}
-                ids = [d.pd_id for d in parsed.decisions]
-                if len(ids) != len(set(ids)) or not set(ids) <= requested:
-                    return ConsentReply(
-                        ok=False, message="공개할 정보를 명확히 답해 주세요."
-                    )
-                selected = {d.pd_id: d.allow for d in parsed.decisions}
+                if selected is None:
+                    return ConsentReply(ok=False, message=UNCLEAR_MESSAGE)
                 decisions = [
                     ConsentDecision(pd_id=i.pd_id, allow=selected.get(i.pd_id, False))
                     for i in pending.message.items
@@ -314,10 +291,47 @@ class ConsentManager:
                 self._pending.pop(run_id)
                 pending.future.set_result(result)
                 return ConsentReply(
-                    ok=True, decisions=decisions, message=parsed.message
+                    ok=True,
+                    decisions=decisions,
+                    message=_describe(pending.message.items, decisions),
                 )
         finally:
             pending.interpreting = False
+
+    async def _interpret(
+        self, run_id: RunId, items: list[ConsentTarget], text: str
+    ) -> tuple[dict[int, bool] | None, bool]:
+        """응답을 {pd_id: 허용 여부}로 바꾼다. (결정, 모델 장애 여부)를 반환한다.
+
+        빠른 응답 버튼의 문장은 모델 없이 전체 허용·전체 거절로 처리한다.
+        모델이 결정을 고르지 못했거나 ID가 잘못됐으면 결정은 None(해석 실패)이다.
+        언급하지 않은 항목은 호출자가 금지로 채운다.
+        """
+        quick = QUICK_ANSWERS.get(text.strip())
+        if quick is not None:
+            return {item.pd_id: quick for item in items}, False
+        parsed, ok, *_, reason = await asyncio.to_thread(
+            self._runner.request,
+            run_id,
+            json.dumps(
+                {
+                    "items": [i.model_dump(by_alias=True) for i in items],
+                    "text": text,
+                },
+                ensure_ascii=False,
+            ),
+            PromptIdx.INTERPRET_CONSENT,
+            None,
+            use_context=False,
+        )
+        if reason == "unavailable":
+            return None, True
+        if not ok or not isinstance(parsed, list) or not parsed:
+            return None, False
+        ids = [d.pd_id for d in parsed]
+        if len(ids) != len(set(ids)) or not set(ids) <= {i.pd_id for i in items}:
+            return None, False
+        return {d.pd_id: d.allow for d in parsed}, False
 
     def apply(
         self,
@@ -391,3 +405,15 @@ class ConsentManager:
     async def get_pending(self, run_id: RunId) -> ConsentRequest | None:
         """SSE 재접속의 대기 요청 복원은 DB에 저장한 요청을 기준으로 한다."""
         return await self._io(self._store.get_pending_consent, run_id)
+
+
+def _describe(items: list[ConsentTarget], decisions: list[ConsentDecision]) -> str:
+    """확정된 결정으로 화면 안내 문구를 만든다. 모델에 문장을 쓰게 하지 않는다."""
+    allowed = {d.pd_id for d in decisions if d.allow}
+    shown = [i.text for i in items if i.pd_id in allowed]
+    hidden = [i.text for i in items if i.pd_id not in allowed]
+    if not hidden:
+        return "모든 항목을 이번 질문에만 공개합니다."
+    if not shown:
+        return "모든 항목을 공개하지 않습니다."
+    return f"공개: {', '.join(shown)} · 비공개: {', '.join(hidden)}"

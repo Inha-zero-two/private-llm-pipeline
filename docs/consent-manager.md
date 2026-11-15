@@ -18,7 +18,7 @@ consent_manager = ConsentManager(chat_manager, runner, emit=send_event)
 | --- | --- |
 | `build_message(run_id, consent_items, need, pd_table)` | 아직 허용되지 않았고 이번 실행에서 거절하지 않은 항목의 안내를 만든다. 항목이 없으면 None, 모델 생성 실패 시 고정 안내를 반환한다. |
 | `await request(message)` | DB 저장으로 consent_id를 발급하고 요청 이벤트를 저장·전달한 뒤 사용자 응답까지 기다린다. 자동 응답과 대기 시간 제한은 없다. |
-| `await receive(run_id, consent_id, text)` | 자연어를 로컬 모델로 해석하고 요청 항목의 결정을 저장·발행한다. 성공 시 request의 대기를 풀어 실행을 재개한다. |
+| `await receive(run_id, consent_id, text)` | 빠른 응답 버튼 문장은 바로, 그 밖의 자연어는 로컬 모델로 해석해 요청 항목의 결정을 저장·발행한다. 성공 시 request의 대기를 풀어 실행을 재개한다. |
 | `apply(result, message, pd_table)` | 이 인스턴스에서 확정한 결과만 메모리 테이블에 적용한다. 허용은 consent, 거절은 denied로 표시한다. |
 | `await cancel(run_id)` | 진행 중인 해석 결과를 무효화하고 취소를 저장·발행한다. request의 대기는 CancelledError로 종료한다. |
 | `await release(run_id, pd_table)` | 변경한 항목을 원래 allowed·allowed_by로 복구하고 남은 대기를 취소한다. 반복 호출할 수 있다. |
@@ -33,10 +33,14 @@ consent_manager = ConsentManager(chat_manager, runner, emit=send_event)
 `INTERPRET_CONSENT`는 별도 작업으로 추가했다. 기존 프롬프트 번호 0~12는 유지하고 13에 등록한다. 입력은 요청의 items와 사용자 text이며 이전 대화는 사용하지 않는다.
 
 ```json
-{"ok":true,"decisions":[{"pdId":11,"allow":true}],"message":"나이는 공개하고 직장은 공개하지 않습니다."}
+{"decisions":[{"pdId":11,"allow":true}]}
 ```
 
-모델은 명확히 언급한 항목만 반환한다. 전체 허용·전체 거절은 모든 요청 항목을 반환한다. 서버는 미언급 항목에 false를 채워 요청 항목마다 정확히 하나의 결정을 만든다. 모호한 응답은 `{"ok":false,"decisions":[],"message":"공개할 정보를 명확히 답해 주세요."}`다.
+모델 출력은 결정 목록 한 가지 형식뿐이다. 성공 여부(`ok`)와 안내 문장(`message`)은 모델이 만들지 않는다. 출력을 짧게 유지해 해석 시간을 줄이기 위해서다. 모델은 명확히 언급한 항목만 반환하고, 모호한 응답은 빈 목록 `{"decisions":[]}`을 반환한다. 서버는 미언급 항목에 false를 채워 요청 항목마다 정확히 하나의 결정을 만든다. 프롬프트는 소형 모델이 따르기 쉽도록 영어와 긍정형 지시(“~할 때 ~를 출력한다”)로 작성했다.
+
+화면의 빠른 응답 버튼(`모두 공개해도 돼`, `모두 공개하지 마`)이 보내는 문장은 답이 정해져 있으므로 모델을 부르지 않고 바로 전체 허용·전체 거절로 처리한다. 문장은 `consent_manager.QUICK_ANSWERS`에 있으며 `web/src/components/ConsentPrompt.tsx`의 `QUICK_ANSWERS`와 같아야 한다. 정확히 같은 문장만 해당하며, 그 밖의 입력에서 키워드로 허용을 추정하지 않는다.
+
+API-08 응답의 `message`는 확정된 결정으로 서버가 만든다. 예: `공개: 27세 · 비공개: 가상기업A`, 모두 허용이면 `모든 항목을 이번 질문에만 공개합니다.` 해석 실패 안내는 고정 문구 `공개할 정보를 명확히 답해 주세요.`다.
 
 형식 오류, 빈 결정, 중복 ID, 요청에 없는 ID는 해석 실패다. 빈 사용자 입력은 검증 오류다. 해석 실패에는 결과 이벤트를 보내거나 실행을 재개하지 않는다. 수정한 응답을 다시 제출할 수 있다. 허용 여부의 의미 판단은 로컬 모델이 담당하며 서버는 키워드로 허용을 추정하지 않는다.
 
@@ -58,7 +62,7 @@ return reply.model_dump(by_alias=True, exclude_none=True)
 | ConnectionError / TimeoutError | 503 LOCAL_LLM_UNAVAILABLE, 대기 유지 |
 | 저장 실패 등 그 밖의 예외 | 500 INTERNAL_ERROR, 기록과 스트림을 조회하여 상태 확인 |
 
-Runner의 요청 충돌은 `RunnerBusyError`로 구분하여 503에 해당하는 ConnectionError로 전달한다. 연결·수신 실패는 Runner의 `unavailable`, 출력 형식 실패는 `parse_failed`로 구분한다. 의미 해석 실패와 모델 장애를 같은 자동 거절로 처리하지 않는다.
+Runner의 요청 대기·충돌 처리는 PR #35의 요청 대기열을 따른다. 대기 시간 초과·종료는 Runner가 `ConnectionError`의 하위 종류로 전달하므로 그대로 503이 된다. 연결·수신 실패는 Runner의 `unavailable`(PR #35), 출력 형식 실패는 `parse_failed`로 구분한다. 이 브랜치는 Runner를 수정하지 않는다. 의미 해석 실패와 모델 장애를 같은 자동 거절로 처리하지 않는다.
 
 요청·결과는 ChatManager에 저장하고 `log_event()`로 발급한 ID를 `emit(event, data, event_id)`에 그대로 전달한다. payload는 API-06의 camelCase 필드와 일치한다. 콜백은 이미 저장한 이벤트를 다시 저장하지 않으며, 실행별 전송 큐를 선택하도록 구성한다. 연결 끊김과 전송 시간 초과는 저장된 이벤트의 재전송으로 복구한다. 결과 이벤트 전달을 시도한 후에 request의 대기를 푼다.
 

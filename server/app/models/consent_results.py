@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
 
@@ -37,14 +37,6 @@ class ConsentMessage(ConsentModel):
     purpose: str
     benefit: str
     risk: str
-
-
-class ConsentInterpretation(ConsentModel):
-    """명확한 응답에서 언급된 항목만 반환. 미언급 항목은 서버에서 금지한다."""
-
-    ok: bool
-    decisions: list[ConsentDecision]
-    message: str = Field(min_length=1)
 
 
 class ConsentResult(ConsentModel):
