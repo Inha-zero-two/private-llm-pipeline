@@ -21,8 +21,9 @@ privacy.apply_to_table(run_id, pd_table)
 - `save(text)`는 해석 후 `save_setting(text, rules)`을 호출한다. 저장 성공 후에만 현재
   설정을 교체한다. 해석 실패는 `SaveResult(ok=False, rules=기존 규칙, message=수정 안내)`이며
   저장하지 않는다. `SaveResult`는 `app/models/privacy_results.py`에 있다.
-- 명시적 의미 해석 실패는 모델의 `RuleParseFailure`로 전달된다. 형식·길이·입력 예산 실패도
-  기존 설정을 보존한 `ok=False`다. 호출·수신 장애(`unavailable`)는 `ConnectionError`,
+- 내용이 있는 설정문에서 모델이 규칙을 하나도 찾지 못하면(`{"rules":[]}`) 해석 실패다.
+  안내 문구는 모델이 만들지 않고 모듈의 고정 문구(`UNCLEAR_MESSAGE`)를 쓴다. 형식·길이·입력
+  예산 실패도 같은 안내와 함께 기존 설정을 보존한 `ok=False`다. 호출·수신 장애(`unavailable`)는 `ConnectionError`,
   중지는 `InterruptedError`, 저장·조회 오류는 원래 예외를 전달한다. API 계층은 연결 장애를
   `503 LOCAL_LLM_UNAVAILABLE`, 저장·조회 오류를 `500 INTERNAL_ERROR`로 매핑한다.
 - `load(setting_id=None)`은 최신 또는 지정된 과거 설정 전체를 조회한다. 과거 설정 조회는
@@ -65,9 +66,10 @@ privacy.apply_to_table(run_id, pd_table)
 
 `PARSE_RULES`는 표현된 허용·금지를 보존한다. 같은 대상에 허용·금지가 함께 있어도 저장하며
 적용 시 모델이 금지를 선택한다. 조건부 공개처럼 target/scope/action으로
-표현할 수 없는 요청, 대상이나 행동이 불명확한 요청, 설정과 무관한 내용은 부분 저장하지 않고
-`{"ok":false,"rules":[],"message":"수정 안내"}`를 반환한다. 명시적 초기화는 빈 규칙 목록을
-정상 반환한다. 프롬프트 버전은 `0.4`다.
+표현할 수 없는 요청, 대상이나 행동이 불명확한 요청, 설정과 무관한 내용은 빈 목록
+`{"rules":[]}`을 반환한다. 출력 모양은 성공·실패 모두 `{"rules":[...]}` 하나이며, 실패 판단과
+안내는 PrivacySettings가 맡는다. 따라서 Parser·Runner에는 이 작업만을 위한 예외 처리가 없다.
+설정 초기화는 모델에 묻지 않고 빈 설정문을 저장하는 것으로만 한다. 프롬프트 버전은 `0.4`다.
 
 `MATCH_RULES`는 항목별로 **최종 적용할 규칙 하나** 또는 미대응을 반환한다.
 각 `RuleMatch.rules`는 `[규칙 인덱스]` 또는 `[]`다. 모델이 다음 정책을 적용한다.
@@ -86,6 +88,6 @@ privacy.apply_to_table(run_id, pd_table)
 ## 검증
 
 저장소 컨벤션에 따라 신규 테스트는 저장소 외부에 작성한다. 저장소 대역과 스크립트 모델로
-설정 보존·복원, 실행 고정, 기본 금지, 개인정보 인덱스 대응, 저장 오류, Parser·Runner의
-해석 불가·형식 재시도·호출 장애 분리를 확인한다. 실제 DB 구현 검증은 #24의 책임이며 실제
+설정 보존·복원, 실행 고정, 기본 금지, 개인정보 인덱스 대응, 저장 오류, 빈 규칙의 해석 실패
+처리, 형식 재시도·호출 장애 분리를 확인한다. 실제 DB 구현 검증은 #24의 책임이며 실제
 모델의 의미 판단 품질은 별도 모델 평가가 필요하다.

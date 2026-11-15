@@ -11,7 +11,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from ..models.enums import PromptIdx
-from ..models.llm_results import ParsedRequestResult, RequestResult, RuleParseFailure
+from ..models.llm_results import ParsedRequestResult, RequestResult
 from .local_res_parser import OutputFormatError, parser
 
 if TYPE_CHECKING:
@@ -407,7 +407,6 @@ class LocalLLMRunner:
         중지 요청은 재시도 없이 반환. 타임아웃 뒤에는 이전 수신 정리 후 다음 요청 진행.
         성공 시 (파싱 결과, True, 총 입력 토큰 수, 총 출력 토큰 수, 종료 사유) 반환.
         3회 모두 실패하면 마지막 실패에 따라 length_failed, parse_failed, unavailable 반환.
-        PARSE_RULES의 명시적 해석 불가는 interpretation_failed로 재시도 없이 반환.
         입력 설정이나 화면 출력 함수의 오류는 즉시 전달.
         프롬프트 미로드(RuntimeError)·미등록 키(KeyError)는 모델 재시도 없이 즉시 전달.
         """
@@ -535,16 +534,6 @@ class LocalLLMRunner:
                             )
                         continue
                     format_valid = True
-                    if isinstance(parsed, RuleParseFailure):
-                        if stop_signal.is_set():
-                            return None, False, input_tokens, output_tokens, "stopped"
-                        return (
-                            parsed,
-                            False,
-                            input_tokens,
-                            output_tokens,
-                            "interpretation_failed",
-                        )
                 finally:
                     # 요청마다 새 입력, 모델이 생성한 답변 및 형식 검사 결과로 로그 함수 호출
                     self._log_call(

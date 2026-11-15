@@ -28,14 +28,6 @@ class RuleMatch(BaseModel):
     rules: list[Index]  # 최종 적용 규칙 하나의 번호 또는 빈 목록. 호출자가 개수 검증
 
 
-class RuleParseFailure(BaseModel):
-    """형식 오류와 구분하는 모델의 명시적인 설정 해석 불가 응답."""
-
-    ok: Literal[False]
-    rules: Annotated[list[Rule], Field(max_length=0)]
-    message: Annotated[str, Field(min_length=1)]
-
-
 class ConsentText(BaseModel):
     purpose: str  # 개인정보 사용 목적
     benefit: str  # 동의 시 기대 효과
@@ -50,7 +42,6 @@ ParsedResult = (
     | list[int]
     | list[Rule]
     | list[RuleMatch]
-    | RuleParseFailure
     | ConsentText
 )
 # 직접 요청한 결과: 답변, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유

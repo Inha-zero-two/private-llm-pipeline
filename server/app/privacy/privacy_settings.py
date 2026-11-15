@@ -7,13 +7,19 @@ from threading import Lock
 from typing import TYPE_CHECKING, Protocol
 
 from app.models.enums import PromptIdx
-from app.models.llm_results import Rule, RuleMatch, RuleParseFailure
+from app.models.llm_results import Rule, RuleMatch
 from app.models.privacy_results import SaveResult
 from app.privacy.pd_detector import PDTable
 
 if TYPE_CHECKING:
     from app.models.schemas import PrivacySetting
     from app.runtime.local_llm_runner import LocalLLMRunner
+
+# 설정문을 규칙으로 바꾸지 못했을 때 화면에 보여 줄 고정 안내
+UNCLEAR_MESSAGE = (
+    "공개 허용 대상을 확인하지 못했습니다. "
+    "공개할 정보와 허용 여부를 구체적으로 작성해 주세요."
+)
 
 
 class _RunChat(Protocol):
@@ -69,7 +75,10 @@ class PrivacySettings:
             return [rule.model_copy(deep=True) for rule in setting.rules]
 
     def parse_rules(self, text: str) -> list[Rule]:
-        """모델의 규칙을 반환한다. 빈 입력은 명시적인 설정 초기화다."""
+        """모델의 규칙을 반환한다. 빈 입력은 모델 호출 없이 설정 초기화다.
+
+        내용이 있는데 규칙을 하나도 찾지 못하면 RulesInterpretationError.
+        """
         if not isinstance(text, str):
             raise TypeError("text는 문자열이어야 합니다")
         if not text.strip():
@@ -85,17 +94,17 @@ class PrivacySettings:
             raise ConnectionError("로컬 LLM에 설정 해석을 요청하지 못했습니다.")
         if reason == "stopped":
             raise InterruptedError("설정 해석이 중지되었습니다.")
-        if not ok:
-            message = (
-                result.message
-                if isinstance(result, RuleParseFailure)
-                else "공개 허용 대상을 확인하지 못했습니다. 설정문을 구체적으로 작성해 주세요."
+        # 내용이 있는 설정문에서 규칙을 하나도 찾지 못하면 해석 실패다.
+        # 안내 문구는 모델이 만들지 않고 여기서 고정한다. (초기화는 빈 입력으로만)
+        if (
+            not ok
+            or not isinstance(result, list)
+            or not result
+            or not all(
+                isinstance(rule, Rule) and rule.target.strip() for rule in result
             )
-            raise RulesInterpretationError(message)
-        if not isinstance(result, list) or not all(
-            isinstance(rule, Rule) and rule.target.strip() for rule in result
         ):
-            raise RulesInterpretationError("설정 해석 결과 형식이 올바르지 않습니다.")
+            raise RulesInterpretationError(UNCLEAR_MESSAGE)
         return [rule.model_copy(deep=True) for rule in result]
 
     def save(self, text: str) -> SaveResult:
