@@ -142,6 +142,8 @@ class FrontierClient:
         self._contexts: dict[str, list[dict[str, str]]] = {}
         self._rounds: dict[str, int] = {}  # 실행 ID별 질의 횟수
         self._stop_events: dict[str, Event] = {}  # 진행 중인 전송의 중지 신호
+        # stop()이 불린 실행 ID. 중지 뒤에 시작된 send()도 막으려고 clear()까지 유지
+        self._stopped: set[str] = set()
         self._clients: dict[str, httpx.Client] = {}  # 진행 중인 전송의 HTTP 연결
 
     def _headers(self) -> dict[str, str]:
@@ -200,12 +202,33 @@ class FrontierClient:
         """
         if not self._api_key:
             raise FrontierError("FRONTIER_API_KEY가 설정되지 않음")
-        context_mode = self.decide_context(run_id, request_text)
+        # 중지 신호는 로컬 판단(decide_context)보다 먼저 등록해야 그동안의 stop()도 받음
         stop_event = Event()
         with self._lock:
             if run_id in self._stop_events:
                 raise RuntimeError("같은 실행의 전송이 이미 진행 중")
+            if run_id in self._stopped:
+                raise FrontierCancelledError(run_id)
             self._stop_events[run_id] = stop_event
+        try:
+            return self._send(run_id, request_text, pd_table, stop_event)
+        finally:
+            with self._lock:
+                self._stop_events.pop(run_id, None)
+
+    def _send(
+        self,
+        run_id: str,
+        request_text: str,
+        pd_table: list[PDItem] | None,
+        stop_event: Event,
+    ) -> FrontierReply:
+        """send()의 본문. 중지 신호 등록·해제는 send()가 맡음."""
+        context_mode = self.decide_context(run_id, request_text)
+        if stop_event.is_set():
+            # 판단 중에 중지됨. 아직 보낸 것이 없으므로 질의 기록도 남기지 않음
+            raise FrontierCancelledError(run_id)
+        with self._lock:
             if context_mode == "reset":
                 self._contexts[run_id] = []
             history = list(self._contexts.get(run_id, []))
@@ -224,8 +247,6 @@ class FrontierClient:
             status = "cancelled"
             raise
         finally:
-            with self._lock:
-                self._stop_events.pop(run_id, None)
             input_tokens = usage.get("prompt_tokens") if usage else None
             output_tokens = usage.get("completion_tokens") if usage else None
             cost = self._cost(input_tokens, output_tokens)
@@ -248,13 +269,15 @@ class FrontierClient:
             )
         assert answer is not None
         with self._lock:
-            # 성공한 질의만 다음 판단에 쓸 대화로 저장
-            self._contexts.setdefault(run_id, []).extend(
-                [
-                    {"role": "user", "content": request_text},
-                    {"role": "assistant", "content": answer},
-                ]
-            )
+            # 성공한 질의만 다음 판단에 쓸 대화로 저장. 중지된 실행은 clear()가 먼저
+            # 지웠을 수 있으므로 다시 만들지 않음
+            if not stop_event.is_set():
+                self._contexts.setdefault(run_id, []).extend(
+                    [
+                        {"role": "user", "content": request_text},
+                        {"role": "assistant", "content": answer},
+                    ]
+                )
         return FrontierReply(
             answer=answer,
             cost=cost,
@@ -314,6 +337,9 @@ class FrontierClient:
         Main은 send()를 스레드에서 부르므로 이 함수가 중지 신호를 직접 확인해야
         stop(run_id) 즉시 반환 가능.
         """
+        if stop_event.is_set():
+            # 스레드를 띄우면 요청이 바로 나가므로 그 전에 확인
+            raise FrontierCancelledError(run_id)
         client = httpx.Client(timeout=self._timeout, transport=self._transport)
         with self._lock:
             self._clients[run_id] = client
@@ -365,9 +391,11 @@ class FrontierClient:
         """실행 ID의 진행 중인 전송을 취소하고 즉시 반환. 다른 스레드에서 호출 가능.
 
         진행 중인 HTTP 연결을 닫아 요청을 끊음. 이미 서버에 도착한 요청의 비용은
-        게이트웨이에서 차감될 수 있음.
+        게이트웨이에서 차감될 수 있음. 진행 중인 전송이 없어도 기록해 두어, 이후
+        clear(run_id) 전까지 같은 실행의 send()는 보내지 않고 FrontierCancelledError.
         """
         with self._lock:
+            self._stopped.add(run_id)
             event = self._stop_events.get(run_id)
             client = self._clients.get(run_id)
         if event is not None:
@@ -380,6 +408,7 @@ class FrontierClient:
         with self._lock:
             self._contexts.pop(run_id, None)
             self._rounds.pop(run_id, None)
+            self._stopped.discard(run_id)
 
     def _log_query(self, query: FrontierQuery) -> None:
         """질의 기록 저장. DB 저장은 ChatManager 구현 후 연결.
