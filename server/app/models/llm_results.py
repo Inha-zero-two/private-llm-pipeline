@@ -2,9 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
-
-from ..pipeline.planner import Plan
+from pydantic import BaseModel, ConfigDict, Field
 
 Index = Annotated[int, Field(ge=0)]
 ContextMode = Literal["keep", "reset"]
@@ -28,17 +26,42 @@ class RuleMatch(BaseModel):
     rules: list[Index]  # 일치하는 규칙 번호 목록
 
 
+class JudgeResult(BaseModel):
+    """JUDGE 모델 출력. need는 이름 대신 [필요 정보]의 0부터 시작하는 번호로 고른다.
+
+    번호가 필요 정보 목록 범위 안인지 확인하고 이름으로 바꾸는 일은 Planner.judge가 한다.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True, strict=True)
+
+    enough: bool  # 지금 메모로 답할 수 있는지
+    need_consent: bool = Field(default=False, alias="needConsent")  # 추가 동의 필요
+    consent_items: list[int] = Field(default_factory=list, alias="consentItems")
+    need_idx: list[Index] = Field(default_factory=list, alias="needIdx")  # 남은 need
+
+
 class ConsentText(BaseModel):
     purpose: str  # 개인정보 사용 목적
     benefit: str  # 동의 시 기대 효과
     risk: str  # 동의 시 예상 위험
 
 
+class FrontierReply(BaseModel):
+    # FrontierClient.send() 결과. Main은 answer·cost 사용
+    answer: str  # 프론티어 답변
+    cost: float  # 이번 질의 비용(달러)
+    input_tokens: int | None  # 입력 토큰 수. 사용량을 받지 못하면 None
+    output_tokens: int | None  # 출력 토큰 수
+    elapsed_ms: int  # 재시도를 포함한 소요 시간(ms)
+    context_mode: ContextMode  # 이전 프론티어 대화 유지(keep)·초기화(reset)
+    model: str  # 호출한 모델 이름
+
+
 ParsedResult = (
     str
     | list[DetectedItem]
     | list[str]
-    | Plan
+    | JudgeResult
     | list[int]
     | list[Rule]
     | list[RuleMatch]

@@ -12,6 +12,7 @@ import pytest
 from app.data.prompt_manager import PromptManager
 from app.main import Main
 from app.models.enums import EndReason, PromptIdx
+from app.models.llm_results import JudgeResult
 from app.pipeline.planner import Plan, Planner
 from app.privacy.pd_detector import PDDetector, PDItem
 from app.runtime.local_llm_runner import LocalLLMRunner
@@ -67,7 +68,7 @@ def test_detector_and_planner_use_prompts_and_parser(
             '{"items": [{"text": "김민수", "category": 0}]}',
             '{"needs": ["지원동기 구성"]}',
             '{"enough": false, "needConsent": true, '
-            '"consentItems": [1, 2, 3, 999, 1], "need": [" 지원동기 구성 "]}',
+            '"consentItems": [1, 2, 3, 999, 1], "needIdx": [0]}',
         ]
     )
     question = "김민수의 지원동기를 작성해 줘"
@@ -80,7 +81,8 @@ def test_detector_and_planner_use_prompts_and_parser(
         PDItem(pd_id=2, text="허용 항목", category=2, allowed=True),
         PDItem(pd_id=3, text="거부 항목", category=2, allowed_by="denied"),
     ]
-    plan = planner.judge(question, "Answers:", table, "run-1", "chat-1")
+    needs = planner.list_needs(question, "run-1", "chat-1", needs=["지원동기 구성"])
+    plan = planner.judge(question, "Answers:", table, "run-1", "chat-1", needs)
     assert type(plan) is Plan
     assert not plan.enough and plan.need_consent
     assert plan.consent_items == [1]
@@ -99,23 +101,29 @@ def test_detector_and_planner_use_prompts_and_parser(
     ] * 3
 
 
-def test_parser_uses_planner_plan_and_requires_all_model_output_fields() -> None:
+def test_parser_uses_judge_result_and_requires_all_model_output_fields() -> None:
     """완전한 별칭·필드명 입력은 허용하고 필수 필드 누락과 잘못된 자료형은 거부한다."""
     result = parser(
-        '{"enough": true, "needConsent": false, "consentItems": [], "need": []}',
+        '{"enough": false, "needConsent": false, "consentItems": [], "needIdx": [1]}',
         PromptIdx.JUDGE,
     )
-    assert type(result) is Plan
+    assert type(result) is JudgeResult
+    assert result.need_idx == [1]
     assert Plan(enough=True).need == []  # Planner 직접 사용 시 기본값 유지
     complete = result.model_dump()
     assert parser(json.dumps(complete), PromptIdx.JUDGE) == result
-    for field in Plan.model_fields:
+    for field in JudgeResult.model_fields:
         incomplete = {key: value for key, value in complete.items() if key != field}
         with pytest.raises(OutputFormatError):
             parser(json.dumps(incomplete), PromptIdx.JUDGE)
     with pytest.raises(OutputFormatError):
         parser(
-            '{"enough": "true", "needConsent": false, "consentItems": [], "need": []}',
+            '{"enough": "true", "needConsent": false, "consentItems": [], "needIdx": []}',
+            PromptIdx.JUDGE,
+        )
+    with pytest.raises(OutputFormatError):  # 번호는 0 이상의 정수
+        parser(
+            '{"enough": false, "needConsent": false, "consentItems": [], "needIdx": [-1]}',
             PromptIdx.JUDGE,
         )
 
@@ -197,7 +205,7 @@ def test_main_calls_connected_modules(
         [
             '{"items": []}',
             '{"needs": ["설명"]}',
-            '{"enough": true, "needConsent": false, "consentItems": [], "need": []}',
+            '{"enough": true, "needConsent": false, "consentItems": [], "needIdx": []}',
         ]
     )
     # dev에 없는 모듈만 대역으로 두어 Main → 실제 검출·분류·판단 경로 검사
