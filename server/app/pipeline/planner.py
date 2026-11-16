@@ -7,9 +7,13 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import PromptIdx
+from app.models.llm_results import JudgeResult
 
 if TYPE_CHECKING:
     from app.runtime.local_llm_runner import LocalLLMRunner
+
+# judge 출력의 need 번호(needIdx)가 필요 정보 목록 범위를 벗어났을 때 다시 묻는 횟수
+NEED_RETRIES = 2
 
 
 class Plan(BaseModel):
@@ -67,11 +71,17 @@ class Planner:
         pd_table: list[Any],
         run_id: str = "",
         chat_id: str | None = None,
+        needs: list[str] | None = None,
         *,
         raw_plan: Any = None,
         ok: bool = True,
     ) -> Plan:
-        """질문, 메모, 개인정보 테이블을 보고 답변 가능 여부와 다음 행동(Plan) 판단."""
+        """질문, 메모, 개인정보 테이블을 보고 답변 가능 여부와 다음 행동(Plan) 판단.
+
+        needs: list_needs()로 정해 메모에 등록한 필요 정보 목록. 0부터 번호를 붙여
+        [필요 정보]로 입력에 넣고, 모델이 고른 번호(needIdx)를 이 목록의 문자열로 바꿔
+        Plan.need로 돌려준다. (MemoManager.add_answer가 등록된 이름만 받기 때문)
+        """
         # 1. 입력값 자료형과 빈 질문 확인
         if not isinstance(question, str) or not question.strip():
             raise ValueError("질문이 비어 있습니다")
@@ -108,42 +118,52 @@ class Planner:
             ):
                 consent_candidates.add(pd_id)
 
-        # 질문, 메모, 개인정보를 모델 입력 문자열 하나로 합치기
+        # 3. 필요 정보에 0부터 번호를 붙이고 질문·필요 정보·메모·개인정보를 입력 하나로 합치기
+        need_list = list(needs or [])
+        need_text = "\n".join(f"{i}. {n}" for i, n in enumerate(need_list)) or "없음"
         pd_text = "\n".join(pd_lines) if pd_lines else "없음"
-        judge_input = f"[질문]\n{question}\n\n[메모]\n{memo}\n\n[개인정보]\n{pd_text}"
+        judge_input = (
+            f"[질문]\n{question}\n\n[필요 정보]\n{need_text}\n\n"
+            f"[메모]\n{memo}\n\n[개인정보]\n{pd_text}"
+        )
 
-        # 3. 직접 전달한 결과가 없으면 공유 실행기로 판단 요청
-        if raw_plan is None and ok and self._runner is not None:
-            raw_plan, ok, *_ = self._runner.request(
-                run_id, judge_input, PromptIdx.JUDGE, chat_id
-            )
-        if not ok or raw_plan is None:
-            raise RuntimeError("답변 판단에 실패했습니다")
+        # 4. 직접 전달한 결과가 없으면 공유 실행기로 판단 요청.
+        #    목록 범위 밖 번호는 형식 오류로 보고 최대 NEED_RETRIES번 다시 요청한다.
+        asks_model = raw_plan is None and ok and self._runner is not None
+        judged = self._request_judge(run_id, chat_id, judge_input, raw_plan, ok)
+        retries = 0
+        while not _need_idx_in_range(judged, len(need_list)):
+            if not asks_model or retries >= NEED_RETRIES:
+                raise RuntimeError(
+                    "판단 결과의 필요 정보 번호가 목록 범위를 벗어났습니다"
+                )
+            retries += 1
+            judged = self._request_judge(run_id, chat_id, judge_input, None, True)
+        # 번호를 메모에 등록된 need 문자열로 바꾼다 (중복 번호는 한 번만).
+        # 정보가 충분하면 번호를 쓰지 않는다.
+        need = (
+            []
+            if judged.enough
+            else [need_list[i] for i in dict.fromkeys(judged.need_idx)]
+        )
 
-        # 모델 출력이 Plan 필드·자료형에 맞는지 검사
-        try:
-            plan = Plan.model_validate(raw_plan)
-        except (ValueError, TypeError) as exc:
-            raise RuntimeError("판단 결과 형식이 맞지 않습니다") from exc
+        # 5. 물어볼 내용(need)이 비어 있으면 답변 가능(enough=True)으로 보정
+        enough = judged.enough or not need
 
-        # 4. 물어볼 내용(need)이 비어 있으면 답변 가능(enough=True)으로 보정
-        need = [s.strip() for s in plan.need if s.strip()]
-        enough = plan.enough or not need
-
-        # 5. 이미 정보가 충분하면 동의 요청과 질문 목록을 비워 반환
+        # 6. 이미 정보가 충분하면 동의 요청과 질문 목록을 비워 반환
         if enough:
             result = Plan(enough=True, need_consent=False, consent_items=[], need=[])
             # 미구현: 판단 결과 동작 로그 기록 (ChatManager 구현 후 주석 해제)
             # self._chat_manager.log_event(run_id, "judge", result.model_dump())
             return result
 
-        # 6. 이미 허용·거부된 항목은 빼고, 남은 동의 대상이 없으면 need_consent=False로 보정
+        # 7. 이미 허용·거부된 항목은 빼고, 남은 동의 대상이 없으면 need_consent=False로 보정
         consent_items: list[int] = []
-        for pid in plan.consent_items:
+        for pid in judged.consent_items:
             if pid in consent_candidates and pid not in consent_items:
                 consent_items.append(pid)
 
-        need_consent = plan.need_consent and bool(consent_items)
+        need_consent = judged.need_consent and bool(consent_items)
         result = Plan(
             enough=False,
             need_consent=need_consent,
@@ -153,3 +173,30 @@ class Planner:
         # 미구현: 판단 결과 동작 로그 기록 (ChatManager 구현 후 주석 해제)
         # self._chat_manager.log_event(run_id, "judge", result.model_dump())
         return result
+
+    def _request_judge(
+        self,
+        run_id: str,
+        chat_id: str | None,
+        judge_input: str,
+        raw_plan: Any,
+        ok: bool,
+    ) -> JudgeResult:
+        """판단 결과를 모델에 요청(또는 직접 받은 값 사용)하고 JudgeResult 형식을 검사한다."""
+        if raw_plan is None and ok and self._runner is not None:
+            raw_plan, ok, *_ = self._runner.request(
+                run_id, judge_input, PromptIdx.JUDGE, chat_id
+            )
+        if not ok or raw_plan is None:
+            raise RuntimeError("답변 판단에 실패했습니다")
+
+        # 모델 출력이 판단 필드·자료형에 맞는지 검사
+        try:
+            return JudgeResult.model_validate(raw_plan)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("판단 결과 형식이 맞지 않습니다") from exc
+
+
+def _need_idx_in_range(judged: JudgeResult, count: int) -> bool:
+    """정보가 충분하면 번호를 쓰지 않으므로 통과. 아니면 모든 번호가 목록 안이어야 한다."""
+    return judged.enough or all(i < count for i in judged.need_idx)
