@@ -1,7 +1,7 @@
 """FrontierClient 테스트. 실제 게이트웨이 대신 httpx.MockTransport로 응답을 흉내 낸다."""
 
+import json
 from collections.abc import Callable
-from typing import Any
 
 import httpx
 import pytest
@@ -30,11 +30,9 @@ def reply(content: str, prompt_tokens: int, completion_tokens: int) -> httpx.Res
 def make_client(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
-    runner: Any = None,
     base_url: str = "https://gateway.test/v1",
 ) -> FrontierClient:
     return FrontierClient(
-        local_llm_runner=runner,
         api_key="sk-test",
         base_url=base_url,
         env_file=None,
@@ -77,33 +75,52 @@ def test_all_empty_answers_still_record_usage() -> None:
     assert client.last_request.cost > 0
 
 
-class StoppingRunner:
-    """컨텍스트 판단 도중 사용자가 중지한 상황을 흉내 내는 로컬 모델."""
-
-    def __init__(self) -> None:
-        self.client: FrontierClient | None = None
-
-    def request(self, run_id: str, *args: Any) -> tuple[str, bool]:
-        assert self.client is not None
-        self.client.stop(run_id)
-        return "keep", True
+def sent_messages(request: httpx.Request) -> list[dict[str, str]]:
+    return json.loads(request.content)["messages"]
 
 
-def test_stop_during_decide_context_sends_nothing() -> None:
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        (["경력"], ["경력"], "keep"),
+        (["경력", "희망 직무"], ["희망 직무", "경력"], "keep"),  # 순서는 보지 않음
+        (["경력"], ["희망 직무"], "reset"),
+        (["경력", "희망 직무"], ["경력"], "reset"),  # 일부만 겹치면 reset
+        (["경력"], None, "reset"),
+    ],
+)
+def test_keep_context_only_when_need_matches(
+    first: list[str], second: list[str] | None, expected: str
+) -> None:
     posts: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         posts.append(request)
-        return reply("답", 1, 1)
+        return reply(f"답{len(posts)}", 1, 1)
 
-    runner = StoppingRunner()
-    client = make_client(handler, runner=runner)
-    runner.client = client
-    client.send("run-1", "첫 질문")  # 이전 대화가 있어야 로컬 판단을 부름
+    client = make_client(handler)
+    assert client.send("run-1", "첫 질문", need=first).context_mode == "reset"
 
-    with pytest.raises(FrontierCancelledError):
-        client.send("run-1", "두 번째 질문")
-    assert len(posts) == 1
+    result = client.send("run-1", "두 번째 질문", need=second)
+
+    assert result.context_mode == expected
+    contents = [m["content"] for m in sent_messages(posts[1])]
+    assert ("답1" in contents) == (expected == "keep")
+
+
+def test_context_is_not_shared_between_runs() -> None:
+    client = make_client(lambda request: reply("답", 1, 1))
+    client.send("run-1", "질문", need=["경력"])
+
+    assert client.send("run-2", "질문", need=["경력"]).context_mode == "reset"
+
+
+def test_clear_forgets_need() -> None:
+    client = make_client(lambda request: reply("답", 1, 1))
+    client.send("run-1", "질문", need=["경력"])
+    client.clear("run-1")
+
+    assert client.send("run-1", "질문", need=["경력"]).context_mode == "reset"
 
 
 def test_stop_before_send_blocks_until_clear() -> None:

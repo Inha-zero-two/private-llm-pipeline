@@ -137,6 +137,7 @@ class FakeFrontierClient(Recorder):
         self.fail_send = False
         # stop·clear 호출과 run_id. 정리 순서를 보는 log와 섞지 않으려고 따로 기록
         self.calls: list[tuple[str, str]] = []
+        self.sent_needs: list[list[str] | None] = []  # send()가 받은 need
         # 설정하면 send()가 stop()이 불릴 때까지 멈춘다. 전송 중 중지를 흉내 내기 위함
         self.block_send = False
         self.sending = threading.Event()
@@ -146,9 +147,14 @@ class FakeFrontierClient(Recorder):
         return self.online
 
     def send(
-        self, run_id: str, prompt: str, pd_table: list[Any] | None = None
+        self,
+        run_id: str,
+        prompt: str,
+        pd_table: list[Any] | None = None,
+        need: list[str] | None = None,
     ) -> SimpleNamespace:
         self.record("send", prompt)
+        self.sent_needs.append(need)
         if self.block_send:
             self.sending.set()
             self._stopped.wait(5)
@@ -321,6 +327,8 @@ def test_one_round_trip_then_enough() -> None:
     assert names(log).count("send") == 1
     assert ("add_answer", ["경력"], "답") in log
     assert finished_with(log) == EndReason.INFO_ENOUGH
+    # 컨텍스트 유지 판단에 쓰도록 판단 결과의 need를 함께 넘긴다
+    assert frontier.sent_needs == [["경력"]]
     # 실행이 끝나면 그 실행의 프론티어 대화만 지우고, 중지는 부르지 않는다
     assert frontier.calls == [("clear", "run-1")]
 

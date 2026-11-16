@@ -265,7 +265,11 @@ class CannedFrontierClient:
         return True
 
     def send(
-        self, run_id: str, request_text: str, pd_table: PDTable | None = None
+        self,
+        run_id: str,
+        request_text: str,
+        pd_table: PDTable | None = None,
+        need: list[str] | None = None,
     ) -> FrontierReply:
         return FrontierReply(
             "(외부 모델 대역의 정해진 답) 목표를 먼저 정하고, 현재 상황을 정리한 뒤, "

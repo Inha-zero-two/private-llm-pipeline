@@ -353,8 +353,9 @@ class Main:
             # 6) 검사를 통과한 요청문만 프론티어로 보낸다.
             await self._step(run_id, f"외부 모델에 묻는 중 ({frontier_calls + 1}회차)")
             try:
+                # need가 직전 회차와 같을 때만 이전 프론티어 대화를 이어 보낸다.
                 reply = await self._call(
-                    self.frontier_client.send, run_id, request_text, pd_table
+                    self.frontier_client.send, run_id, request_text, pd_table, plan.need
                 )
             except ConnectionError:
                 return EndReason.OFFLINE

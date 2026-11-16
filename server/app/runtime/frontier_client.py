@@ -19,7 +19,6 @@ from ..models.llm_results import ContextMode, FrontierReply
 if TYPE_CHECKING:
     from ..data.prompt_manager import PromptManager
     from ..privacy.pd_detector import PDItem
-    from .local_llm_runner import LocalLLMRunner
 
 # 학교 Bedrock 게이트웨이(OpenAI 호환) 기본 주소와 모델
 DEFAULT_BASE_URL = "https://bedrock.nxtcloud.kr/v1"
@@ -106,7 +105,6 @@ def _add_usage(total: dict[str, int], usage: Any) -> None:
 class FrontierClient:
     def __init__(
         self,
-        local_llm_runner: LocalLLMRunner | None = None,
         prompt_manager: PromptManager | None = None,
         *,
         api_key: str | None = None,
@@ -119,7 +117,6 @@ class FrontierClient:
     ) -> None:
         """프론티어 접속 설정과 실행별 컨텍스트 저장 공간 초기화.
 
-        local_llm_runner: 컨텍스트 유지 판단(DECIDE_CONTEXT)에 쓸 로컬 모델.
         prompt_manager: FRONTIER 시스템 프롬프트를 조회할 관리자.
         api_key·base_url·model을 생략하면 FRONTIER_API_KEY·FRONTIER_BASE_URL·
         FRONTIER_MODEL 환경변수, 없으면 server/.env 파일 값 사용.
@@ -139,16 +136,16 @@ class FrontierClient:
         self._timeout = timeout
         self._max_tokens = max_tokens
         self._transport = transport
-        self.local_llm_runner = local_llm_runner
         self.prompt_manager = prompt_manager
-        # 설계서 변수: 프론티어·컨텍스트 판단에 쓰는 시스템 프롬프트 번호
+        # 설계서 변수: 프론티어 시스템 프롬프트 번호
         self.frontier_sys_prom_idx = PromptIdx.FRONTIER
-        self.context_recognize_sys_prom_idx = PromptIdx.DECIDE_CONTEXT
         # 가장 최근 질의 기록
         self.last_request: FrontierQuery | None = None
         self._lock = Lock()  # 실행별 상태 변경용 잠금
         # 실행 ID별 프론티어 대화 기록(user·assistant 메시지). 실행 사이 공유하지 않음
         self._contexts: dict[str, list[dict[str, str]]] = {}
+        # 실행 ID별로 _contexts의 대화가 다룬 need. 다음 회차 need와 비교해 keep 판단
+        self._context_needs: dict[str, frozenset[str]] = {}
         self._rounds: dict[str, int] = {}  # 실행 ID별 질의 횟수
         self._stop_events: dict[str, Event] = {}  # 진행 중인 전송의 중지 신호
         # stop()이 불린 실행 ID. 중지 뒤에 시작된 send()도 막으려고 clear()까지 유지
@@ -177,42 +174,40 @@ class FrontierClient:
             return False
         return response.status_code == 200
 
-    def decide_context(self, run_id: str, request_text: str) -> ContextMode:
+    def decide_context(self, run_id: str, need: list[str] | None) -> ContextMode:
         """이번 요청에 이전 프론티어 대화를 이어 붙일지(keep) 새로 시작할지(reset) 판단.
 
-        이전 대화가 없으면 모델 호출 없이 reset. 로컬 모델이 없거나 판단에 실패하면
-        개인정보·비용 측면에서 안전한 reset 반환.
+        직전 회차와 need가 완전히 같을 때만 keep. 같은 정보를 다시 묻는 경우라 앞 답을
+        알아야 더 구체적으로 물을 수 있음. need가 다르거나 일부만 겹치면 reset.
+        앞서 받은 답은 메모에 있어 요청문에 반영되므로, 끊어도 잃는 정보가 적고 비용이 줆.
+        설계서는 로컬 모델 판단(DECIDE_CONTEXT)이지만 지연을 줄이려고 need 비교로 대체.
+        need 순서는 보지 않음. 이전 대화나 need가 없으면 reset.
         """
+        if not need:
+            return "reset"
         with self._lock:
-            history = list(self._contexts.get(run_id, []))
-        if not history or self.local_llm_runner is None:
-            return "reset"
-        previous = "\n".join(f"{m['role']}: {m['content']}" for m in history[-2:])
-        input_ = f"Previous exchange:\n{previous}\n\nNew request:\n{request_text}"
-        try:
-            parsed, success, *_ = self.local_llm_runner.request(
-                run_id, input_, self.context_recognize_sys_prom_idx, None
-            )
-        except Exception:
-            return "reset"
-        return "keep" if success and parsed == "keep" else "reset"
+            has_history = bool(self._contexts.get(run_id))
+            previous = self._context_needs.get(run_id)
+        return "keep" if has_history and previous == frozenset(need) else "reset"
 
     def send(
         self,
         run_id: str,
         request_text: str,
         pd_table: list[PDItem] | None = None,
+        need: list[str] | None = None,
     ) -> FrontierReply:
         """누출 검사를 통과한 요청문을 프론티어로 보내고 답변·사용량·비용 반환.
 
         pd_table: 전송 당시 개인정보 허용 상태를 기록할 표.
+        need: 이번 회차에 묻는 정보(Plan.need). 직전 회차와 같을 때만 이전 대화를 붙임.
         일시 오류(429·5xx·네트워크·타임아웃)는 최대 3회 시도.
         키·모델·한도 오류와 재시도 소진은 FrontierError(ConnectionError).
         stop(run_id) 호출 시 즉시 FrontierCancelledError.
         """
         if not self._api_key:
             raise FrontierError("FRONTIER_API_KEY가 설정되지 않음")
-        # 중지 신호는 로컬 판단(decide_context)보다 먼저 등록해야 그동안의 stop()도 받음
+        # 중지 신호는 전송 준비보다 먼저 등록해야 그동안의 stop()도 받음
         stop_event = Event()
         with self._lock:
             if run_id in self._stop_events:
@@ -221,7 +216,7 @@ class FrontierClient:
                 raise FrontierCancelledError(run_id)
             self._stop_events[run_id] = stop_event
         try:
-            return self._send(run_id, request_text, pd_table, stop_event)
+            return self._send(run_id, request_text, pd_table, need, stop_event)
         finally:
             with self._lock:
                 self._stop_events.pop(run_id, None)
@@ -231,16 +226,15 @@ class FrontierClient:
         run_id: str,
         request_text: str,
         pd_table: list[PDItem] | None,
+        need: list[str] | None,
         stop_event: Event,
     ) -> FrontierReply:
         """send()의 본문. 중지 신호 등록·해제는 send()가 맡음."""
-        context_mode = self.decide_context(run_id, request_text)
-        if stop_event.is_set():
-            # 판단 중에 중지됨. 아직 보낸 것이 없으므로 질의 기록도 남기지 않음
-            raise FrontierCancelledError(run_id)
+        context_mode = self.decide_context(run_id, need)
         with self._lock:
             if context_mode == "reset":
                 self._contexts[run_id] = []
+                self._context_needs.pop(run_id, None)
             history = list(self._contexts.get(run_id, []))
             self._rounds[run_id] = self._rounds.get(run_id, 0) + 1
             round_ = self._rounds[run_id]
@@ -290,6 +284,8 @@ class FrontierClient:
                         {"role": "assistant", "content": answer},
                     ]
                 )
+                if need:
+                    self._context_needs[run_id] = frozenset(need)
         return FrontierReply(
             answer=answer,
             cost=cost,
@@ -431,6 +427,7 @@ class FrontierClient:
         """실행이 끝나면 그 실행의 프론티어 대화와 질의 횟수 삭제."""
         with self._lock:
             self._contexts.pop(run_id, None)
+            self._context_needs.pop(run_id, None)
             self._rounds.pop(run_id, None)
             self._stopped.discard(run_id)
 
