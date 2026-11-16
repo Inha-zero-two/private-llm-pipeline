@@ -27,6 +27,8 @@ uv run python -m pytest -q
 
 테스트는 실제 로컬 LLM·프론티어 대신 테스트 파일 안의 대역을 사용하므로 모델 키 없이 실행됩니다.
 
+PR과 `dev`·`main` push에서는 GitHub Actions(`.github/workflows/ci.yml`)가 서버·Llama 래퍼·웹 검증을 자동으로 실행합니다.
+
 ## Llama 어댑터 개발 규칙
 
 [코드 컨벤션](convention-code.md)에 따라
