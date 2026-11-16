@@ -1,10 +1,12 @@
 .scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
 
 .inner {
+  width: min(100%, var(--content-w));
   max-width: var(--content-w);
   margin: 0 auto;
   padding: 24px 16px 8px;

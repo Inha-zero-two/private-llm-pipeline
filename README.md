@@ -6,5 +6,6 @@
 - [LocalLLMRunner](docs/local-llm-runner.md) · [결과 파서](docs/local-res-parser.md) · [ContextManager](docs/context-manager.md)
 - [화면과 앱 서버 API 명세서](docs/screen-api-spec.md)
 - [ChatManager 저장 계층](docs/chat-manager.md) · [DB 스키마](docs/db-schema.md)
+- [실행 중 개인정보 공개 동의](docs/consent-manager.md)
 - [HTTPS 인증서·자동 갱신 설정](deploy/https/README.md)
 - [GPU 확인 후 부팅 자동 시작과 503 장애 응답](deploy/boot/README.md)

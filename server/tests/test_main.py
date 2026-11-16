@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,9 @@ class FakeChatManager(Recorder):
     def __init__(self, log: list[tuple[Any, ...]]) -> None:
         super().__init__(log)
         self.event_id = 0
+        # 프론티어 질의 기록: query_id → 마지막 상태 (전송 직전 uncertain)
+        self.queries: dict[int, str] = {}
+        self.notice: str | None = None
 
     def recover_interrupted_runs(self) -> int:
         return 0
@@ -39,11 +43,13 @@ class FakeChatManager(Recorder):
         self.event_id += 1
         return self.event_id
 
-    def save_frontier_query(self, *args: Any) -> int:
-        return 1
+    def save_frontier_query(self, run_id: int, query: Any, items: Any) -> int:
+        query_id = len(self.queries) + 1
+        self.queries[query_id] = query.status
+        return query_id
 
-    def finish_frontier_query(self, *args: Any) -> None:
-        pass
+    def finish_frontier_query(self, run_id: int, query_id: int, query: Any) -> None:
+        self.queries[query_id] = query.status
 
     def record_regeneration(self, *args: Any) -> None:
         pass
@@ -81,8 +87,12 @@ class FakeChatManager(Recorder):
         end_reason: EndReason | None,
         answer_message_id: int | None,
         memo_final: str,
+        *,
+        error_code: str | None = None,
+        notice: str | None = None,
     ) -> RunEvent:
         self.record("finish_run", end_reason, answer_message_id)
+        self.notice = notice
         self.event_id += 1
         return RunEvent(
             event_id=self.event_id,
@@ -132,10 +142,17 @@ class FakePlanner(Recorder):
         return ["경력"]
 
     def judge(
-        self, question: str, memo: str, pd_table: list[Any], run_id: str, chat_id: str
+        self,
+        question: str,
+        memo: str,
+        pd_table: list[Any],
+        run_id: str,
+        chat_id: str,
+        needs: list[str],
     ) -> SimpleNamespace:
-        """실행·채팅 ID를 기록하고 메모의 답변 수로 정보가 충분한지 판단한다."""
+        """실행·채팅 ID와 등록된 need를 기록하고 메모의 답변 수로 충분한지 판단한다."""
         self.record("judge", run_id, chat_id)
+        self.record("judge_needs", list(needs))
         answers = len(memo.split()) if memo else 0
         return SimpleNamespace(
             enough=answers >= self.enough_after,
@@ -147,13 +164,25 @@ class FakePlanner(Recorder):
 
 class FakeRequestWriter(Recorder):
     def write(
-        self, question: str, memo: str, pd_table: list[Any], need: list[str]
+        self,
+        question: str,
+        memo: str,
+        pd_table: list[Any],
+        need: list[str],
+        run_id: str = "",
+        chat_id: str | None = None,
     ) -> str:
         self.record("write")
         return "요청문"
 
     def rewrite(
-        self, previous: str, hits: list[Any], need: list[str], pd_table: list[Any]
+        self,
+        previous: str,
+        hits: list[Any],
+        need: list[str],
+        pd_table: list[Any],
+        run_id: str = "",
+        chat_id: str | None = None,
     ) -> str:
         self.record("rewrite", hits)
         return "고친 요청문"
@@ -178,15 +207,49 @@ class FakeFrontierClient(Recorder):
         super().__init__(log)
         self.online = True
         self.fail_send = False
+        # stop·clear 호출과 run_id. 정리 순서를 보는 log와 섞지 않으려고 따로 기록
+        self.calls: list[tuple[str, str]] = []
+        self.sent_needs: list[list[str] | None] = []  # send()가 받은 need
+        # 설정하면 send()가 stop()이 불릴 때까지 멈춘다. 전송 중 중지를 흉내 내기 위함
+        self.block_send = False
+        # 중지로 끊긴 send()가 낼 예외. 실제 FrontierClient는 FrontierCancelledError
+        self.stop_error: Exception = ConnectionError("중지로 연결 끊김")
+        self.sending = threading.Event()
+        self._stopped = threading.Event()
 
     def check_connection(self) -> bool:
         return self.online
 
-    def send(self, prompt: str) -> SimpleNamespace:
+    def send(
+        self,
+        run_id: str,
+        prompt: str,
+        pd_table: list[Any] | None = None,
+        need: list[str] | None = None,
+    ) -> SimpleNamespace:
         self.record("send", prompt)
+        self.sent_needs.append(need)
+        if self.block_send:
+            self.sending.set()
+            self._stopped.wait(5)
+            raise self.stop_error
         if self.fail_send:
             raise ConnectionError("API 연결 실패")
-        return SimpleNamespace(answer="답", cost=0.1)
+        return SimpleNamespace(
+            answer="답",
+            cost=0.1,
+            input_tokens=3,
+            output_tokens=2,
+            elapsed_ms=5,
+            context_mode="reset",
+        )
+
+    def stop(self, run_id: str) -> None:
+        self.calls.append(("stop", run_id))
+        self._stopped.set()
+
+    def clear(self, run_id: str) -> None:
+        self.calls.append(("clear", run_id))
 
 
 class FakeConsentManager(Recorder):
@@ -204,7 +267,9 @@ class FakeConsentManager(Recorder):
         self.record("consent_request")
         if self.wait_forever:
             await asyncio.Event().wait()
-        return SimpleNamespace(run_id=req.run_id, allow=self.allow)
+        return SimpleNamespace(
+            run_id=req.run_id, decisions=[SimpleNamespace(pd_id=1, allow=self.allow)]
+        )
 
     def apply(
         self, result: SimpleNamespace, req: SimpleNamespace, pd_table: list[Any]
@@ -219,12 +284,19 @@ class FakeConsentManager(Recorder):
 
 
 class FakeAnswerGenerator(Recorder):
-    def generate(self, question: str, memo: str) -> Iterator[str]:
+    def generate(
+        self,
+        question: str,
+        memo: str,
+        run_id: str = "",
+        chat_id: str | None = None,
+    ) -> Iterator[str]:
         self.record("generate")
         return iter(["최종", " 답변"])
 
-    def notify_limited(self, end_reason: EndReason) -> None:
+    def notify_limited(self, end_reason: EndReason) -> str | None:
         self.record("notify_limited", end_reason)
+        return None
 
 
 class FakeSimple(Recorder):
@@ -327,6 +399,8 @@ def test_enough_from_start_answers_without_frontier() -> None:
     assert finished_with(log) == EndReason.INFO_ENOUGH
     assert ("list_needs", 1, 1) in log
     assert ("judge", 1, 1) in log
+    # list_needs로 정한 need를 judge에 넘겨, 메모에 등록된 이름으로만 판단하게 한다
+    assert ("judge_needs", ["경력"]) in log
     # 정리는 release → clear → finish_run 순서
     tail = names(log)[-3:]
     assert tail == ["consent_release", "memo_clear", "finish_run"]
@@ -334,12 +408,69 @@ def test_enough_from_start_answers_without_frontier() -> None:
 
 def test_one_round_trip_then_enough() -> None:
     log: list[tuple[Any, ...]] = []
-    main = make_main(log, planner=FakePlanner(log, enough_after=1))
+    frontier = FakeFrontierClient(log)
+    main = make_main(
+        log, planner=FakePlanner(log, enough_after=1), frontier_client=frontier
+    )
     asyncio.run(main.run_pipeline(1, "질문"))
 
     assert names(log).count("send") == 1
     assert ("add_answer", ["경력"], "답") in log
     assert finished_with(log) == EndReason.INFO_ENOUGH
+    # 컨텍스트 유지 판단에 쓰도록 판단 결과의 need를 함께 넘긴다
+    assert frontier.sent_needs == [["경력"]]
+    # 실행이 끝나면 그 실행의 프론티어 대화만 지우고, 중지는 부르지 않는다
+    assert frontier.calls == [("clear", 1)]
+
+
+class SlowCancelConsentManager(FakeConsentManager):
+    """동의 취소가 늦게 끝난다. 끊긴 send()의 예외가 task.cancel()보다 먼저 오게 하려고."""
+
+    def cancel(self, run_id: str) -> None:
+        time.sleep(0.2)
+        super().cancel(run_id)
+
+
+@pytest.mark.parametrize(
+    "stop_error",
+    [ConnectionError("중지로 연결 끊김"), RuntimeError("전송 취소")],
+    ids=["connection_error", "cancelled_error"],
+)
+def test_stop_during_frontier_send(stop_error: Exception) -> None:
+    log: list[tuple[Any, ...]] = []
+    events: list[str] = []
+    frontier = FakeFrontierClient(log)
+    frontier.block_send = True
+    frontier.stop_error = stop_error
+    main = make_main(
+        log,
+        planner=FakePlanner(log, enough_after=99),
+        frontier_client=frontier,
+        consent_manager=SlowCancelConsentManager(log),
+    )
+
+    async def emit(event: str, data: dict[str, Any]) -> None:
+        events.append(event)
+
+    main._emit = emit
+
+    async def scenario() -> None:
+        task = asyncio.create_task(main.run_pipeline(1, "질문"))
+        async with asyncio.timeout(5):
+            while not frontier.sending.is_set():
+                assert not task.done(), "전송 전에 실행이 끝남"
+                await asyncio.sleep(0.01)
+        await main.stop(1)
+        assert task.cancelled()
+
+    asyncio.run(scenario())
+
+    # 끊긴 전송의 예외가 먼저 와도 오류·offline이 아니라 중지로 끝난다
+    assert finished_with(log) == EndReason.STOPPED
+    assert "error" not in events
+    assert "generate" not in names(log)
+    # 같은 run_id로 전송을 끊은 뒤 정리한다
+    assert frontier.calls == [("stop", 1), ("clear", 1)]
 
 
 @pytest.mark.parametrize("selected_needs", [["학력"], ["경력", "직무"]])
@@ -380,7 +511,7 @@ def test_round_trip_links_reply_to_selected_needs(selected_needs: list[str]) -> 
         "Question: 질문\nNeeds:\n- 경력\n- 학력\n- 직무\nAnswers:\n"
         + "\n\n".join(expected_sections)
     )
-    answer_generator.generate.assert_called_once_with("질문", memo)
+    answer_generator.generate.assert_called_once_with("질문", memo, 1, 1)
     runner.request.assert_not_called()
     assert names(log).count("send") == 1
     assert ("save_message", "assistant", "최종 답변") in log

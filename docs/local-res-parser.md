@@ -33,19 +33,23 @@ except OutputFormatError:
 | --- | --- | --- |
 | DETECT | `{"items":[{"text":"…","category":0}]}` | `list[DetectedItem]` |
 | NEEDS | `{"needs":["…"]}` | `list[str]` |
-| JUDGE | `{"enough":true,"needConsent":false,"consentItems":[],"need":[]}` | `Plan` |
+| JUDGE | `{"enough":false,"needConsent":false,"consentItems":[],"needIdx":[0]}` | `JudgeResult` |
 | GUARD | `{"hits":[0,2]}` | `list[int]` |
 | PARSE_RULES | `{"rules":[{"target":"…","scope":"item","action":"deny"}]}` | `list[Rule]` |
 | MATCH_RULES | `{"matches":[{"item":0,"rules":[1]}]}` | `list[RuleMatch]` |
 | CONSENT | `{"purpose":"…","benefit":"…","risk":"…"}` | `ConsentText` |
+| INTERPRET_CONSENT | `{"decisions":[{"pdId":11,"allow":true}]}` | `list[ConsentDecision]` |
 | DECIDE_CONTEXT | `{"context":"keep"}` 또는 reset | `"keep"` 또는 `"reset"` |
 | WRITE / REWRITE / ANSWER / MEMO_SUMMARY | 비어 있지 않은 텍스트 | `str` |
 
-- `PromptIdx`는 `app.models.enums`, 결과 자료형은 `app.models.llm_results`에서 import. 기존 파서 경로의 import도 유지. 작업 종류는 위 표의 12개와 외부 모델용 FRONTIER
-- 반환 객체의 필드는 위 모델 출력 형식과 동일. `Plan`의 needConsent·consentItems는 파이썬에서 `need_consent`·`consent_items`로 접근. consent_items는 데이터베이스의 개인정보 ID 목록
-- DetectedItem.category는 0 식별·1 민감·2 속성 중 하나. GUARD와 MATCH_RULES의 정수는 입력 목록에서 0부터 시작하는 항목 번호
+- `PromptIdx`는 `app.models.enums`, 결과 자료형은 `app.models.llm_results`에서 import. ConsentDecision은 `app.models.consent_results`에 정의. 기존 파서 경로의 import도 유지. 작업 종류는 위 표의 13개와 외부 모델용 FRONTIER
+- INTERPRET_CONSENT는 추가 필드와 자동 형변환을 금지하며 빈 목록은 해석 실패로 호출자가 처리하고, ID 범위·중복과 미언급 항목 처리는 ConsentManager에서 검사한다.
+- 반환 객체의 필드는 위 모델 출력 형식과 동일. `JudgeResult`의 needConsent·consentItems·needIdx는 파이썬에서 `need_consent`·`consent_items`·`need_idx`로 접근. consent_items는 데이터베이스의 개인정보 ID 목록, need_idx는 JUDGE 입력 `[필요 정보]`에서 0부터 시작하는 번호. 판단 필드 네 개는 모두 필수
+- DetectedItem.category는 0 식별·1 민감·2 속성 중 하나. GUARD·MATCH_RULES의 정수와 JUDGE의 needIdx는 입력 목록에서 0부터 시작하는 항목 번호
 - 항목 번호를 데이터베이스 ID로 바꾸거나 입력 목록 범위 안의 번호인지 확인하는 역할은 호출자에서 처리
 - 형식에 맞는 빈 목록도 성공으로 반환. 텍스트의 줄바꿈·들여쓰기 유지
+- PARSE_RULES는 해석할 규칙이 없어도 같은 모양의 빈 목록 `{"rules":[]}`을 반환한다. 빈 목록을 해석 실패로 볼지는 호출자(PrivacySettings)가 판단한다.
+- MATCH_RULES의 `rules` 목록은 모델이 의미와 우선순위를 판단한 **최종 규칙 하나의 인덱스** 또는 빈 목록이다. 개인정보 항목마다 정확히 하나의 대응이 필요하다. 입력 범위·중복·누락·복수 선택 검사는 PrivacySettings가 담당한다.
 - JSON 전체를 감싼 코드 블록 표시만 제거. 설명문 속 JSON 추출, 잘못된 문법 수정 및 자동 자료형 변환은 생략
 - 알 수 없는 작업이나 외부 모델용 FRONTIER를 전달한 경우 `ValueError` 발생. 답변을 다시 생성할 오류와 구분
 
