@@ -128,6 +128,12 @@ class FakeFrontierClient(Recorder):
         super().__init__(log)
         self.online = True
         self.fail_send = False
+        # stop·clear 호출과 run_id. 정리 순서를 보는 log와 섞지 않으려고 따로 기록
+        self.calls: list[tuple[str, str]] = []
+        # 설정하면 send()가 stop()이 불릴 때까지 멈춘다. 전송 중 중지를 흉내 내기 위함
+        self.block_send = False
+        self.sending = threading.Event()
+        self._stopped = threading.Event()
 
     def check_connection(self) -> bool:
         return self.online
@@ -136,15 +142,20 @@ class FakeFrontierClient(Recorder):
         self, run_id: str, prompt: str, pd_table: list[Any] | None = None
     ) -> SimpleNamespace:
         self.record("send", prompt)
+        if self.block_send:
+            self.sending.set()
+            self._stopped.wait(5)
+            raise ConnectionError("중지로 연결 끊김")
         if self.fail_send:
             raise ConnectionError("API 연결 실패")
         return SimpleNamespace(answer="답", cost=0.1)
 
     def stop(self, run_id: str) -> None:
-        pass
+        self.calls.append(("stop", run_id))
+        self._stopped.set()
 
     def clear(self, run_id: str) -> None:
-        pass
+        self.calls.append(("clear", run_id))
 
 
 class FakeConsentManager(Recorder):
@@ -292,12 +303,39 @@ def test_enough_from_start_answers_without_frontier() -> None:
 
 def test_one_round_trip_then_enough() -> None:
     log: list[tuple[Any, ...]] = []
-    main = make_main(log, planner=FakePlanner(log, enough_after=1))
+    frontier = FakeFrontierClient(log)
+    main = make_main(
+        log, planner=FakePlanner(log, enough_after=1), frontier_client=frontier
+    )
     asyncio.run(main.run_pipeline("chat-1", "질문"))
 
     assert names(log).count("send") == 1
     assert ("add_answer", ["경력"], "답") in log
     assert finished_with(log) == EndReason.INFO_ENOUGH
+    # 실행이 끝나면 그 실행의 프론티어 대화만 지우고, 중지는 부르지 않는다
+    assert frontier.calls == [("clear", "run-1")]
+
+
+def test_stop_during_frontier_send() -> None:
+    log: list[tuple[Any, ...]] = []
+    frontier = FakeFrontierClient(log)
+    frontier.block_send = True
+    main = make_main(
+        log, planner=FakePlanner(log, enough_after=99), frontier_client=frontier
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(main.run_pipeline("chat-1", "질문"))
+        while not frontier.sending.is_set():
+            await asyncio.sleep(0.01)
+        await main.stop("run-1")
+        assert task.cancelled()
+
+    asyncio.run(scenario())
+
+    # 같은 run_id로 전송을 끊은 뒤 정리한다
+    assert frontier.calls == [("stop", "run-1"), ("clear", "run-1")]
+    assert finished_with(log) == EndReason.STOPPED
 
 
 @pytest.mark.parametrize("selected_needs", [["학력"], ["경력", "직무"]])

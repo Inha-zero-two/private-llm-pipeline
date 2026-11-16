@@ -48,6 +48,9 @@ flowchart TD
 - 모든 질의(성공·실패·취소)는 `_log_query()`로 기록. 지금은 `last_request`에만 남기고 DB 저장(`frontier_queries`·`query_items`)은 ChatManager 구현 후 연결. API 키와 시스템 프롬프트는 저장하지 않음
 - 전송 당시 개인정보 허용 상태는 `pd_table`의 `(pd_id, allowed, allowed_by)`로 함께 기록
 - `stop(run_id)`: 진행 중인 요청의 연결을 닫고 즉시 반환. 서버에 이미 도착한 요청의 비용은 게이트웨이에서 차감될 수 있음
+- 중지 신호는 컨텍스트 판단 전에 등록하므로 판단 중에 중지해도 전송하지 않음. 진행 중인 전송이 없을 때 `stop(run_id)`가 불려도 기록해 두어, `clear(run_id)` 전까지 그 실행의 `send()`는 보내지 않고 `FrontierCancelledError`
+- 비용은 빈 답변으로 다시 시도한 응답까지 모든 시도의 사용량을 더해 계산. 재시도 끝에 실패해도 질의 기록에는 쓴 만큼 남음
+- `FRONTIER_BASE_URL`이 잘못된 주소면 `check_connection()`은 False, `send()`는 재시도 없이 `FrontierError`
 
 ## Main 연결
 
@@ -63,8 +66,12 @@ flowchart TD
 ## 사용법
 
 ```python
+from app.data.prompt_manager import PromptManager
 from app.runtime.frontier_client import FrontierClient
+from app.runtime.local_llm_runner import LocalLLMRunner
 
+prompts = PromptManager()
+runner = LocalLLMRunner(prompt_manager=prompts)  # 컨텍스트 판단을 안 쓰면 생략 가능
 client = FrontierClient(local_llm_runner=runner, prompt_manager=prompts)
 if client.check_connection():
     reply = client.send("run-1", "백엔드 신입 직무의 핵심 역량을 알려 줘.")
