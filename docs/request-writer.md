@@ -15,7 +15,8 @@
 
 - 로컬 모델은 `LocalLLMRunner.request(run_id, 입력, PromptIdx.WRITE | REWRITE, chat_id)`로 호출. 같은 입력의 재시도(최대 3회)는 Runner가 처리
 - `run_id`를 넘겨야 중지 버튼(`Main.stop` → `LocalLLMRunner.stop(run_id)`)이 생성을 끊을 수 있음
-- **생성 실패는 `None`**: 모델 실패, 중지, 빈 답변, Runner 없음. `rewrite()`는 `hits`가 표의 어떤 항목과도 맞지 않으면 모델을 부르지 않고 `None`
+- **입력 크기 한도**: 모델 입력(시스템 프롬프트 제외)이 `INPUT_TOKEN_LIMIT`(21,744토큰, ContextManager 압축 기준과 같음)와 `Runner.get_input_limit()` 중 작은 값을 넘으면 모델을 부르지 않고 `None`. 토큰 수는 `Runner.tokenize()`로 셈
+- **생성 실패는 `None`**: 모델 실패, 중지, 빈 답변, 입력 초과, Runner 없음. `rewrite()`는 `hits`가 표의 어떤 항목과도 맞지 않으면 모델을 부르지 않고 `None`
 - **잘못된 호출은 예외**: 빈 질문·빈 직전 요청문·빈 need는 `ValueError`, 자료형 오류는 `TypeError`, 개인정보 표 형식 오류는 `RuntimeError`
 - 모델이 붙인 코드 블록, `요청문:` 같은 머리말, 전체를 감싼 따옴표는 떼어 냄
 - `pd_table`은 `PDItem` 목록이나 같은 필드를 가진 dict 목록 모두 가능

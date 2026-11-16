@@ -173,7 +173,7 @@ class Main:
 
             # 임시 메모를 시작하고, 답하는 데 필요한 정보 목록을 적어 둔다.
             await self._call(self.memo_manager.start, run_id, question)
-            needs = await self._call(self.planner.list_needs, question)
+            needs = await self._call(self.planner.list_needs, question, run_id, chat_id)
             await self._call(self.memo_manager.set_needs, needs)
 
             # 2)~6) 왕복: 끝날 때까지 정보를 모은다
@@ -260,7 +260,7 @@ class Main:
 
         if not state.finishing:  # 이미 끝나는 중이면 모델 중지·동의 취소도 하지 않는다
             # 별도 스레드에서 돌고 있는 로컬 모델 생성을 멈춘다. (stopFlag)
-            await self._call(self.local_llm_runner.stop)
+            await self._call(self.local_llm_runner.stop, run_id)
             # 사용자 동의를 기다리는 중이었다면 그 대기를 끝낸다.
             await self._call(self.consent_manager.cancel, run_id)
 
@@ -279,6 +279,9 @@ class Main:
         """2)~6) 왕복을 반복하며 정보를 모은다. 끝나야 하는 이유가 생기면 그 사유를 반환한다."""
         frontier_calls = 0  # 이번 실행에서 프론티어에 물어본 횟수
         spent_cost = 0.0  # 이번 실행에서 쓴 API 비용
+        # 중지 버튼이 로컬 판단을 끊을 수 있도록 실행 ID와 채팅 ID를 함께 넘긴다.
+        state = self._runs.get(run_id)
+        chat_id = state.chat_id if state is not None else None
 
         while True:
             # 2) 왕복을 시작하기 전에 끝내야 하는지 먼저 확인한다.
@@ -291,7 +294,9 @@ class Main:
 
             # 지금까지 모은 메모로 답할 수 있는지 판단한다.
             memo = await self._call(self.memo_manager.read_all)
-            plan = await self._call(self.planner.judge, question, memo, pd_table)
+            plan = await self._call(
+                self.planner.judge, question, memo, pd_table, run_id, chat_id
+            )
 
             # 3) 정보가 충분하면 정상 종료.
             if plan.enough:

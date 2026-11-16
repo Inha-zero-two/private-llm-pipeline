@@ -6,9 +6,14 @@ from typing import TYPE_CHECKING, Any
 
 from app.models.enums import PromptIdx
 from app.privacy.pd_detector import CATEGORY_LABEL, PDItem
+from app.runtime.context_manager import COMPACTION_LIMIT
 
 if TYPE_CHECKING:
     from app.runtime.local_llm_runner import LocalLLMRunner
+
+# 요청문 모델 입력(시스템 프롬프트 제외)의 최대 토큰 수.
+# 답변 5,000토큰과 요약 5,000토큰 공간을 남긴 21,744토큰. ContextManager 압축 기준과 같음
+INPUT_TOKEN_LIMIT = COMPACTION_LIMIT
 
 # 모델이 요청문 앞뒤에 붙이는 머리말. 첫 줄이 이 중 하나로 시작하면 떼어 냄
 _LABELS = ("요청문:", "수정한 요청문:", "수정된 요청문:", "Request:")
@@ -111,13 +116,27 @@ class RequestWriter:
     def _generate(
         self, run_id: str, input_: str, prompt_idx: PromptIdx, chat_id: str | None
     ) -> str | None:
-        """Runner로 텍스트를 생성하고 정리. 실패·중지·빈 답변은 None."""
+        """Runner로 텍스트를 생성하고 정리. 실패·중지·빈 답변·입력 초과는 None."""
         if self._runner is None:
+            return None
+        # 입력이 한도를 넘으면 모델을 부르지 않고 실패로 처리
+        if len(self._runner.tokenize(input_)) > _input_limit(self._runner, prompt_idx):
             return None
         output, ok, *_ = self._runner.request(run_id, input_, prompt_idx, chat_id)
         if not ok or not isinstance(output, str):
             return None
         return _clean(output)
+
+
+def _input_limit(runner: LocalLLMRunner, prompt_idx: PromptIdx) -> int:
+    """INPUT_TOKEN_LIMIT와 Runner의 실제 입력 한도 중 작은 값.
+
+    시스템 프롬프트가 길면 Runner 한도가 더 작아질 수 있어 함께 확인.
+    """
+    if runner.prompt_manager is None:
+        return INPUT_TOKEN_LIMIT
+    system_prompt = runner.prompt_manager.get_prompt(prompt_idx)
+    return min(INPUT_TOKEN_LIMIT, runner.get_input_limit(system_prompt))
 
 
 def _to_items(pd_table: list[Any]) -> list[PDItem]:
