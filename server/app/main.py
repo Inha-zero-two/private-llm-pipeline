@@ -347,7 +347,7 @@ class Main:
 
             # 5) 개인정보가 새지 않는 요청문을 만든다.
             request_text = await self._write_safe_request(
-                run_id, question, memo, pd_table, plan.need
+                run_id, chat_id, question, memo, pd_table, plan.need
             )
             if request_text is None:
                 return EndReason.REGEN_LIMIT
@@ -381,6 +381,7 @@ class Main:
     async def _write_safe_request(
         self,
         run_id: str,
+        chat_id: str,
         question: str,
         memo: str,
         pd_table: PDTable,
@@ -391,8 +392,9 @@ class Main:
         통과한 요청문을 반환한다. regen_limit번 고쳐도 안 되면 None을 반환한다.
         """
         await self._step(run_id, "도움 요청문 작성 중")
+        # 중지 버튼이 로컬 생성을 끊을 수 있도록 실행 ID와 채팅 ID를 함께 넘긴다.
         request_text = await self._call(
-            self.request_writer.write, question, memo, pd_table, need
+            self.request_writer.write, question, memo, pd_table, need, run_id, chat_id
         )
         regen_count = 0  # 이 요청문을 다시 쓴 횟수
 
@@ -418,11 +420,23 @@ class Main:
 
             if request_text is None:
                 request_text = await self._call(
-                    self.request_writer.write, question, memo, pd_table, need
+                    self.request_writer.write,
+                    question,
+                    memo,
+                    pd_table,
+                    need,
+                    run_id,
+                    chat_id,
                 )
             else:
                 request_text = await self._call(
-                    self.request_writer.rewrite, request_text, hits, need, pd_table
+                    self.request_writer.rewrite,
+                    request_text,
+                    hits,
+                    need,
+                    pd_table,
+                    run_id,
+                    chat_id,
                 )
 
     async def _answer(
