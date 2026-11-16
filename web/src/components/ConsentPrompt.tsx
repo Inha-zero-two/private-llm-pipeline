@@ -1,6 +1,6 @@
 import { useState } from 'react'
+import type { ConsentReply } from '@/backend'
 import { example } from '@/demo/consent'
-import type { ConsentInterpretation } from '@/demo/consent'
 import { josa } from '@/lib/josa'
 import { CATEGORY_LABEL, type ConsentRequest } from '@/types'
 import { ShieldIcon } from './icons'
@@ -8,7 +8,7 @@ import styles from './ConsentPrompt.module.css'
 
 type Props = {
   request: ConsentRequest
-  onAnswer: (answer: string) => Promise<ConsentInterpretation>
+  onAnswer: (answer: string) => Promise<ConsentReply>
 }
 
 const QUICK_ANSWERS = ['모두 공개해도 돼', '모두 공개하지 마']
