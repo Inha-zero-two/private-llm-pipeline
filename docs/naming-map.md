@@ -103,7 +103,7 @@ class PrivacySettings:
 | --- | --- | --- | --- |
 | 5.1 `LocalLLMRunner` | `local_llm_runner.py` · `LocalLLMRunner` | `request()`, `manualRequest()` → `manual_request()`, `reGen()` → `regen()`, `stop()` → `stop(run_id)`, `modelLoad()` → `model_load()` | `Input` → `input_`, `stopFlag` → `stop_flag` |
 | 5.2 `LocalResParser` | `local_res_parser.py` · 상태 없는 함수 | `parser()` | `rawOutput` → `raw_output` |
-| 5.3 `FrontierClient` | `frontier_client.py` · `FrontierClient` | `checkConnection()` → `check_connection()`, `send()`, `decideContext()` → `decide_context()` | `lastRequest` → `last_request`, `frontierSysPromIdx` → `frontier_sys_prom_idx`, `contextRecognizeSysPromIdx` → `context_recognize_sys_prom_idx` |
+| 5.3 `FrontierClient` | `frontier_client.py` · `FrontierClient` | `checkConnection()` → `check_connection()`, `send()`, `decideContext()` → `decide_context()` (로컬 모델 대신 need 비교, [frontier-client.md](frontier-client.md)) | `lastRequest` → `last_request`, `frontierSysPromIdx` → `frontier_sys_prom_idx`, `contextRecognizeSysPromIdx`는 로컬 판단을 빼면서 생략 |
 | 5.4 `ContextManager` | `context_manager.py` · `ContextManager` | `getId()` → `get_id()`, `newId()` → `new_id()`, `getContext()` → `get_context()`, `append()`, `getContextLength()` → `get_context_length()`, `compactContext()` → `compact_context()` | |
 
 `reGen()`의 파이썬 함수 이름은 `regen`. 설계서의 요청문 재작성 횟수 변수 `regenLimit`과 같은 단어 표기.

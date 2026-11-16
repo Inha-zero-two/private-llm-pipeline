@@ -48,7 +48,7 @@
 | `7` | `PARSE_RULES` | `PrivacySettings.parse_rules()` |
 | `8` | `MATCH_RULES` | `PrivacySettings.apply_to_table()` |
 | `9` | `CONSENT` | `ConsentManager.build_message()` |
-| `10` | `DECIDE_CONTEXT` | `FrontierClient.decide_context()` |
+| `10` | `DECIDE_CONTEXT` | 사용 안 함 (`FrontierClient.decide_context()`가 need 비교로 바뀜) |
 | `11` | `FRONTIER` | `FrontierClient.send()` |
 | `12` | `MEMO_SUMMARY` | `MemoManager.compact_answer()` |
 | `13` | `INTERPRET_CONSENT` | `ConsentManager.receive()` |
