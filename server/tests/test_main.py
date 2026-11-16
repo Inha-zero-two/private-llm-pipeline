@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -140,6 +141,8 @@ class FakeFrontierClient(Recorder):
         self.sent_needs: list[list[str] | None] = []  # send()가 받은 need
         # 설정하면 send()가 stop()이 불릴 때까지 멈춘다. 전송 중 중지를 흉내 내기 위함
         self.block_send = False
+        # 중지로 끊긴 send()가 낼 예외. 실제 FrontierClient는 FrontierCancelledError
+        self.stop_error: Exception = ConnectionError("중지로 연결 끊김")
         self.sending = threading.Event()
         self._stopped = threading.Event()
 
@@ -158,7 +161,7 @@ class FakeFrontierClient(Recorder):
         if self.block_send:
             self.sending.set()
             self._stopped.wait(5)
-            raise ConnectionError("중지로 연결 끊김")
+            raise self.stop_error
         if self.fail_send:
             raise ConnectionError("API 연결 실패")
         return SimpleNamespace(answer="답", cost=0.1)
@@ -333,26 +336,54 @@ def test_one_round_trip_then_enough() -> None:
     assert frontier.calls == [("clear", "run-1")]
 
 
-def test_stop_during_frontier_send() -> None:
+class SlowCancelConsentManager(FakeConsentManager):
+    """동의 취소가 늦게 끝난다. 끊긴 send()의 예외가 task.cancel()보다 먼저 오게 하려고."""
+
+    def cancel(self, run_id: str) -> None:
+        time.sleep(0.2)
+        super().cancel(run_id)
+
+
+@pytest.mark.parametrize(
+    "stop_error",
+    [ConnectionError("중지로 연결 끊김"), RuntimeError("전송 취소")],
+    ids=["connection_error", "cancelled_error"],
+)
+def test_stop_during_frontier_send(stop_error: Exception) -> None:
     log: list[tuple[Any, ...]] = []
+    events: list[str] = []
     frontier = FakeFrontierClient(log)
     frontier.block_send = True
+    frontier.stop_error = stop_error
     main = make_main(
-        log, planner=FakePlanner(log, enough_after=99), frontier_client=frontier
+        log,
+        planner=FakePlanner(log, enough_after=99),
+        frontier_client=frontier,
+        consent_manager=SlowCancelConsentManager(log),
     )
+
+    async def emit(event: str, data: dict[str, Any]) -> None:
+        events.append(event)
+
+    main._emit = emit
 
     async def scenario() -> None:
         task = asyncio.create_task(main.run_pipeline("chat-1", "질문"))
-        while not frontier.sending.is_set():
-            await asyncio.sleep(0.01)
+        async with asyncio.timeout(5):
+            while not frontier.sending.is_set():
+                assert not task.done(), "전송 전에 실행이 끝남"
+                await asyncio.sleep(0.01)
         await main.stop("run-1")
         assert task.cancelled()
 
     asyncio.run(scenario())
 
+    # 끊긴 전송의 예외가 먼저 와도 오류·offline이 아니라 중지로 끝난다
+    assert finished_with(log) == EndReason.STOPPED
+    assert "error" not in events
+    assert "generate" not in names(log)
     # 같은 run_id로 전송을 끊은 뒤 정리한다
     assert frontier.calls == [("stop", "run-1"), ("clear", "run-1")]
-    assert finished_with(log) == EndReason.STOPPED
 
 
 @pytest.mark.parametrize("selected_needs", [["학력"], ["경력", "직무"]])

@@ -357,8 +357,15 @@ class Main:
                 reply = await self._call(
                     self.frontier_client.send, run_id, request_text, pd_table, plan.need
                 )
-            except ConnectionError:
-                return EndReason.OFFLINE
+            except Exception as error:
+                state = self._runs.get(run_id)
+                if state is not None and state.stopping:
+                    # stop()이 전송을 끊어 생긴 예외(FrontierCancelledError 등).
+                    # stop()의 task.cancel()보다 먼저 올 수 있으므로 같은 취소로 처리한다.
+                    raise asyncio.CancelledError from error
+                if isinstance(error, ConnectionError):
+                    return EndReason.OFFLINE
+                raise
             frontier_calls += 1
             # 화면의 '외부 모델 질의 · 응답'에 실제로 보낸 요청문과 받은 답을 보여 준다.
             await self._emit(

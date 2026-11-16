@@ -357,12 +357,17 @@ class FrontierClient:
         Main은 send()를 스레드에서 부르므로 이 함수가 중지 신호를 직접 확인해야
         stop(run_id) 즉시 반환 가능.
         """
-        if stop_event.is_set():
-            # 스레드를 띄우면 요청이 바로 나가므로 그 전에 확인
-            raise FrontierCancelledError(run_id)
         client = httpx.Client(timeout=self._timeout, transport=self._transport)
+        # 중지 확인과 연결 등록을 stop()과 같은 잠금 안에서 함. stop()이 먼저면 여기서
+        # 중지를 보고, 등록이 먼저면 stop()이 이 연결을 찾아 닫음. 스레드를 띄우면
+        # 요청이 바로 나가므로 그 전에 확인
         with self._lock:
-            self._clients[run_id] = client
+            stopped = stop_event.is_set()
+            if not stopped:
+                self._clients[run_id] = client
+        if stopped:
+            client.close()
+            raise FrontierCancelledError(run_id)
         results: Queue[httpx.Response | BaseException] = Queue()
 
         def worker() -> None:
@@ -417,9 +422,10 @@ class FrontierClient:
         with self._lock:
             self._stopped.add(run_id)
             event = self._stop_events.get(run_id)
+            # 신호 설정과 연결 조회를 한 잠금 안에서 해야 _post()의 등록과 엇갈리지 않음
+            if event is not None:
+                event.set()
             client = self._clients.get(run_id)
-        if event is not None:
-            event.set()
         if client is not None:
             client.close()
 
