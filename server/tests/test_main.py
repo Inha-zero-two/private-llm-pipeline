@@ -445,7 +445,7 @@ def test_round_trip_links_reply_to_selected_needs(selected_needs: list[str]) -> 
         "Question: 질문\nNeeds:\n- 경력\n- 학력\n- 직무\nAnswers:\n"
         + "\n\n".join(expected_sections)
     )
-    answer_generator.generate.assert_called_once_with("질문", memo)
+    answer_generator.generate.assert_called_once_with("질문", memo, "run-1", "chat-1")
     runner.request.assert_not_called()
     assert names(log).count("send") == 1
     assert ("save_message", "assistant", "최종 답변") in log

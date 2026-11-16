@@ -48,6 +48,8 @@ except OutputFormatError:
 - DetectedItem.category는 0 식별·1 민감·2 속성 중 하나. GUARD·MATCH_RULES의 정수와 JUDGE의 needIdx는 입력 목록에서 0부터 시작하는 항목 번호
 - 항목 번호를 데이터베이스 ID로 바꾸거나 입력 목록 범위 안의 번호인지 확인하는 역할은 호출자에서 처리
 - 형식에 맞는 빈 목록도 성공으로 반환. 텍스트의 줄바꿈·들여쓰기 유지
+- PARSE_RULES는 해석할 규칙이 없어도 같은 모양의 빈 목록 `{"rules":[]}`을 반환한다. 빈 목록을 해석 실패로 볼지는 호출자(PrivacySettings)가 판단한다.
+- MATCH_RULES의 `rules` 목록은 모델이 의미와 우선순위를 판단한 **최종 규칙 하나의 인덱스** 또는 빈 목록이다. 개인정보 항목마다 정확히 하나의 대응이 필요하다. 입력 범위·중복·누락·복수 선택 검사는 PrivacySettings가 담당한다.
 - JSON 전체를 감싼 코드 블록 표시만 제거. 설명문 속 JSON 추출, 잘못된 문법 수정 및 자동 자료형 변환은 생략
 - 알 수 없는 작업이나 외부 모델용 FRONTIER를 전달한 경우 `ValueError` 발생. 답변을 다시 생성할 오류와 구분
 

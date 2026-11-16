@@ -225,7 +225,13 @@ class MaskingRequestWriter:
     """3.2 RequestWriter 대역."""
 
     def write(
-        self, question: str, memo: str, pd_table: PDTable, need: list[str]
+        self,
+        question: str,
+        memo: str,
+        pd_table: PDTable,
+        need: list[str],
+        run_id: str | None = None,
+        chat_id: str | None = None,
     ) -> str:
         topics = "\n".join(f"- {n}" for n in need) or "- 질문에 답하는 데 필요한 정보"
         # need 이름에도 원문이 들어올 수 있어(예: "현재 직장(삼성전자)의 장단점") 전체를 가린다
@@ -236,7 +242,13 @@ class MaskingRequestWriter:
         )
 
     def rewrite(
-        self, previous: str, hits: list[Any], need: list[str], pd_table: PDTable
+        self,
+        previous: str,
+        hits: list[Any],
+        need: list[str],
+        pd_table: PDTable,
+        run_id: str | None = None,
+        chat_id: str | None = None,
     ) -> str:
         return mask(previous, pd_table)
 
@@ -305,7 +317,13 @@ class LocalAnswerGenerator:
         # generate()에는 실행 ID가 없어 Main 이벤트(run)를 받을 때 채운다. 실행은 한 번에 하나다.
         self.run_id: str | None = None
 
-    def generate(self, question: str, memo: str) -> Iterator[str]:
+    def generate(
+        self,
+        question: str,
+        memo: str,
+        run_id: str | None = None,
+        chat_id: str | None = None,
+    ) -> Iterator[str]:
         tokens: queue.Queue[str | None] = queue.Queue()
         failure: list[BaseException] = []
 
