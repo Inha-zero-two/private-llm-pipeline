@@ -12,6 +12,21 @@
 
 컨벤션 문서도 코드와 똑같이 브랜치를 만들어 PR로 고칩니다. 라벨은 `chore`를 붙입니다.
 
+## 서버 검증
+
+`server/`로 이동해 실행합니다. 서버 코드가 저장소 루트의 `src` 래퍼도 import하므로
+`pyproject.toml`의 pytest 설정이 두 경로를 함께 잡아 줍니다. 따로 `PYTHONPATH`를 지정하지 않습니다.
+
+```bash
+cd server
+uv sync
+uv run ruff check .
+uv run ruff format --check .
+uv run python -m pytest -q
+```
+
+테스트는 실제 로컬 LLM·프론티어 대신 테스트 파일 안의 대역을 사용하므로 모델 키 없이 실행됩니다.
+
 ## Llama 어댑터 개발 규칙
 
 [코드 컨벤션](convention-code.md)에 따라

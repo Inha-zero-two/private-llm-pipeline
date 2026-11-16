@@ -11,8 +11,13 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pytest==9.2.0",
     "ruff==0.17.3",
 ]
+
+[tool.pytest.ini_options]
+# server/에서 실행해도 app(server/)과 래퍼의 src(저장소 루트)를 모두 찾도록 경로 지정
+pythonpath = [".", ".."]
 
 [tool.ruff]
 target-version = "py312"
