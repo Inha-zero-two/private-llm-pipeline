@@ -264,11 +264,23 @@ class CannedFrontierClient:
     def check_connection(self) -> bool:
         return True
 
-    def send(self, prompt: str) -> FrontierReply:
+    def send(
+        self,
+        run_id: str,
+        request_text: str,
+        pd_table: PDTable | None = None,
+        need: list[str] | None = None,
+    ) -> FrontierReply:
         return FrontierReply(
             "(외부 모델 대역의 정해진 답) 목표를 먼저 정하고, 현재 상황을 정리한 뒤, "
             "우선순위에 따라 짧은 주기로 실행하고 점검하는 방식이 일반적으로 효과적입니다."
         )
+
+    def stop(self, run_id: str) -> None:
+        """정해진 답을 바로 돌려주므로 끊을 전송이 없다."""
+
+    def clear(self, run_id: str) -> None:
+        """대화 기록을 남기지 않으므로 지울 것이 없다."""
 
 
 ANSWER_SYSTEM_PROMPT = (
