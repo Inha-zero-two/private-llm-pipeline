@@ -24,10 +24,10 @@ class LeakGuard:
 
     def detect(
         self,
-        run_id: str,
+        run_id: int,
         request_text: str,
         pd_table: list[Any],
-        chat_id: str | None = None,
+        chat_id: int | None = None,
     ) -> GuardResult:
         """요청문에 금지 개인정보가 드러났는지 검사.
 

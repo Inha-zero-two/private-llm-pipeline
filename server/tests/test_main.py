@@ -75,10 +75,10 @@ class FakeChatManager(Recorder):
         run_id = self.start_run(chat_id, message_id, setting_id, config)
         return StartedRun(user_message_id=message_id, run_id=run_id)
 
-    def set_pd_items(self, chat_id: str, message_id: str, items: list[Any]) -> None:
+    def set_pd_items(self, chat_id: int, message_id: int, items: list[Any]) -> None:
         self.record("set_pd_items")
 
-    def get_pd_table(self, chat_id: str) -> list[Any]:
+    def get_pd_table(self, chat_id: int) -> list[Any]:
         return []
 
     def finish_run(
@@ -112,7 +112,7 @@ class FakeChatManager(Recorder):
 
 
 class FakeMemoManager(Recorder):
-    def start(self, run_id: str, question: str) -> None:
+    def start(self, run_id: int, question: str) -> None:
         self.answers: list[str] = []
 
     def set_needs(self, needs: list[str]) -> None:
@@ -137,7 +137,7 @@ class FakePlanner(Recorder):
         self.enough_after = enough_after
         self.need_consent = False
 
-    def list_needs(self, question: str, run_id: str, chat_id: str) -> list[str]:
+    def list_needs(self, question: str, run_id: int, chat_id: int) -> list[str]:
         self.record("list_needs", run_id, chat_id)
         return ["경력"]
 
@@ -146,8 +146,8 @@ class FakePlanner(Recorder):
         question: str,
         memo: str,
         pd_table: list[Any],
-        run_id: str,
-        chat_id: str,
+        run_id: int,
+        chat_id: int,
         needs: list[str],
     ) -> SimpleNamespace:
         """실행·채팅 ID와 등록된 need를 기록하고 메모의 답변 수로 충분한지 판단한다."""
@@ -169,8 +169,8 @@ class FakeRequestWriter(Recorder):
         memo: str,
         pd_table: list[Any],
         need: list[str],
-        run_id: str = "",
-        chat_id: str | None = None,
+        run_id: int | None = None,
+        chat_id: int | None = None,
     ) -> str:
         self.record("write")
         return "요청문"
@@ -181,8 +181,8 @@ class FakeRequestWriter(Recorder):
         hits: list[Any],
         need: list[str],
         pd_table: list[Any],
-        run_id: str = "",
-        chat_id: str | None = None,
+        run_id: int | None = None,
+        chat_id: int | None = None,
     ) -> str:
         self.record("rewrite", hits)
         return "고친 요청문"
@@ -197,7 +197,7 @@ class FakeLeakGuard(Recorder):
         self.passed = not self.hits
 
     def detect(
-        self, run_id: str, request_text: str, pd_table: list[Any]
+        self, run_id: int, request_text: str, pd_table: list[Any]
     ) -> SimpleNamespace:
         return SimpleNamespace(passed=self.passed, hits=self.hits)
 
@@ -222,7 +222,7 @@ class FakeFrontierClient(Recorder):
 
     def send(
         self,
-        run_id: str,
+        run_id: int,
         prompt: str,
         pd_table: list[Any] | None = None,
         need: list[str] | None = None,
@@ -244,11 +244,11 @@ class FakeFrontierClient(Recorder):
             context_mode="reset",
         )
 
-    def stop(self, run_id: str) -> None:
+    def stop(self, run_id: int) -> None:
         self.calls.append(("stop", run_id))
         self._stopped.set()
 
-    def clear(self, run_id: str) -> None:
+    def clear(self, run_id: int) -> None:
         self.calls.append(("clear", run_id))
 
 
@@ -259,7 +259,7 @@ class FakeConsentManager(Recorder):
         self.wait_forever = False
 
     def build_message(
-        self, run_id: str, items: list[Any], need: list[str], pd_table: list[Any]
+        self, run_id: int, items: list[Any], need: list[str], pd_table: list[Any]
     ) -> SimpleNamespace:
         return SimpleNamespace(run_id=run_id)
 
@@ -276,10 +276,10 @@ class FakeConsentManager(Recorder):
     ) -> None:
         self.record("consent_apply")
 
-    def release(self, run_id: str, pd_table: list[Any]) -> None:
+    def release(self, run_id: int, pd_table: list[Any]) -> None:
         self.record("consent_release")
 
-    def cancel(self, run_id: str) -> None:
+    def cancel(self, run_id: int) -> None:
         self.record("consent_cancel")
 
 
@@ -288,8 +288,8 @@ class FakeAnswerGenerator(Recorder):
         self,
         question: str,
         memo: str,
-        run_id: str = "",
-        chat_id: str | None = None,
+        run_id: int | None = None,
+        chat_id: int | None = None,
     ) -> Iterator[str]:
         self.record("generate")
         return iter(["최종", " 답변"])
@@ -305,11 +305,11 @@ class FakeSimple(Recorder):
     setting_id = 1
 
     def detect(
-        self, run_id: str, chat_id: str, message_id: str, question: str
+        self, run_id: int, chat_id: int, message_id: int, question: str
     ) -> list[Any]:
         return []
 
-    def apply_to_table(self, run_id: str, pd_table: list[Any]) -> None:
+    def apply_to_table(self, run_id: int, pd_table: list[Any]) -> None:
         pass
 
     def load_rules(self) -> None:
@@ -323,7 +323,7 @@ class FakeSimple(Recorder):
         self.record("model_load")
         return True
 
-    def stop(self, run_id: str) -> None:
+    def stop(self, run_id: int) -> None:
         self.record("local_stop", run_id)
 
 
@@ -426,7 +426,7 @@ def test_one_round_trip_then_enough() -> None:
 class SlowCancelConsentManager(FakeConsentManager):
     """동의 취소가 늦게 끝난다. 끊긴 send()의 예외가 task.cancel()보다 먼저 오게 하려고."""
 
-    def cancel(self, run_id: str) -> None:
+    def cancel(self, run_id: int) -> None:
         time.sleep(0.2)
         super().cancel(run_id)
 
@@ -654,7 +654,7 @@ def test_unexpected_error_still_cleans_up() -> None:
 
 
 class FailingReleaseConsentManager(FakeConsentManager):
-    def release(self, run_id: str, pd_table: list[Any]) -> None:
+    def release(self, run_id: int, pd_table: list[Any]) -> None:
         self.record("consent_release")
         raise RuntimeError("release 실패")
 
@@ -690,7 +690,7 @@ class SlowReleaseConsentManager(FakeConsentManager):
         super().__init__(log)
         self.go = threading.Event()
 
-    def release(self, run_id: str, pd_table: list[Any]) -> None:
+    def release(self, run_id: int, pd_table: list[Any]) -> None:
         self.record("consent_release")
         self.go.wait(timeout=5)
 
@@ -725,7 +725,7 @@ class SlowAnswerChatManager(FakeChatManager):
         super().__init__(log)
         self.go = threading.Event()
 
-    def save_message(self, chat_id: str, role: str, content: str) -> str:
+    def save_message(self, chat_id: int, role: str, content: str) -> str:
         message_id = super().save_message(chat_id, role, content)
         if role == "assistant":
             self.go.wait(timeout=5)

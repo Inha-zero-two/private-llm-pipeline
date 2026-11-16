@@ -34,8 +34,8 @@ flowchart TD
 ## 사용법과 입출력
 
 ```python
-manager = runner.get_context_manager("run-1")
-context_id = manager.get_id("chat-1", "ANSWER")
+manager = runner.get_context_manager(1)
+context_id = manager.get_id(1, "ANSWER")
 manager.append(context_id, "\nUser: 질문\nAssistant: 답변\n")
 count = manager.get_context_length(context_id)
 success = manager.compact_context(context_id)

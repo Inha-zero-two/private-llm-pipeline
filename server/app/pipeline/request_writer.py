@@ -37,8 +37,8 @@ class RequestWriter:
         memo: str,
         pd_table: list[Any],
         need: list[str],
-        run_id: str = "",
-        chat_id: str | None = None,
+        run_id: int | None = None,
+        chat_id: int | None = None,
     ) -> str | None:
         """need의 미해결 항목을 묻는 요청문 작성. 생성에 실패하면 None 반환.
 
@@ -77,8 +77,8 @@ class RequestWriter:
         hits: list[int],
         need: list[str],
         pd_table: list[Any],
-        run_id: str = "",
-        chat_id: str | None = None,
+        run_id: int | None = None,
+        chat_id: int | None = None,
     ) -> str | None:
         """누출 검사에 걸린 항목의 표현만 고친 요청문 반환. 생성에 실패하면 None 반환.
 
@@ -114,7 +114,7 @@ class RequestWriter:
         return result
 
     def _generate(
-        self, run_id: str, input_: str, prompt_idx: PromptIdx, chat_id: str | None
+        self, run_id: int, input_: str, prompt_idx: PromptIdx, chat_id: int | None
     ) -> str | None:
         """Runner로 텍스트를 생성하고 정리. 실패·중지·빈 답변·입력 초과는 None."""
         if self._runner is None:

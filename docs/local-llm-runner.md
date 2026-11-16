@@ -55,14 +55,14 @@ uv run --project server python
 from app.runtime.local_llm_runner import LocalLLMRunner
 
 runner = LocalLLMRunner()  # 프로그램 시작 시 한 번 생성
-run_id = "run-1"
+run_id = 1
 
 # 취소 버튼 등 다른 스레드에서 호출할 함수
 def cancel_request() -> None:
     runner.stop(run_id)
 
 result = runner.request(
-    run_id, "처리할 글", "ANSWER", "chat-1",
+    run_id, "처리할 글", "ANSWER", 1,
     use_context=True,
     system_prompt="한국어로 답하세요.",
     prompt_version="v1",

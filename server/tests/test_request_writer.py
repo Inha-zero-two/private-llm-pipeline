@@ -42,16 +42,16 @@ class FakeRunner:
 def test_write_within_limit_calls_model() -> None:
     runner = FakeRunner()
     writer = RequestWriter(runner)  # type: ignore[arg-type]
-    result = writer.write("질문", "", PD_TABLE, ["지원동기"], "run-1", "chat-1")
+    result = writer.write("질문", "", PD_TABLE, ["지원동기"], 1, 1)
     assert result == "대학교 학생입니다."
-    assert runner.requests == [("run-1", PromptIdx.WRITE, "chat-1")]
+    assert runner.requests == [(1, PromptIdx.WRITE, 1)]
 
 
 def test_write_over_limit_skips_model() -> None:
     runner = FakeRunner()
     writer = RequestWriter(runner)  # type: ignore[arg-type]
     memo = "가" * (INPUT_TOKEN_LIMIT + 1)
-    assert writer.write("질문", memo, PD_TABLE, ["지원동기"], "run-1") is None
+    assert writer.write("질문", memo, PD_TABLE, ["지원동기"], 1) is None
     assert runner.requests == []
 
 
@@ -59,5 +59,5 @@ def test_rewrite_uses_smaller_runner_limit() -> None:
     runner = FakeRunner(runner_limit=50)
     writer = RequestWriter(runner)  # type: ignore[arg-type]
     previous = "인하대 학생입니다. " * 20
-    assert writer.rewrite(previous, [2], ["지원동기"], PD_TABLE, "run-1") is None
+    assert writer.rewrite(previous, [2], ["지원동기"], PD_TABLE, 1) is None
     assert runner.requests == []

@@ -84,7 +84,7 @@ from app.runtime.frontier_client import FrontierClient
 prompts = PromptManager()
 client = FrontierClient(prompt_manager=prompts)
 if client.check_connection():
-    reply = client.send("run-1", "백엔드 신입 직무의 핵심 역량을 알려 줘.", need=["핵심 역량"])
+    reply = client.send(1, "백엔드 신입 직무의 핵심 역량을 알려 줘.", need=["핵심 역량"])
     print(reply.answer, reply.cost, reply.context_mode)  # 첫 회차는 reset
-client.clear("run-1")
+client.clear(1)
 ```

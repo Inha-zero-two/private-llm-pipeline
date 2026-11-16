@@ -41,7 +41,7 @@ class MemoManager:
         self._runner = runner
         self._prompt_manager = prompt_manager
         self._memo: Memo | None = None
-        self._run_id: str | None = None
+        self._run_id: int | None = None
         # 현재 호출부의 (전체 입력 한도, 메모 앞 문자열, 메모 뒤 문자열).
         # prepare_for_request()에서 설정하며 새 실행마다 초기화한다.
         self._request_budget: tuple[int, str, str] | None = None
@@ -58,7 +58,7 @@ class MemoManager:
         if self._max_tokens <= 0:
             raise ValueError("메모 토큰 한도는 양수여야 합니다")
 
-    def start(self, run_id: str, question: str) -> None:
+    def start(self, run_id: int, question: str) -> None:
         """실행 ID를 설정하고 질문을 담은 새 메모로 실행을 시작한다."""
         self._run_id = run_id
         self._memo = Memo(question=question)

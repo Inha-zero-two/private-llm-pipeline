@@ -29,9 +29,9 @@ class PDDetector:
 
     def detect(
         self,
-        run_id: str,
-        chat_id: str,
-        message_id: str,
+        run_id: int,
+        chat_id: int,
+        message_id: int,
         question: str,
         *,
         found_items: list[Any] | None = None,

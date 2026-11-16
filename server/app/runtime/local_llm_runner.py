@@ -62,11 +62,11 @@ class LocalLLMRunner:
         self._request_thread: int | None = None
         self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
         self._stop_event: Event | None = None  # 진행 중인 요청의 중지 신호
-        self._active_run_id: int | str | None = None  # 진행 중인 요청의 실행 ID
+        self._active_run_id: int | None = None  # 진행 중인 요청의 실행 ID
         self._closed = False
         self._llm: Any = None
         # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
-        self.context_managers: dict[str, ContextManager] = {}
+        self.context_managers: dict[int, ContextManager] = {}
         self.model_load()
 
     @contextmanager
@@ -130,7 +130,7 @@ class LocalLLMRunner:
                     self._request_thread = None
                     self._request_condition.notify_all()
 
-    def get_context_manager(self, run_id: str) -> ContextManager:
+    def get_context_manager(self, run_id: int) -> ContextManager:
         """실행 ID에 해당하는 ContextManager 조회 또는 생성.
 
         같은 실행 ID는 기존 객체 재사용. 새 객체도 이 Runner의 모델을 공유.
@@ -177,7 +177,7 @@ class LocalLLMRunner:
         input_: str,
         system_prompt: str,
         *,
-        run_id: str | None = None,
+        run_id: int | None = None,
         max_tokens: int = MAX_OUTPUT_TOKENS,
         log_call: bool = True,
         on_token: Callable[[str], None] | None = None,
@@ -571,7 +571,7 @@ class LocalLLMRunner:
         input_: str,
         system_prompt: str,
         *,
-        run_id: str | None = None,
+        run_id: int | None = None,
         use_context: bool = False,
         context_id: int | None = None,
         max_tokens: int = MAX_OUTPUT_TOKENS,
@@ -643,7 +643,7 @@ class LocalLLMRunner:
 
     def _log_call(
         self,
-        run_id: str | None,
+        run_id: int | None,
         new_input: str,
         output: str,
         *,
