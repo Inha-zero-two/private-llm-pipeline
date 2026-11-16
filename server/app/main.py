@@ -309,8 +309,12 @@ class Main:
         await asyncio.gather(state.task, return_exceptions=True)
 
     def is_running(self, run_id: int) -> bool:
-        """아직 정리가 끝나지 않은 실행인지. (Chat API가 동시 실행을 막을 때 사용)"""
+        """아직 정리가 끝나지 않은 실행인지. (Chat API가 중지 요청을 받을 때 확인)"""
         return run_id in self._runs
+
+    def running_ids(self) -> list[int]:
+        """정리가 끝나지 않은 실행 ID들. (Chat API가 동시 실행을 막고 종료 시 중지할 때 사용)"""
+        return list(self._runs)
 
     # run_pipeline()을 단계별로 나눈 내부 함수
 

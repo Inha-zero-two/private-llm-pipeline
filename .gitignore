@@ -32,6 +32,11 @@ models/
 *.db-journal
 *.db-wal
 *.db-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+# 채팅·실행 기록 DB 기본 위치 (server/app/data/는 코드 폴더라 따로 지정)
+server/data/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm

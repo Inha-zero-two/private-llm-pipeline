@@ -442,11 +442,13 @@ def test_stop_during_frontier_send(stop_error: Exception) -> None:
     frontier = FakeFrontierClient(log)
     frontier.block_send = True
     frontier.stop_error = stop_error
+    chat = FakeChatManager(log)
     main = make_main(
         log,
         planner=FakePlanner(log, enough_after=99),
         frontier_client=frontier,
         consent_manager=SlowCancelConsentManager(log),
+        chat_manager=chat,
     )
 
     async def emit(event: str, data: dict[str, Any]) -> None:
@@ -471,6 +473,66 @@ def test_stop_during_frontier_send(stop_error: Exception) -> None:
     assert "generate" not in names(log)
     # 같은 run_id로 전송을 끊은 뒤 정리한다
     assert frontier.calls == [("stop", 1), ("clear", 1)]
+    # 중지로 끊긴 질의도 failed로 남긴다 (#45). 전송 직전에는 uncertain으로 기록됐다
+    assert chat.queries == {1: "failed"}
+
+
+def test_frontier_query_is_recorded_before_and_after_send() -> None:
+    """전송 직전 uncertain으로 기록하고, 받은 응답의 토큰·비용·시간으로 ok를 남긴다."""
+    log: list[tuple[Any, ...]] = []
+    chat = FakeChatManager(log)
+    statuses: list[str] = []
+    original = chat.save_frontier_query
+
+    def save(run_id: int, query: Any, items: Any) -> int:
+        statuses.append(query.status)
+        return original(run_id, query, items)
+
+    finished: list[Any] = []
+    chat.save_frontier_query = save  # type: ignore[method-assign]
+    chat.finish_frontier_query = (  # type: ignore[method-assign]
+        lambda run_id, query_id, query: finished.append(query)
+    )
+    main = make_main(log, planner=FakePlanner(log, enough_after=1), chat_manager=chat)
+    asyncio.run(main.run_pipeline(1, "질문"))
+
+    assert statuses == ["uncertain"]
+    (query,) = finished
+    assert (query.status, query.answer, query.cost) == ("ok", "답", 0.1)
+    assert (query.input_tokens, query.output_tokens, query.elapsed_ms) == (3, 2, 5)
+    assert query.context_mode == "reset"
+
+
+def test_send_failure_is_recorded_as_failed_and_ends_offline() -> None:
+    log: list[tuple[Any, ...]] = []
+    chat = FakeChatManager(log)
+    frontier = FakeFrontierClient(log)
+    frontier.fail_send = True
+    main = make_main(
+        log,
+        planner=FakePlanner(log, enough_after=99),
+        frontier_client=frontier,
+        chat_manager=chat,
+    )
+    asyncio.run(main.run_pipeline(1, "질문"))
+    assert finished_with(log) == EndReason.OFFLINE
+    assert chat.queries == {1: "failed"}
+
+
+def test_limited_notice_is_saved_with_finish_run() -> None:
+    """정상 종료가 아니면 AnswerGenerator의 제한 안내를 finish_run의 notice로 저장한다."""
+    log: list[tuple[Any, ...]] = []
+    chat = FakeChatManager(log)
+    answer = FakeAnswerGenerator(log)
+    answer.notify_limited = lambda end_reason: "제한 안내"  # type: ignore[method-assign]
+    frontier = FakeFrontierClient(log)
+    frontier.online = False
+    main = make_main(
+        log, frontier_client=frontier, chat_manager=chat, answer_generator=answer
+    )
+    asyncio.run(main.run_pipeline(1, "질문"))
+    assert finished_with(log) == EndReason.OFFLINE
+    assert chat.notice == "제한 안내"
 
 
 @pytest.mark.parametrize("selected_needs", [["학력"], ["경력", "직무"]])

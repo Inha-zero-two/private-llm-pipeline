@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty, Queue
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from pydantic import BaseModel
 
+from ..config import ENV_FILE, read_env_file, setting
 from ..models.enums import PromptIdx
 from ..models.llm_results import ContextMode, FrontierReply
 
@@ -44,8 +44,6 @@ FATAL_STATUS = {
     403: "허용되지 않은 요청",
     422: "1인 한도 또는 교육 총 한도 소진",
 }
-# 환경변수 파일 기본 위치: server/.env
-ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class FrontierError(ConnectionError):
@@ -72,25 +70,6 @@ class FrontierQuery(BaseModel):
     created_at: str
     # 전송 당시 개인정보 허용 상태: (pd_id, allowed, allowed_by)
     items: list[tuple[int | None, bool, str]]
-
-
-def _read_env_file(path: Path) -> dict[str, str]:
-    """KEY=VALUE 형식의 환경변수 파일을 읽어 대문자 키로 반환. 파일이 없으면 빈 dict."""
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip().upper()] = value.strip().strip("\"'")
-    return values
-
-
-def _setting(name: str, env_file: dict[str, str], default: str | None) -> str | None:
-    """환경변수 → .env 파일 → 기본값 순서로 설정값 조회."""
-    return os.environ.get(name) or env_file.get(name) or default
 
 
 def _add_usage(total: dict[str, int], usage: Any) -> None:
@@ -125,12 +104,12 @@ class FrontierClient:
         """
         if timeout <= 0:
             raise ValueError("timeout must be positive")
-        file_values = _read_env_file(env_file) if env_file is not None else {}
-        self._api_key = api_key or _setting("FRONTIER_API_KEY", file_values, None)
+        file_values = read_env_file(env_file) if env_file is not None else {}
+        self._api_key = api_key or setting("FRONTIER_API_KEY", file_values, None)
         self._base_url = (
-            base_url or _setting("FRONTIER_BASE_URL", file_values, DEFAULT_BASE_URL)
+            base_url or setting("FRONTIER_BASE_URL", file_values, DEFAULT_BASE_URL)
         ).rstrip("/")
-        self.model = model or _setting("FRONTIER_MODEL", file_values, DEFAULT_MODEL)
+        self.model = model or setting("FRONTIER_MODEL", file_values, DEFAULT_MODEL)
         if self.model not in MODEL_PRICES:
             raise ValueError(f"단가가 등록되지 않은 모델: {self.model}")
         self._timeout = timeout
@@ -146,11 +125,11 @@ class FrontierClient:
         self._contexts: dict[int, list[dict[str, str]]] = {}
         # 실행 ID별로 _contexts의 대화가 다룬 need. 다음 회차 need와 비교해 keep 판단
         self._context_needs: dict[int, frozenset[str]] = {}
-        self._rounds: dict[str, int] = {}  # 실행 ID별 질의 횟수
+        self._rounds: dict[int, int] = {}  # 실행 ID별 질의 횟수
         self._stop_events: dict[int, Event] = {}  # 진행 중인 전송의 중지 신호
         # stop()이 불린 실행 ID. 중지 뒤에 시작된 send()도 막으려고 clear()까지 유지
         self._stopped: set[int] = set()
-        self._clients: dict[str, httpx.Client] = {}  # 진행 중인 전송의 HTTP 연결
+        self._clients: dict[int, httpx.Client] = {}  # 진행 중인 전송의 HTTP 연결
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
