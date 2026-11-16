@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from app.models.enums import PromptIdx
+from app.models.schemas import PDId as PDId
+from app.models.schemas import PDItem as PDItem
+from app.models.schemas import PDTable as PDTable
 
 if TYPE_CHECKING:
     from app.runtime.local_llm_runner import LocalLLMRunner
@@ -18,23 +19,6 @@ CATEGORY_LABEL: dict[int, str] = {
     2: "속성정보",
 }
 
-PDId = int
-
-
-class PDItem(BaseModel):
-    """검출한 개인정보 항목과 허용 상태."""
-
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
-
-    pd_id: PDId | None = Field(default=None, alias="pdId")
-    text: str
-    category: int
-    allowed: bool = False
-    allowed_by: str = Field(default="none", alias="allowedBy")
-
-
-PDTable = list[PDItem]
-
 
 class PDDetector:
     """질문에서 개인정보를 찾아내는 클래스."""
@@ -45,9 +29,9 @@ class PDDetector:
 
     def detect(
         self,
-        run_id: str,
-        chat_id: str,
-        message_id: str,
+        run_id: int,
+        chat_id: int,
+        message_id: int,
         question: str,
         *,
         found_items: list[Any] | None = None,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty, Queue
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from pydantic import BaseModel
 
+from ..config import ENV_FILE, read_env_file, setting
 from ..models.enums import PromptIdx
 from ..models.llm_results import ContextMode, FrontierReply
 
@@ -44,8 +44,6 @@ FATAL_STATUS = {
     403: "허용되지 않은 요청",
     422: "1인 한도 또는 교육 총 한도 소진",
 }
-# 환경변수 파일 기본 위치: server/.env
-ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class FrontierError(ConnectionError):
@@ -59,7 +57,7 @@ class FrontierCancelledError(RuntimeError):
 class FrontierQuery(BaseModel):
     """프론티어 질의 한 건의 기록. DB frontier_queries·query_items 저장 대상."""
 
-    run_id: str
+    run_id: int
     round: int  # 이번 실행에서 몇 번째 질의인지(1부터)
     request: str  # 실제로 보낸 요청문
     answer: str | None  # 프론티어 응답. 실패·취소 시 None
@@ -72,25 +70,6 @@ class FrontierQuery(BaseModel):
     created_at: str
     # 전송 당시 개인정보 허용 상태: (pd_id, allowed, allowed_by)
     items: list[tuple[int | None, bool, str]]
-
-
-def _read_env_file(path: Path) -> dict[str, str]:
-    """KEY=VALUE 형식의 환경변수 파일을 읽어 대문자 키로 반환. 파일이 없으면 빈 dict."""
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip().upper()] = value.strip().strip("\"'")
-    return values
-
-
-def _setting(name: str, env_file: dict[str, str], default: str | None) -> str | None:
-    """환경변수 → .env 파일 → 기본값 순서로 설정값 조회."""
-    return os.environ.get(name) or env_file.get(name) or default
 
 
 def _add_usage(total: dict[str, int], usage: Any) -> None:
@@ -125,12 +104,12 @@ class FrontierClient:
         """
         if timeout <= 0:
             raise ValueError("timeout must be positive")
-        file_values = _read_env_file(env_file) if env_file is not None else {}
-        self._api_key = api_key or _setting("FRONTIER_API_KEY", file_values, None)
+        file_values = read_env_file(env_file) if env_file is not None else {}
+        self._api_key = api_key or setting("FRONTIER_API_KEY", file_values, None)
         self._base_url = (
-            base_url or _setting("FRONTIER_BASE_URL", file_values, DEFAULT_BASE_URL)
+            base_url or setting("FRONTIER_BASE_URL", file_values, DEFAULT_BASE_URL)
         ).rstrip("/")
-        self.model = model or _setting("FRONTIER_MODEL", file_values, DEFAULT_MODEL)
+        self.model = model or setting("FRONTIER_MODEL", file_values, DEFAULT_MODEL)
         if self.model not in MODEL_PRICES:
             raise ValueError(f"단가가 등록되지 않은 모델: {self.model}")
         self._timeout = timeout
@@ -143,14 +122,14 @@ class FrontierClient:
         self.last_request: FrontierQuery | None = None
         self._lock = Lock()  # 실행별 상태 변경용 잠금
         # 실행 ID별 프론티어 대화 기록(user·assistant 메시지). 실행 사이 공유하지 않음
-        self._contexts: dict[str, list[dict[str, str]]] = {}
+        self._contexts: dict[int, list[dict[str, str]]] = {}
         # 실행 ID별로 _contexts의 대화가 다룬 need. 다음 회차 need와 비교해 keep 판단
-        self._context_needs: dict[str, frozenset[str]] = {}
-        self._rounds: dict[str, int] = {}  # 실행 ID별 질의 횟수
-        self._stop_events: dict[str, Event] = {}  # 진행 중인 전송의 중지 신호
+        self._context_needs: dict[int, frozenset[str]] = {}
+        self._rounds: dict[int, int] = {}  # 실행 ID별 질의 횟수
+        self._stop_events: dict[int, Event] = {}  # 진행 중인 전송의 중지 신호
         # stop()이 불린 실행 ID. 중지 뒤에 시작된 send()도 막으려고 clear()까지 유지
-        self._stopped: set[str] = set()
-        self._clients: dict[str, httpx.Client] = {}  # 진행 중인 전송의 HTTP 연결
+        self._stopped: set[int] = set()
+        self._clients: dict[int, httpx.Client] = {}  # 진행 중인 전송의 HTTP 연결
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
@@ -174,7 +153,7 @@ class FrontierClient:
             return False
         return response.status_code == 200
 
-    def decide_context(self, run_id: str, need: list[str] | None) -> ContextMode:
+    def decide_context(self, run_id: int, need: list[str] | None) -> ContextMode:
         """이번 요청에 이전 프론티어 대화를 이어 붙일지(keep) 새로 시작할지(reset) 판단.
 
         직전 회차와 need가 완전히 같을 때만 keep. 같은 정보를 다시 묻는 경우라 앞 답을
@@ -192,7 +171,7 @@ class FrontierClient:
 
     def send(
         self,
-        run_id: str,
+        run_id: int,
         request_text: str,
         pd_table: list[PDItem] | None = None,
         need: list[str] | None = None,
@@ -223,7 +202,7 @@ class FrontierClient:
 
     def _send(
         self,
-        run_id: str,
+        run_id: int,
         request_text: str,
         pd_table: list[PDItem] | None,
         need: list[str] | None,
@@ -304,7 +283,7 @@ class FrontierClient:
 
     def _post_with_retry(
         self,
-        run_id: str,
+        run_id: int,
         messages: list[dict[str, str]],
         stop_event: Event,
         usage: dict[str, int],
@@ -350,7 +329,7 @@ class FrontierClient:
         raise FrontierError(f"전송 {MAX_ATTEMPTS}회 실패: {last_error}")
 
     def _post(
-        self, run_id: str, messages: list[dict[str, str]], stop_event: Event
+        self, run_id: int, messages: list[dict[str, str]], stop_event: Event
     ) -> httpx.Response:
         """별도 스레드에서 POST /chat/completions 요청. 중지 신호를 받으면 연결을 닫음.
 
@@ -412,7 +391,7 @@ class FrontierClient:
             (input_tokens or 0) * input_price + (output_tokens or 0) * output_price
         ) / 1_000_000
 
-    def stop(self, run_id: str) -> None:
+    def stop(self, run_id: int) -> None:
         """실행 ID의 진행 중인 전송을 취소하고 즉시 반환. 다른 스레드에서 호출 가능.
 
         진행 중인 HTTP 연결을 닫아 요청을 끊음. 이미 서버에 도착한 요청의 비용은
@@ -429,7 +408,7 @@ class FrontierClient:
         if client is not None:
             client.close()
 
-    def clear(self, run_id: str) -> None:
+    def clear(self, run_id: int) -> None:
         """실행이 끝나면 그 실행의 프론티어 대화와 질의 횟수 삭제."""
         with self._lock:
             self._contexts.pop(run_id, None)

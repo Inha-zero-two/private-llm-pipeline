@@ -3,15 +3,13 @@
 실행 (server/ 폴더에서, 저장소 루트를 PYTHONPATH에 넣어야 래퍼 src를 찾는다):
     PYTHONPATH=.. python -m uvicorn app.api.app:app --port 8000
 
-환경변수 PIPELINE으로 실행 방식을 고른다.
-    main (기본): 실제 Main + 있는 모듈은 실제 것 + 없는 모듈은 대역. 모델 접속이 필요하다.
-                 원격 서버를 쓰려면 src/localLLM_API_proxy/keys/에 llama_api_key*.key를 두고
-                 CUDA_VISIBLE_DEVICES=-1로 실행한다. (CUDA GPU가 보이는데 CUDA용
-                 llama-cpp-python이 없으면 래퍼가 원격으로 넘어가지 않고 멈추기 때문)
-    fake       : 모델 없이 fake_run이 흐름만 흉내 낸다. FAKE_DELAY로 속도 조절.
-
-환경변수 LLM=fake를 함께 주면 PIPELINE=main에서 모델 자리만 규칙 기반 가짜 모델(fake_llm.py)로
-바꾼다. 모델 파일·키 없이 실제 Main · 검출 · 판단 · 메모 · Runner를 화면에서 확인할 때 쓴다.
+모든 단계가 실제 모듈로 돈다. 실행에 필요한 것:
+    - 로컬 LLM: 원격 서버를 쓰려면 src/localLLM_API_proxy/keys/에 llama_api_key*.key를 두고
+      CUDA_VISIBLE_DEVICES=-1로 실행한다. (CUDA GPU가 보이는데 CUDA용
+      llama-cpp-python이 없으면 래퍼가 원격으로 넘어가지 않고 멈추기 때문)
+    - 프론티어: server/.env의 FRONTIER_API_KEY (server/.env.example 참고).
+      키가 없거나 연결되지 않으면 실행은 offline으로 끝나고 로컬 모델만으로 답한다.
+    - 채팅·실행 기록 DB: CHAT_DB_PATH (기본 server/data/chat.sqlite3)
 
 web은 vite 프록시로 /api 요청을 이 서버(127.0.0.1:8000)에 보낸다.
 """
@@ -19,18 +17,17 @@ web은 vite 프록시로 /api 요청을 이 서버(127.0.0.1:8000)에 보낸다.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Any, Literal
+from pathlib import Path as FilePath
+from typing import Any, TypeVar
 
 from fastapi import FastAPI, Header, Path, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.backends import Backend, BusyError, FakeBackend, MainBackend
-from app.api.fake_interpret import interpret_consent, parse_rules
+from app.api.events import stream_run
 from app.api.schemas import (
     ChatCreated,
     ChatDetail,
@@ -40,15 +37,19 @@ from app.api.schemas import (
     PrivacySetting,
     RunDetail,
     RunStarted,
-    RunSummary,
     SendBody,
     SettingBody,
     SettingSaved,
 )
-from app.api.store import ChatRecord, RunRecord, Store, now_iso
+from app.api.services import BusyError, FrontierFactory, Pipeline, RunnerFactory
+from app.config import db_path as configured_db_path
+from app.data.chat_manager import StorageError
+from app.privacy.consent_manager import NoPendingConsentError
 
-# 로컬 LLM이 동의·설정문을 해석하는 시간 흉내 (초)
-INTERPRET_SECONDS = 0.5
+T = TypeVar("T")
+
+# ChatManager 오류 코드 → HTTP 상태
+STORAGE_STATUS = {"NOT_FOUND": 404}
 
 
 class ApiError(Exception):
@@ -65,40 +66,54 @@ def _error(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"code": code, "message": message})
 
 
+async def db(func: Callable[..., T], *args: Any) -> T:
+    """ChatManager 호출 등 파일 I/O·모델 호출은 별도 스레드에서 한다."""
+    return await asyncio.to_thread(func, *args)
+
+
+def _local_llm_unavailable() -> ApiError:
+    return ApiError(
+        503,
+        "LOCAL_LLM_UNAVAILABLE",
+        "로컬 LLM에 요청하지 못했습니다. 다시 시도해 주세요.",
+    )
+
+
 def create_app(
-    pipeline: Literal["main", "fake"] = "main",
     *,
-    delay: float = 1.0,
-    runner_factory: Callable[..., Any] | None = None,
-    fake_llm: bool = False,
+    db_path: FilePath | None = None,
+    runner_factory: RunnerFactory | None = None,
+    frontier_factory: FrontierFactory | None = None,
 ) -> FastAPI:
-    """pipeline: 실행 방식 (모듈 설명 참고).
-    delay: 가짜 실행·해석의 대기 시간 배율. 테스트는 0으로 기다림 없이 돌린다.
-    runner_factory: MainBackend가 LocalLLMRunner 대신 쓸 생성 함수 (테스트용).
-    fake_llm: MainBackend의 모델 자리에 규칙 기반 가짜 모델을 끼운다.
+    """db_path: 채팅·실행 기록 DB. 생략하면 CHAT_DB_PATH 설정(기본 server/data/chat.sqlite3).
+    runner_factory · frontier_factory: 로컬 LLM·프론티어 클라이언트를 만드는 함수.
+    생략하면 실제 LocalLLMRunner·FrontierClient를 만든다. (테스트는 전송 계층만 바꿔 넘긴다)
     """
-    store = Store()
-    backend: Backend = (
-        MainBackend(store, runner_factory, fake_llm=fake_llm)
-        if pipeline == "main"
-        else FakeBackend(store, delay)
+    pipeline = Pipeline(
+        db_path or configured_db_path(),
+        runner_factory=runner_factory,
+        frontier_factory=frontier_factory,
     )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await backend.startup()
+        await pipeline.startup()
         yield
-        await backend.shutdown()  # 아직 도는 실행을 정리한다
+        await pipeline.shutdown()  # 아직 도는 실행을 정리한다
 
-    app = FastAPI(title=f"private-llm-pipeline API ({backend.name})", lifespan=lifespan)
-    app.state.store = store
-    app.state.backend = backend
+    app = FastAPI(title="private-llm-pipeline API", lifespan=lifespan)
+    app.state.pipeline = pipeline
 
     # 오류 응답
 
     @app.exception_handler(ApiError)
     async def on_api_error(_: Request, exc: ApiError) -> JSONResponse:
         return _error(exc.status, exc.code, exc.message)
+
+    @app.exception_handler(StorageError)
+    async def on_storage_error(_: Request, exc: StorageError) -> JSONResponse:
+        # NOT_FOUND 외의 코드(CHAT_RUNNING · RUN_FINISHED 등)는 상태 충돌이다
+        return _error(STORAGE_STATUS.get(exc.code, 409), exc.code, str(exc))
 
     @app.exception_handler(RequestValidationError)
     async def on_validation_error(
@@ -120,67 +135,44 @@ def create_app(
     async def on_unexpected(_: Request, __: Exception) -> JSONResponse:
         return _error(500, "INTERNAL_ERROR", "서버에서 요청을 처리하지 못했습니다.")
 
-    def get_chat(chat_id: int) -> ChatRecord:
-        chat = store.chats.get(chat_id)
-        if chat is None:
-            raise ApiError(404, "NOT_FOUND", "채팅을 찾을 수 없습니다.")
-        return chat
-
-    def get_run(run_id: int) -> RunRecord:
-        run = store.runs.get(run_id)
-        if run is None:
-            raise ApiError(404, "NOT_FOUND", "실행을 찾을 수 없습니다.")
-        return run
-
     # API-01 ~ 04 채팅
 
     @app.post("/api/chats")
     async def create_chat() -> ChatCreated:
-        return ChatCreated(chat_id=store.create_chat().chat_id)
+        chats = pipeline.services.chat_manager
+        return ChatCreated(chat_id=await db(chats.create_chat))
 
     @app.get("/api/chats")
     async def list_chats() -> list[ChatSummary]:
+        chats = pipeline.services.chat_manager
         return [
-            ChatSummary(chat_id=c.chat_id, title=c.title) for c in store.list_chats()
+            ChatSummary.model_validate(chat.model_dump())
+            for chat in await db(chats.list_chats)
         ]
 
     @app.get("/api/chats/{chat_id}")
     async def get_chat_detail(chat_id: int = Path(ge=1)) -> ChatDetail:
-        chat = get_chat(chat_id)
-        runs = [store.runs[r] for r in chat.run_ids]
-        return ChatDetail(
-            chat_id=chat.chat_id,
-            title=chat.title,
-            messages=[store.messages[m] for m in chat.message_ids],
-            runs=[
-                RunSummary(
-                    run_id=r.run_id,
-                    user_message_id=r.user_message_id,
-                    status=r.status,
-                    notice=r.notice,
-                )
-                for r in runs
-            ],
+        chats = pipeline.services.chat_manager
+        return ChatDetail.model_validate(
+            (await db(chats.get_chat, chat_id)).model_dump()
         )
 
     @app.delete("/api/chats/{chat_id}")
     async def delete_chat(chat_id: int = Path(ge=1)) -> Response:
-        chat = get_chat(chat_id)
-        if store.is_running(chat):
-            raise ApiError(409, "CHAT_RUNNING", "실행 중인 채팅은 삭제할 수 없습니다.")
-        store.delete_chat(chat_id)
+        # 실행 중인 채팅이면 ChatManager가 CHAT_RUNNING(409)을 낸다
+        await db(pipeline.services.chat_manager.delete_chat, chat_id)
         return Response(status_code=200)
 
     # API-05 ~ 08, 11 실행
 
     @app.post("/api/chats/{chat_id}/messages")
     async def send_message(body: SendBody, chat_id: int = Path(ge=1)) -> RunStarted:
-        get_chat(chat_id)
+        await db(pipeline.services.chat_manager.get_chat, chat_id)  # 없으면 404
         text = body.text.strip()
         if not text:
             raise ApiError(422, "VALIDATION_ERROR", "질문을 입력해 주세요.")
         try:
-            run_id = await backend.start(chat_id, text)
+            run_id = await pipeline.start(chat_id, text)
         except BusyError:
             # 명세서에 없는 경우: 로컬 모델이 하나라 실행을 동시에 돌리지 않는다
             raise ApiError(
@@ -193,127 +185,78 @@ def create_app(
         run_id: int = Path(ge=1),
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
-        run = get_run(run_id)
+        chats = pipeline.services.chat_manager
+        events = await db(chats.get_events, run_id)  # 없는 실행이면 404
         after = 0
         if last_event_id is not None:
             try:
                 after = int(last_event_id)
             except ValueError:
                 after = -1
-            if not 0 <= after <= run.events.last_id:
+            last = events[-1].event_id if events else 0
+            if not 0 <= after <= last:
                 raise ApiError(
                     422, "VALIDATION_ERROR", "재접속 이벤트 ID가 올바르지 않습니다."
                 )
         return StreamingResponse(
-            run.events.stream(after),
+            stream_run(chats, pipeline.hub, run_id, after),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     @app.post("/api/runs/{run_id}/stop")
     async def stop_run(run_id: int = Path(ge=1)) -> Response:
-        run = get_run(run_id)
-        if run.status == "finished" or run.task is None:
+        run = await db(pipeline.services.chat_manager.get_run, run_id)
+        if run.status == "finished" or not await pipeline.stop(run_id):
             raise ApiError(409, "RUN_FINISHED", "이미 종료된 실행입니다.")
-        await backend.stop(run)  # 실제 종료는 스트림의 done(stopped)으로 알린다
+        # 실제 종료는 스트림의 done(stopped)으로 알린다
         return Response(status_code=200)
 
     @app.post("/api/runs/{run_id}/consent")
     async def answer_consent(
         body: ConsentBody, run_id: int = Path(ge=1)
     ) -> ConsentReply:
-        run = get_run(run_id)
-
-        def check() -> None:
-            if run.status == "finished":
-                raise ApiError(409, "RUN_FINISHED", "이미 종료된 실행입니다.")
-            pending = run.pending_consent()
-            if pending is None or pending.consent_id != body.consent_id:
-                raise ApiError(
-                    409,
-                    "NO_PENDING_CONSENT",
-                    "현재 응답할 수 있는 동의 요청이 아닙니다.",
-                )
-
-        check()
-        text = body.text.strip()
-        if not text:
+        services = pipeline.services
+        run = await db(services.chat_manager.get_run, run_id)
+        if run.status == "finished":
+            raise ApiError(409, "RUN_FINISHED", "이미 종료된 실행입니다.")
+        if not body.text.strip():
             raise ApiError(422, "VALIDATION_ERROR", "응답을 입력해 주세요.")
-
-        await asyncio.sleep(INTERPRET_SECONDS * delay)  # 로컬 LLM이 해석하는 시간
-        check()  # 그사이 중지됐거나 다른 응답이 먼저 들어왔으면 적용하지 않는다
-        pending = run.pending_consent()
-        assert pending is not None
-
-        result = interpret_consent(text, pending.items)
-        if not result.ok:
-            return ConsentReply(ok=False, message=result.message)
-
-        pending.result = "answered"
-        pending.response_text = text
-        pending.decisions = result.decisions
-        pending.responded_at = now_iso()
-        await run.events.push(
-            "consent_result",
-            {
-                "consentId": pending.consent_id,
-                "result": "answered",
-                "text": text,
-                "decisions": [d.model_dump(by_alias=True) for d in result.decisions],
-            },
-        )
-        if run.consent_waiter is not None and not run.consent_waiter.done():
-            run.consent_waiter.set_result(result.decisions)
-        return ConsentReply(ok=True, decisions=result.decisions, message=result.message)
+        try:
+            # 로컬 LLM이 응답을 항목별 결정으로 해석한다. (빠른 응답 버튼은 모델 없이)
+            reply = await services.consent_manager.receive(
+                run_id, body.consent_id, body.text
+            )
+        except NoPendingConsentError:
+            raise ApiError(
+                409, "NO_PENDING_CONSENT", "현재 응답할 수 있는 동의 요청이 아닙니다."
+            ) from None
+        except ConnectionError:
+            raise _local_llm_unavailable() from None
+        return ConsentReply.model_validate(reply.model_dump())
 
     @app.get("/api/runs/{run_id}")
     async def get_run_detail(run_id: int = Path(ge=1)) -> RunDetail:
-        run = get_run(run_id)
-        return RunDetail(
-            run_id=run.run_id,
-            chat_id=run.chat_id,
-            user_message_id=run.user_message_id,
-            answer_message_id=run.answer_message_id,
-            status=run.status,
-            end_reason=run.end_reason,
-            notice=run.notice,
-            error_code=run.error_code,
-            frontier_queries=run.frontier_queries,
-            consents=run.consents,
-        )
+        run = await db(pipeline.services.chat_manager.get_run, run_id)
+        return RunDetail.model_validate(run.model_dump())
 
     # API-09 · 10 공개 허용 설정
 
     @app.get("/api/settings/privacy")
     async def get_setting() -> PrivacySetting:
-        return store.setting
+        setting = await db(pipeline.services.privacy_settings.load)
+        return PrivacySetting.model_validate(setting.model_dump())
 
     @app.put("/api/settings/privacy")
     async def save_setting(body: SettingBody) -> SettingSaved:
-        await asyncio.sleep(INTERPRET_SECONDS * delay)  # 로컬 LLM이 해석하는 시간
-        text = body.text.strip()
-        rules = parse_rules(text) if text else []
-        if text and not rules:
-            return SettingSaved(
-                ok=False,
-                rules=store.setting.rules,
-                message=(
-                    "로컬 LLM이 공개 허용 대상을 확인하지 못했습니다. "
-                    '"직무는 공개해도 돼"처럼 대상과 허용 여부를 적어 주세요.'
-                ),
-            )
-        store.save_setting(text, rules)
-        return SettingSaved(
-            ok=True,
-            rules=rules,
-            message="설정을 저장했습니다. 다음 실행부터 적용됩니다.",
-        )
+        try:
+            # 로컬 LLM이 설정문을 규칙으로 해석한다. 해석 실패면 기존 설정을 유지한다.
+            result = await db(pipeline.services.privacy_settings.save, body.text)
+        except (ConnectionError, InterruptedError):
+            raise _local_llm_unavailable() from None
+        return SettingSaved.model_validate(result.model_dump())
 
     return app
 
 
-app = create_app(
-    "fake" if os.environ.get("PIPELINE") == "fake" else "main",
-    delay=float(os.environ.get("FAKE_DELAY", "1")),
-    fake_llm=os.environ.get("LLM") == "fake",
-)
+app = create_app()

@@ -31,7 +31,7 @@ def planner_with(*outputs: dict[str, Any]) -> tuple[Planner, Mock]:
 
 
 def judge(planner: Planner, needs: list[str] | None = NEEDS) -> Any:
-    return planner.judge("질문", "메모", [], "run-1", "chat-1", needs)
+    return planner.judge("질문", "메모", [], 1, 1, needs)
 
 
 def test_input_lists_needs_with_zero_based_numbers() -> None:

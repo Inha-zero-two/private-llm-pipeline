@@ -37,8 +37,8 @@ class Planner:
     def list_needs(
         self,
         question: str,
-        run_id: str = "",
-        chat_id: str | None = None,
+        run_id: int | None = None,
+        chat_id: int | None = None,
         *,
         needs: list[str] | None = None,
         ok: bool = True,
@@ -69,8 +69,8 @@ class Planner:
         question: str,
         memo: str,
         pd_table: list[Any],
-        run_id: str = "",
-        chat_id: str | None = None,
+        run_id: int | None = None,
+        chat_id: int | None = None,
         needs: list[str] | None = None,
         *,
         raw_plan: Any = None,
@@ -176,8 +176,8 @@ class Planner:
 
     def _request_judge(
         self,
-        run_id: str,
-        chat_id: str | None,
+        run_id: int,
+        chat_id: int | None,
         judge_input: str,
         raw_plan: Any,
         ok: bool,

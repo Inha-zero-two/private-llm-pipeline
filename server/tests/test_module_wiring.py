@@ -13,6 +13,7 @@ from app.data.prompt_manager import PromptManager
 from app.main import Main
 from app.models.enums import EndReason, PromptIdx
 from app.models.llm_results import JudgeResult
+from app.models.schemas import StartedRun
 from app.pipeline.planner import Plan, Planner
 from app.privacy.pd_detector import PDDetector, PDItem
 from app.runtime.local_llm_runner import LocalLLMRunner
@@ -73,16 +74,16 @@ def test_detector_and_planner_use_prompts_and_parser(
     )
     question = "김민수의 지원동기를 작성해 줘"
     detector, planner = PDDetector(runner), Planner(runner)
-    items = detector.detect("run-1", "chat-1", "msg-1", question)
+    items = detector.detect(1, 1, 1, question)
     assert items == [PDItem(text="김민수", category=0)]
-    assert planner.list_needs(question, "run-1", "chat-1") == ["지원동기 구성"]
+    assert planner.list_needs(question, 1, 1) == ["지원동기 구성"]
     table = [
         items[0].model_copy(update={"pd_id": 1}),
         PDItem(pd_id=2, text="허용 항목", category=2, allowed=True),
         PDItem(pd_id=3, text="거부 항목", category=2, allowed_by="denied"),
     ]
-    needs = planner.list_needs(question, "run-1", "chat-1", needs=["지원동기 구성"])
-    plan = planner.judge(question, "Answers:", table, "run-1", "chat-1", needs)
+    needs = planner.list_needs(question, 1, 1, needs=["지원동기 구성"])
+    plan = planner.judge(question, "Answers:", table, 1, 1, needs)
     assert type(plan) is Plan
     assert not plan.enough and plan.need_consent
     assert plan.consent_items == [1]
@@ -95,7 +96,7 @@ def test_detector_and_planner_use_prompts_and_parser(
     ]
     assert "[메모]\nAnswers:" in model.messages[-1][1]["content"]
     assert "id=1" in model.messages[-1][1]["content"]
-    assert [entry.args[0] for entry in log_call.call_args_list] == ["run-1"] * 3
+    assert [entry.args[0] for entry in log_call.call_args_list] == [1] * 3
     assert [entry.kwargs["prompt_version"] for entry in log_call.call_args_list] == [
         prompts.get_version()
     ] * 3
@@ -137,11 +138,11 @@ def test_invalid_model_output_propagates_after_runner_retries(
     model.outputs.extend(["invalid json"] * 3)
     with pytest.raises(RuntimeError):
         if stage == "detect":
-            PDDetector(runner).detect("run-1", "chat-1", "msg-1", "질문")
+            PDDetector(runner).detect(1, 1, 1, "질문")
         elif stage == "needs":
-            Planner(runner).list_needs("질문", "run-1", "chat-1")
+            Planner(runner).list_needs("질문", 1, 1)
         else:
-            Planner(runner).judge("질문", "메모", [], "run-1", "chat-1")
+            Planner(runner).judge("질문", "메모", [], 1, 1)
     assert len(model.messages) == 4  # 연결 확인 한 번 + 실제 작업 세 번
 
 
@@ -154,20 +155,17 @@ def test_explicit_prompt_and_results_remain_supported(
     monkeypatch.setattr(runner, "_log_call", log_call)
     model.outputs.append('{"needs": ["직접 요청"]}')
     result = runner.request(
-        "run-1",
+        1,
         "질문",
         PromptIdx.NEEDS,
-        "chat-1",
+        1,
         system_prompt="직접 지정",
         prompt_version="custom",
     )
     assert result[:2] == (["직접 요청"], True)
     assert model.messages[-1][0]["content"] == "직접 지정"
     assert log_call.call_args.kwargs["prompt_version"] == "custom"
-    assert (
-        PDDetector(runner).detect("run-1", "chat-1", "msg-1", "질문", found_items=[])
-        == []
-    )
+    assert PDDetector(runner).detect(1, 1, 1, "질문", found_items=[]) == []
     planner = Planner(runner)
     assert planner.list_needs("질문", needs=["기존 결과"]) == ["기존 결과"]
     assert planner.judge("질문", "", [], raw_plan={"enough": True}).enough
@@ -181,13 +179,11 @@ def test_managed_prompts_work_with_context_isolation(
     runner, model = connected
     model.outputs.extend(['{"needs": ["항목"]}'] * 3)
     for run_id, question in [
-        ("run-1", "첫 질문"),
-        ("run-1", "다음 질문"),
-        ("run-2", "새 질문"),
+        (1, "첫 질문"),
+        (1, "다음 질문"),
+        (2, "새 질문"),
     ]:
-        result = runner.request(
-            run_id, question, PromptIdx.NEEDS, "chat-1", use_context=True
-        )
+        result = runner.request(run_id, question, PromptIdx.NEEDS, 1, use_context=True)
         assert result[1]
     assert "첫 질문" in model.messages[2][1]["content"]
     assert "다음 질문" in model.messages[2][1]["content"]
@@ -210,8 +206,8 @@ def test_main_calls_connected_modules(
     )
     # dev에 없는 모듈만 대역으로 두어 Main → 실제 검출·분류·판단 경로 검사
     chat = Mock()
-    chat.save_message.side_effect = ["msg-user", "msg-answer"]
-    chat.start_run.return_value = "run-main"
+    chat.save_message.return_value = 2
+    chat.start_turn.return_value = StartedRun(user_message_id=1, run_id=1)
     chat.get_pd_table.return_value = []
     memo, frontier, answer = Mock(), Mock(), Mock()
     memo.read_all.return_value = "Answers: 설명"
@@ -234,13 +230,11 @@ def test_main_calls_connected_modules(
         leak_guard=Mock(),
         answer_generator=answer,
     )
-    asyncio.run(main.run_pipeline("chat-main", "질문"))
-    assert [entry.args[0] for entry in log_call.call_args_list] == ["run-main"] * 3
+    asyncio.run(main.run_pipeline(1, "질문"))
+    assert [entry.args[0] for entry in log_call.call_args_list] == [1] * 3
     memo.set_needs.assert_called_once_with(["설명"])
     chat.finish_run.assert_called_once_with(
-        "run-main", EndReason.INFO_ENOUGH, "msg-answer", "Answers: 설명"
+        1, EndReason.INFO_ENOUGH, 2, "Answers: 설명", notice=None
     )
-    assert chat.save_message.call_args_list[-1] == call(
-        "chat-main", "assistant", "답변"
-    )
+    assert chat.save_message.call_args_list[-1] == call(1, "assistant", "답변")
     frontier.send.assert_not_called()

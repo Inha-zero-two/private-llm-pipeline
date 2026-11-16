@@ -55,8 +55,8 @@ class AnswerGenerator:
         self,
         question: str,
         memo: str,
-        run_id: str = "",
-        chat_id: str | None = None,
+        run_id: int | None = None,
+        chat_id: int | None = None,
     ) -> Iterator[str]:
         """최종 답변을 생성하며 받은 토큰을 순서대로 내보내는 반복자 반환.
 
@@ -85,7 +85,7 @@ class AnswerGenerator:
                 text, ok, _, _, reason = runner.manual_request(
                     answer_input,
                     system_prompt,
-                    run_id=run_id or None,
+                    run_id=run_id,
                     on_token=tokens.put,
                 )
                 if reason == "stopped":

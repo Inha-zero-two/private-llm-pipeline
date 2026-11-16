@@ -18,7 +18,7 @@ class ContextManager:
     def __init__(
         self,
         runner: LocalLLMRunner,
-        run_id: str,
+        run_id: int,
         *,
         compaction_limit: int = COMPACTION_LIMIT,
         compaction_target: int = COMPACTION_TARGET,
@@ -65,7 +65,7 @@ class ContextManager:
             self._contexts[context_id] = ""
             return context_id
 
-    def get_id(self, chat_id: str, prompt_idx: str | int) -> int:
+    def get_id(self, chat_id: int, prompt_idx: str | int) -> int:
         """채팅·작업에 해당하는 대화 번호 조회 또는 생성.
 
         같은 객체 안에서는 같은 채팅·작업의 번호 재사용.

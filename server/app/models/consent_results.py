@@ -31,7 +31,7 @@ class ConsentDecision(ConsentModel):
 class ConsentMessage(ConsentModel):
     """저장 전 안내. consent_id는 request()가 저장 후 채운다."""
 
-    run_id: int | str
+    run_id: int
     consent_id: int | None = None
     items: list[ConsentTarget]
     purpose: str
@@ -40,7 +40,7 @@ class ConsentMessage(ConsentModel):
 
 
 class ConsentResult(ConsentModel):
-    run_id: int | str
+    run_id: int
     consent_id: int
     decisions: list[ConsentDecision]
 

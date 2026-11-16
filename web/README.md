@@ -7,15 +7,12 @@ React + Vite (TypeScript). 상세 설계서 9장의 화면 세 개(메인 채팅
 화면은 앱 서버(`server/app/api`, 명세서 `docs/screen-api-spec.md`)에 연결된다. 서버를 먼저 켠다.
 
 ```bash
-# 1) 앱 서버 (저장소 루트에서)
+# 1) 앱 서버 (저장소 루트에서). 모든 단계가 실제 모듈로 돈다
 cd server
-# 실제 파이프라인: 개발된 모듈(검출·판단·메모·로컬 LLM)은 실제, 없는 모듈은 대역
-#   원격 모델 서버 키를 src/localLLM_API_proxy/keys/llama_api_key.key에 둔다
+#   로컬 LLM: 원격 모델 서버 키를 src/localLLM_API_proxy/keys/llama_api_key.key에 둔다
+#   프론티어: server/.env.example을 server/.env로 복사해 FRONTIER_API_KEY를 채운다
+#   채팅 기록: server/data/chat.sqlite3 (CHAT_DB_PATH로 변경)
 CUDA_VISIBLE_DEVICES=-1 PYTHONPATH=.. ../src/localLLM_API_proxy/.venv/Scripts/python -m uvicorn app.api.app:app --port 8000
-# 모델 없이 실제 파이프라인 확인: 모델 자리만 규칙 기반 가짜 모델, Main·검출·판단·메모는 실제
-LLM=fake PYTHONPATH=.. ../src/localLLM_API_proxy/.venv/Scripts/python -m uvicorn app.api.app:app --port 8000
-# 모델 없이 화면 흐름만 볼 때 (Main을 쓰지 않음)
-PIPELINE=fake PYTHONPATH=.. ../src/localLLM_API_proxy/.venv/Scripts/python -m uvicorn app.api.app:app --port 8000
 
 # 2) 화면 (다른 터미널)
 cd web
@@ -33,7 +30,7 @@ npm run dev        # http://localhost:5173, /api 요청은 127.0.0.1:8000으로 
 
 ## 데모 동작
 
-`npm run dev:demo`로 켜면 서버 없이 브라우저 안 데모(`src/demo`)가 설계서 흐름(①~⑧)대로 진행 단계와 답변을 채운다. 데이터는 메모리에만 있어 새로고침하면 사라진다. 서버의 `PIPELINE=fake`도 같은 시나리오를 쓴다.
+`npm run dev:demo`로 켜면 서버 없이 브라우저 안 데모(`src/demo`)가 설계서 흐름(①~⑧)대로 진행 단계와 답변을 채운다. 데이터는 메모리에만 있어 새로고침하면 사라진다. 서버에는 연결하지 않는다.
 
 ### 데모 시나리오
 

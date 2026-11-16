@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from app.runtime.local_llm_runner import LocalLLMRunner
 
 T = TypeVar("T")
-RunId = int | str
+RunId = int
 EmitFn = Callable[[str, dict[str, Any], int], Awaitable[None]]
 
 # 화면의 빠른 응답 버튼이 보내는 문장. 답이 정해져 있으므로 모델을 부르지 않는다.

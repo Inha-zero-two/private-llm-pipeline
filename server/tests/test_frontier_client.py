@@ -49,14 +49,14 @@ def test_invalid_base_url_means_offline() -> None:
     client = make_client(lambda request: httpx.Response(200), base_url="https://h:x")
     assert client.check_connection() is False
     with pytest.raises(FrontierError):
-        client.send("run-1", "질문")
+        client.send(1, "질문")
 
 
 def test_empty_answer_usage_is_added_to_cost() -> None:
     responses = iter([reply("", 100, 4096), reply("답", 100, 50)])
     client = make_client(lambda request: next(responses))
 
-    result = client.send("run-1", "질문")
+    result = client.send(1, "질문")
 
     assert result.answer == "답"
     assert (result.input_tokens, result.output_tokens) == (200, 4146)
@@ -67,7 +67,7 @@ def test_all_empty_answers_still_record_usage() -> None:
     client = make_client(lambda request: reply("", 10, 20))
 
     with pytest.raises(FrontierError):
-        client.send("run-1", "질문")
+        client.send(1, "질문")
 
     assert client.last_request is not None
     assert client.last_request.status == "failed"
@@ -99,9 +99,9 @@ def test_keep_context_only_when_need_matches(
         return reply(f"답{len(posts)}", 1, 1)
 
     client = make_client(handler)
-    assert client.send("run-1", "첫 질문", need=first).context_mode == "reset"
+    assert client.send(1, "첫 질문", need=first).context_mode == "reset"
 
-    result = client.send("run-1", "두 번째 질문", need=second)
+    result = client.send(1, "두 번째 질문", need=second)
 
     assert result.context_mode == expected
     contents = [m["content"] for m in sent_messages(posts[1])]
@@ -110,17 +110,17 @@ def test_keep_context_only_when_need_matches(
 
 def test_context_is_not_shared_between_runs() -> None:
     client = make_client(lambda request: reply("답", 1, 1))
-    client.send("run-1", "질문", need=["경력"])
+    client.send(1, "질문", need=["경력"])
 
-    assert client.send("run-2", "질문", need=["경력"]).context_mode == "reset"
+    assert client.send(2, "질문", need=["경력"]).context_mode == "reset"
 
 
 def test_clear_forgets_need() -> None:
     client = make_client(lambda request: reply("답", 1, 1))
-    client.send("run-1", "질문", need=["경력"])
-    client.clear("run-1")
+    client.send(1, "질문", need=["경력"])
+    client.clear(1)
 
-    assert client.send("run-1", "질문", need=["경력"]).context_mode == "reset"
+    assert client.send(1, "질문", need=["경력"]).context_mode == "reset"
 
 
 def test_stop_before_send_blocks_until_clear() -> None:
@@ -131,12 +131,12 @@ def test_stop_before_send_blocks_until_clear() -> None:
         return reply("답", 1, 1)
 
     client = make_client(handler)
-    client.stop("run-1")  # 진행 중인 전송이 없을 때 중지
+    client.stop(1)  # 진행 중인 전송이 없을 때 중지
 
     with pytest.raises(FrontierCancelledError):
-        client.send("run-1", "질문")
+        client.send(1, "질문")
     assert posts == []
 
-    client.clear("run-1")
-    assert client.send("run-1", "질문").answer == "답"
+    client.clear(1)
+    assert client.send(1, "질문").answer == "답"
     assert len(posts) == 1

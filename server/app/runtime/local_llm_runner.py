@@ -15,6 +15,7 @@ from ..models.llm_results import ParsedRequestResult, RequestResult
 from .local_res_parser import OutputFormatError, parser
 
 if TYPE_CHECKING:
+    from ..data.chat_manager import ChatManager
     from ..data.prompt_manager import PromptManager
     from .context_manager import ContextManager
 
@@ -39,11 +40,13 @@ class LocalLLMRunner:
         model_path: str = "models/gemma.gguf",
         timeout: float = 120.0,
         prompt_manager: PromptManager | None = None,
+        chat_manager: ChatManager | None = None,
     ) -> None:
         """공유 모델과 실행별 대화 관리 객체 초기화.
 
         model_path: 모델 파일 경로. timeout: 한 번의 응답을 기다리는 최대 시간(초).
         prompt_manager: Main과 공유할 프롬프트 관리자. 직접 프롬프트를 전달하면 생략 가능.
+        chat_manager: 실행별 호출 로그를 저장할 ChatManager. 생략하면 로그를 저장하지 않음.
         초기화 시 짧은 요청으로 실제 응답 확인. 모델 준비나 응답 확인 실패 시 예외 전달.
         """
         if timeout <= 0:
@@ -51,6 +54,7 @@ class LocalLLMRunner:
         self._model_path = model_path
         self._timeout = timeout
         self.prompt_manager = prompt_manager
+        self.chat_manager = chat_manager
         self._busy = Lock()  # 모델 사용 중 중복 접근 방지용 잠금
         self._state_lock = Lock()  # 종료 상태와 중지 신호 변경용 잠금
         self._request_condition = Condition(self._state_lock)
@@ -58,11 +62,11 @@ class LocalLLMRunner:
         self._request_thread: int | None = None
         self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
         self._stop_event: Event | None = None  # 진행 중인 요청의 중지 신호
-        self._active_run_id: int | str | None = None  # 진행 중인 요청의 실행 ID
+        self._active_run_id: int | None = None  # 진행 중인 요청의 실행 ID
         self._closed = False
         self._llm: Any = None
         # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
-        self.context_managers: dict[str, ContextManager] = {}
+        self.context_managers: dict[int, ContextManager] = {}
         self.model_load()
 
     @contextmanager
@@ -126,7 +130,7 @@ class LocalLLMRunner:
                     self._request_thread = None
                     self._request_condition.notify_all()
 
-    def get_context_manager(self, run_id: str) -> ContextManager:
+    def get_context_manager(self, run_id: int) -> ContextManager:
         """실행 ID에 해당하는 ContextManager 조회 또는 생성.
 
         같은 실행 ID는 기존 객체 재사용. 새 객체도 이 Runner의 모델을 공유.
@@ -173,7 +177,7 @@ class LocalLLMRunner:
         input_: str,
         system_prompt: str,
         *,
-        run_id: str | None = None,
+        run_id: int | None = None,
         max_tokens: int = MAX_OUTPUT_TOKENS,
         log_call: bool = True,
         on_token: Callable[[str], None] | None = None,
@@ -567,7 +571,7 @@ class LocalLLMRunner:
         input_: str,
         system_prompt: str,
         *,
-        run_id: str | None = None,
+        run_id: int | None = None,
         use_context: bool = False,
         context_id: int | None = None,
         max_tokens: int = MAX_OUTPUT_TOKENS,
@@ -639,7 +643,7 @@ class LocalLLMRunner:
 
     def _log_call(
         self,
-        run_id: str | None,
+        run_id: int | None,
         new_input: str,
         output: str,
         *,
@@ -648,18 +652,31 @@ class LocalLLMRunner:
         elapsed_ms: float,
         format_valid: bool | None,
     ) -> None:
-        """요청 정보와 새 입력·답변의 로그 저장. 실제 저장은 미구현.
+        """요청 정보와 새 입력·답변의 로그 저장.
 
         저장 대상: 실행 ID, 작업 종류, 프롬프트 버전, 소요 시간, 형식 검사 결과, 입력 및 답변.
-        ChatManager 구현 후 아래 주석을 해제해 요청 로그 저장.
+        저장소를 주입하고 실행 ID가 있는 호출만 기록한다.
         """
-        # self.chat_manager.log_event(
-        #     run_id, "llm_call", {
-        #         "prompt_idx": prompt_idx, "prompt_version": prompt_version,
-        #         "elapsed_ms": elapsed_ms, "format_valid": format_valid,
-        #         "input": new_input, "output": output,
-        #     }
-        # )
+        if self.chat_manager is not None and run_id is not None:
+            from ..data.chat_manager import StorageError
+
+            try:
+                self.chat_manager.log_event(
+                    run_id,
+                    "llm_call",
+                    {
+                        "prompt_idx": prompt_idx,
+                        "prompt_version": prompt_version,
+                        "elapsed_ms": elapsed_ms,
+                        "format_valid": format_valid,
+                        "input": new_input,
+                        "output": output,
+                    },
+                )
+            except StorageError as error:
+                # 취소된 작업 스레드가 뒤늦게 끝나도 최종 이벤트 뒤에 로그를 추가하지 않는다.
+                if error.code != "RUN_FINISHED":
+                    raise
         # format_valid: 형식 검사 결과. manual_request와 regen은 검사하지 않으므로 None
         # 저장 제외 항목: 이전 대화 전체, 시스템 프롬프트, 인증키
 
