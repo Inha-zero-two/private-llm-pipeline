@@ -40,6 +40,12 @@ class JudgeResult(BaseModel):
     need_idx: list[Index] = Field(default_factory=list, alias="needIdx")  # 남은 need
 
 
+class GuardResult(BaseModel):
+    # LeakGuard.detect() 결과. Main은 passed로 전송 여부, hits로 재작성 대상을 정함
+    passed: bool  # True면 프론티어로 전송 가능, False면 전송하지 않음
+    hits: list[int] = Field(default_factory=list)  # 요청문에 드러난 금지 항목의 PDId
+
+
 class ConsentText(BaseModel):
     purpose: str  # 개인정보 사용 목적
     benefit: str  # 동의 시 기대 효과
