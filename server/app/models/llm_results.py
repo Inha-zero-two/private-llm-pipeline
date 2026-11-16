@@ -23,7 +23,7 @@ class Rule(BaseModel):
 class RuleMatch(BaseModel):
     # 입력 목록에서 0부터 시작하는 항목 번호. 데이터베이스의 개인정보 ID와 구분
     item: Index  # 입력 개인정보 항목 번호
-    rules: list[Index]  # 일치하는 규칙 번호 목록
+    rules: list[Index]  # 최종 적용 규칙 하나의 번호 또는 빈 목록. 호출자가 개수 검증
 
 
 class JudgeResult(BaseModel):
