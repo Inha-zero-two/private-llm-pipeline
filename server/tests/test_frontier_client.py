@@ -10,6 +10,7 @@ from app.runtime import frontier_client as fc
 from app.runtime.frontier_client import (
     FrontierCancelledError,
     FrontierClient,
+    FrontierError,
 )
 
 
@@ -44,6 +45,36 @@ def make_client(
 @pytest.fixture(autouse=True)
 def no_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fc, "RETRY_DELAYS", (0.0, 0.0))
+
+
+def test_invalid_base_url_means_offline() -> None:
+    client = make_client(lambda request: httpx.Response(200), base_url="https://h:x")
+    assert client.check_connection() is False
+    with pytest.raises(FrontierError):
+        client.send("run-1", "질문")
+
+
+def test_empty_answer_usage_is_added_to_cost() -> None:
+    responses = iter([reply("", 100, 4096), reply("답", 100, 50)])
+    client = make_client(lambda request: next(responses))
+
+    result = client.send("run-1", "질문")
+
+    assert result.answer == "답"
+    assert (result.input_tokens, result.output_tokens) == (200, 4146)
+    assert result.cost == pytest.approx(client._cost(200, 4146))
+
+
+def test_all_empty_answers_still_record_usage() -> None:
+    client = make_client(lambda request: reply("", 10, 20))
+
+    with pytest.raises(FrontierError):
+        client.send("run-1", "질문")
+
+    assert client.last_request is not None
+    assert client.last_request.status == "failed"
+    assert client.last_request.output_tokens == 20 * fc.MAX_ATTEMPTS
+    assert client.last_request.cost > 0
 
 
 class StoppingRunner:

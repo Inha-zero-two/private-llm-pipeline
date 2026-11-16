@@ -94,6 +94,15 @@ def _setting(name: str, env_file: dict[str, str], default: str | None) -> str | 
     return os.environ.get(name) or env_file.get(name) or default
 
 
+def _add_usage(total: dict[str, int], usage: Any) -> None:
+    """응답의 usage 중 정수 토큰 수를 total에 더함. usage가 없으면 무시."""
+    if not usage:
+        return
+    for key, value in usage.items():
+        if isinstance(value, int) and not isinstance(value, bool):
+            total[key] = total.get(key, 0) + value
+
+
 class FrontierClient:
     def __init__(
         self,
@@ -163,7 +172,8 @@ class FrontierClient:
                 response = client.get(
                     f"{self._base_url}/models", headers=self._headers()
                 )
-        except httpx.HTTPError:
+        except (httpx.HTTPError, httpx.InvalidURL):
+            # InvalidURL은 HTTPError 하위가 아님. 주소가 잘못돼도 offline으로 처리
             return False
         return response.status_code == 200
 
@@ -239,16 +249,18 @@ class FrontierClient:
         messages.append({"role": "user", "content": request_text})
         items = [(i.pd_id, i.allowed, i.allowed_by) for i in pd_table or []]
         started = monotonic()
-        status, answer, usage = "failed", None, None
+        status, answer = "failed", None
+        # 모든 시도(빈 답변 포함)의 사용량 합계. 실패·취소여도 쓴 만큼 기록
+        usage: dict[str, int] = {}
         try:
-            answer, usage = self._post_with_retry(run_id, messages, stop_event)
+            answer = self._post_with_retry(run_id, messages, stop_event, usage)
             status = "ok"
         except FrontierCancelledError:
             status = "cancelled"
             raise
         finally:
-            input_tokens = usage.get("prompt_tokens") if usage else None
-            output_tokens = usage.get("completion_tokens") if usage else None
+            input_tokens = usage.get("prompt_tokens")
+            output_tokens = usage.get("completion_tokens")
             cost = self._cost(input_tokens, output_tokens)
             elapsed_ms = int((monotonic() - started) * 1000)
             self._log_query(
@@ -295,9 +307,17 @@ class FrontierClient:
         return self.prompt_manager.get_prompt(self.frontier_sys_prom_idx)
 
     def _post_with_retry(
-        self, run_id: str, messages: list[dict[str, str]], stop_event: Event
-    ) -> tuple[str, dict[str, Any]]:
-        """일시 오류만 재시도하며 전송. (답변, usage) 반환."""
+        self,
+        run_id: str,
+        messages: list[dict[str, str]],
+        stop_event: Event,
+        usage: dict[str, int],
+    ) -> str:
+        """일시 오류만 재시도하며 전송하고 답변 반환.
+
+        usage: 받은 응답마다 사용량을 더해 넣을 dict. 빈 답변 시도도 과금될 수 있으므로
+        성공·실패와 상관없이 호출한 쪽이 이 값으로 비용을 계산.
+        """
         last_error: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
             if attempt:
@@ -309,6 +329,9 @@ class FrontierClient:
             except (httpx.TransportError, TimeoutError) as exc:
                 last_error = exc
                 continue
+            except httpx.InvalidURL as exc:
+                # 주소 설정 오류는 다시 시도해도 같음
+                raise FrontierError(f"잘못된 FRONTIER_BASE_URL: {exc}") from exc
             if response.status_code == 429 or response.status_code >= 500:
                 last_error = FrontierError(f"HTTP {response.status_code}")
                 continue
@@ -319,14 +342,15 @@ class FrontierClient:
                 )
             try:
                 data = response.json()
+                _add_usage(usage, data.get("usage"))
                 answer = data["choices"][0]["message"]["content"] or ""
-            except (ValueError, KeyError, IndexError, TypeError) as exc:
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
                 raise FrontierError(f"응답 형식 오류: {exc}") from exc
             if not answer.strip():
                 # 추론에 출력 토큰을 다 쓰면 빈 답변이 옴. 같은 입력으로 다시 시도
                 last_error = FrontierError("빈 답변")
                 continue
-            return answer, data.get("usage") or {}
+            return answer
         raise FrontierError(f"전송 {MAX_ATTEMPTS}회 실패: {last_error}")
 
     def _post(
