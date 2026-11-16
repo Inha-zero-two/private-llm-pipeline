@@ -27,6 +27,7 @@ from app.api import schemas
 from app.api.consent_flow import ask_consent
 from app.api.fake_interpret import DETECTORS
 from app.api.store import Store
+from app.models.consent_results import ConsentDecision
 from app.models.enums import EndReason
 from app.privacy.pd_detector import CATEGORY_LABEL, PDItem
 
@@ -111,12 +112,14 @@ class ConsentRequest:
 
 @dataclass
 class ConsentResult:
-    allowed_ids: set[int] = field(default_factory=set)
+    """실제 ConsentResult와 같은 모양. 물어본 항목마다 허용·거절 결정을 담는다.
 
-    @property
-    def allow(self) -> bool:
-        """하나라도 허용했으면 계속 진행, 모두 거부면 consent_denied."""
-        return bool(self.allowed_ids)
+    Main은 하나라도 허용했는지(any)로 계속 진행을, 전부 허용했는지(all)로
+    재판단 여부를 정한다.
+    """
+
+    run_id: str
+    decisions: list[ConsentDecision] = field(default_factory=list)
 
 
 class ScreenConsentManager:
@@ -160,14 +163,18 @@ class ScreenConsentManager:
             benefit=req.benefit,
             risk=req.risk,
         )
-        return ConsentResult({d.pd_id for d in decisions if d.allow})
+        return ConsentResult(
+            req.run_id,
+            [ConsentDecision(pd_id=d.pd_id, allow=d.allow) for d in decisions],
+        )
 
     def apply(
         self, result: ConsentResult, req: ConsentRequest, pd_table: PDTable
     ) -> None:
         asked = {item.pd_id for item in req.items}
+        allowed_ids = {d.pd_id for d in result.decisions if d.allow}
         for item in pd_table:
-            if item.pd_id in result.allowed_ids:
+            if item.pd_id in allowed_ids:
                 item.allowed = True
                 item.allowed_by = "consent"
             elif item.pd_id in asked:
