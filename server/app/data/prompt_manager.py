@@ -7,7 +7,7 @@ DEFAULT_PROMPT_FILE = (
     Path(__file__).resolve().parent.parent / "prompts" / "prompts.json"
 )
 
-# 파이프라인에서 필수로 사용하는 기본 13개 단계 이름
+# 파이프라인에서 필수로 사용하는 단계 이름. 기존 번호 뒤에 새 단계를 추가한다.
 REQUIRED_PROMPTS = (
     "DETECT",
     "NEEDS",
@@ -22,6 +22,7 @@ REQUIRED_PROMPTS = (
     "DECIDE_CONTEXT",
     "FRONTIER",
     "MEMO_SUMMARY",
+    "INTERPRET_CONSENT",
 )
 
 
@@ -69,7 +70,7 @@ class PromptManager:
                     raise ValueError
                 if not isinstance(name, str) or not name.strip():
                     raise ValueError
-                # 기본 13개 단계(0~12)는 지정된 번호와 이름이 서로 일치해야 함
+                # 필수 단계(0~13)는 지정된 번호와 이름이 서로 일치해야 함
                 if idx < len(REQUIRED_PROMPTS) or name in REQUIRED_PROMPTS:
                     if idx >= len(REQUIRED_PROMPTS) or REQUIRED_PROMPTS[idx] != name:
                         raise ValueError
@@ -87,7 +88,7 @@ class PromptManager:
             print(f"[PromptManager] 프롬프트 형식 안 맞음: {self._prompt_file}")
             return False
 
-        # 3. 기본 13개 프롬프트 항목 누락 여부 확인
+        # 3. 필수 프롬프트 항목 누락 여부 확인
         missing = [name for name in REQUIRED_PROMPTS if name not in prompts]
         if missing:
             print(f"[PromptManager] 기본 프롬프트 항목 누락: {', '.join(missing)}")

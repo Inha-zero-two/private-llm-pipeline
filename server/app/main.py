@@ -14,6 +14,7 @@ Main은 실행 하나를 처음부터 끝까지 진행하는 컨트롤러다. �
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -335,7 +336,7 @@ class Main:
                     # 사용자가 응답할 때까지 기다린다. (중지되면 stop()이 이 대기를 끊는다)
                     await self._step(run_id, "공개 동의를 기다리는 중")
                     consent_result = await self.consent_manager.request(consent_req)
-                    if not consent_result.allow:
+                    if not any(d.allow for d in consent_result.decisions):
                         return EndReason.CONSENT_DENIED
                     # 허용한 항목은 이번 실행 동안만 허용으로 바뀐다.
                     await self._call(
@@ -344,6 +345,9 @@ class Main:
                         consent_req,
                         pd_table,
                     )
+                    # 일부 거절된 정보를 전제로 만든 계획은 다시 판단한다.
+                    if not all(d.allow for d in consent_result.decisions):
+                        continue
 
             # 5) 개인정보가 새지 않는 요청문을 만든다.
             request_text = await self._write_safe_request(
@@ -529,4 +533,6 @@ class Main:
 
         그동안 이벤트 루프가 막히지 않아야 중지(stop) 요청을 바로 받을 수 있다.
         """
+        if inspect.iscoroutinefunction(func):
+            return await func(*args)
         return await asyncio.to_thread(func, *args)

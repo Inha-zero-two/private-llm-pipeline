@@ -4,6 +4,7 @@ from app.api.fake_interpret import interpret_consent
 from app.api.schemas import PDItem as ScreenItem
 from app.api.stand_ins import ConsentResult, ScreenConsentManager
 from app.api.store import Store
+from app.models.consent_results import ConsentDecision
 from app.privacy.pd_detector import PDItem
 
 
@@ -15,7 +16,14 @@ def test_denied_items_are_not_asked_again_in_same_run() -> None:
     manager = ScreenConsentManager(Store())
     req = manager.build_message("1", [1, 2], ["이직"], table)
     assert req is not None
-    manager.apply(ConsentResult({1}), req, table)
+    result = ConsentResult(
+        "1",
+        [
+            ConsentDecision(pd_id=1, allow=True),
+            ConsentDecision(pd_id=2, allow=False),
+        ],
+    )
+    manager.apply(result, req, table)
     assert (table[0].allowed, table[0].allowed_by) == (True, "consent")
     # 거부한 직장은 denied로 남아 Planner가 같은 실행에서 동의 후보로 고르지 않는다
     assert (table[1].allowed, table[1].allowed_by) == (False, "denied")

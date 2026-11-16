@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .consent_results import ConsentDecision
+
 Index = Annotated[int, Field(ge=0)]
 ContextMode = Literal["keep", "reset"]
 
@@ -72,6 +74,7 @@ ParsedResult = (
     | list[Rule]
     | list[RuleMatch]
     | ConsentText
+    | list[ConsentDecision]
 )
 # 직접 요청한 결과: 답변, 성공 여부, 입력 토큰 수, 출력 토큰 수, 종료 사유
 RequestResult = tuple[str, bool, int | None, int | None, str]
