@@ -90,7 +90,17 @@
     {
       "idx": 6,
       "name": "ANSWER",
-      "prompt": "여기에 시스템 프롬프트 입력"
+      "prompt": [
+        "You are the user's assistant. Write the final answer to [질문].",
+        "[메모] holds information collected from an external expert model for the topics needed to answer (Needs, and Answers per Need). It may be empty ('없음').",
+        "Rules:",
+        "- Base the answer mainly on [메모]. Combine and organize it into one answer; do not list the collected answers one by one.",
+        "- Apply the general information to the user's own situation in [질문]. The user's personal details stay on this device, so you may use them to personalize the answer.",
+        "- If [메모] does not cover part of the question, answer that part briefly from general knowledge and say it is general advice. Do not invent specific facts, numbers, or sources.",
+        "- Do not mention the memo, the external model, or this pipeline.",
+        "- Answer in the same language as [질문]. Use short paragraphs or a list when it helps readability.",
+        "Return ONLY the answer text."
+      ]
     },
     {
       "idx": 7,
