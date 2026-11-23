@@ -11,6 +11,7 @@ from threading import Condition, Event, Lock, Thread, get_ident
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+from ..models.context import ContextBinding, ContextInput, ContextUse
 from ..models.enums import PromptIdx
 from ..models.errors import (
     ErrorCode,
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 
 # 최초 요청을 포함한 최대 생성 시도 횟수
 MAX_ATTEMPTS = 3
+CONTEXT_CACHE_SIZE = 8
 # 모델의 전체 입력·출력 토큰 한도
 N_CTX = 32768
 # 연결 확인·일반 요청·요약 요청의 공통 출력 상한
@@ -57,7 +59,7 @@ class LocalLLMRunner:
         prompt_manager: PromptManager | None = None,
         chat_manager: ChatManager | None = None,
     ) -> None:
-        """공유 모델과 실행별 대화 관리 객체 초기화.
+        """공유 모델과 채팅·실행별 대화 관리 객체 초기화.
 
         model_path: 모델 파일 경로. timeout: 한 번의 응답을 기다리는 최대 시간(초).
         prompt_manager: Main과 공유할 프롬프트 관리자. 직접 프롬프트를 전달하면 생략 가능.
@@ -79,13 +81,15 @@ class LocalLLMRunner:
         self._request_condition = Condition(self._state_lock)
         self._pending_requests: deque[tuple[int | str | None, Event]] = deque()
         self._request_thread: int | None = None
-        self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
+        self._context_lock = Lock()  # 대화 객체와 실행별 조회 경계의 접근 잠금
         self._stop_event: Event | None = None  # 진행 중인 요청의 중지 신호
         self._active_run_id: int | None = None  # 진행 중인 요청의 실행 ID
         self._closed = False
         self._llm: Any = None
-        # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
+        # 내부 작업은 실행별 임시 공간, 사용자 대화는 채팅별 DB 복원 캐시.
         self.context_managers: dict[int, ContextManager] = {}
+        self._chat_contexts: dict[int, ContextManager] = {}
+        self._chat_bindings: dict[int, ContextBinding] = {}
         self.model_load()
 
     @contextmanager
@@ -148,17 +152,67 @@ class LocalLLMRunner:
                     self._request_condition.notify_all()
 
     def get_context_manager(self, run_id: int) -> ContextManager:
-        """실행 ID에 해당하는 ContextManager 조회 또는 생성.
-
-        같은 실행 ID는 기존 객체 재사용. 새 객체도 이 Runner의 모델을 공유.
-        동시에 같은 실행 ID로 조회할 때 객체가 중복 생성되지 않도록 잠금 사용.
-        """
+        """내부 작업의 임시 컨텍스트. 실행·채팅·작업별로 격리한다."""
         from .context_manager import ContextManager
 
         with self._context_lock:
             if run_id not in self.context_managers:
                 self.context_managers[run_id] = ContextManager(self, run_id)
             return self.context_managers[run_id]
+
+    def get_chat_context_manager(self, chat_id: int) -> ContextManager:
+        """질문·최종 답변의 DB 복원 가능한 채팅별 LRU 캐시."""
+        from .context_manager import ContextManager
+
+        with self._context_lock:
+            if chat_id not in self._chat_contexts:
+                if len(self._chat_contexts) >= CONTEXT_CACHE_SIZE:
+                    self._chat_contexts.pop(next(iter(self._chat_contexts)))
+                self._chat_contexts[chat_id] = ContextManager(self, chat_id)
+            manager = self._chat_contexts.pop(chat_id)
+            self._chat_contexts[chat_id] = manager
+            return manager
+
+    def begin_turn_context(
+        self, run_id: int, chat_id: int, user_message_id: int
+    ) -> None:
+        if self.chat_manager is None:
+            return
+        boundary = self.chat_manager.context_boundary(chat_id, user_message_id)
+        with self._context_lock:
+            self._chat_bindings[run_id] = ContextBinding(
+                chat_id=chat_id, through_seq=boundary
+            )
+
+    def end_turn_context(self, run_id: int) -> None:
+        with self._context_lock:
+            self._chat_bindings.pop(run_id, None)
+            self.context_managers.pop(run_id, None)
+
+    def forget_chat(self, chat_id: int) -> None:
+        with self._context_lock:
+            self._chat_contexts.pop(chat_id, None)
+
+    def _chat_input(
+        self,
+        run_id: int | str | None,
+        input_: str,
+        system_prompt: str,
+        max_tokens: int,
+        *,
+        chat_id: int | str | None = None,
+    ) -> ContextInput:
+        with self._context_lock:
+            binding = self._chat_bindings.get(run_id)
+        if binding is None:
+            return ContextInput(text=input_)
+        if chat_id is not None and chat_id != binding.chat_id:
+            raise PipelineError(
+                ErrorCode.STATE_CONSISTENCY_ERROR, ErrorStage.COMPACTION
+            )
+        return self.get_chat_context_manager(binding.chat_id).prepare_input(
+            input_, system_prompt, binding.through_seq, run_id, max_tokens=max_tokens
+        )
 
     def model_load(self) -> bool:
         """모델을 준비하고 짧은 응답으로 연결 확인 후 True 반환.
@@ -215,6 +269,13 @@ class LocalLLMRunner:
                 interruptible or self._stop_event is not stop_signal
             ):
                 return "", False, 0, 0, "stopped"
+            chat_input = (
+                self._chat_input(run_id, input_, system_prompt, max_tokens)
+                if stage == ErrorStage.ANSWER
+                else ContextInput(text=input_)
+            )
+            if interruptible and stop_signal.is_set():
+                return "", False, 0, 0, "stopped"
             input_tokens: int | None = 0
             output_tokens: int | None = 0
             last_output = ""
@@ -224,7 +285,7 @@ class LocalLLMRunner:
                 started = monotonic()
                 try:
                     result = self._generate(
-                        input_,
+                        chat_input.text,
                         system_prompt,
                         stop_signal=stop_signal,
                         output=output,
@@ -267,6 +328,7 @@ class LocalLLMRunner:
                             failure_reason=attempt_failure,
                             attempt=attempt,
                             stage=stage,
+                            context_reference=chat_input.reference,
                         )
                 input_tokens = (
                     input_tokens + result[2]
@@ -489,7 +551,7 @@ class LocalLLMRunner:
                     )
                     # 새 입력과 출력 공간까지 포함해 넘칠 경우 모델 요청 전에 기존 대화 압축
                     if len(self.tokenize(model_input)) > input_limit:
-                        compacted = manager.compact_context(context_id)
+                        compacted = manager.compact_context(context_id, run_id=run_id)
                         if stop_signal.is_set():
                             return "", False, 0, 0, "stopped"
                         if not compacted:
@@ -498,6 +560,16 @@ class LocalLLMRunner:
                         model_input = (
                             f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                         )
+            chat_input = (
+                self._chat_input(
+                    run_id, model_input, system_prompt, max_tokens, chat_id=chat_id
+                )
+                if prompt_idx in {PromptIdx.NEEDS, PromptIdx.JUDGE, PromptIdx.WRITE}
+                else ContextInput(text=model_input)
+            )
+            model_input = chat_input.text
+            if stop_signal.is_set():
+                return None, False, 0, 0, "stopped"
             # 재생성에도 같은 입력 사용. 최종 응답까지 이전 대화 내용은 유지
             input_tokens: int | None = 0
             output_tokens: int | None = 0
@@ -619,13 +691,16 @@ class LocalLLMRunner:
                         format_valid=format_valid,
                         failure_reason=attempt_failure,
                         attempt=attempt,
+                        context_reference=chat_input.reference,
                     )
                 if stop_signal.is_set():
                     return result[0], False, input_tokens, output_tokens, "stopped"
                 if manager is not None and context_id is not None:
                     # 입력과 형식 검사를 통과한 최종 답변만 이전 대화에 한 번 추가
                     appended = manager.append(
-                        context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
+                        context_id,
+                        f"\nUser: {input_}\nAssistant: {result[0]}\n",
+                        run_id=run_id,
                     )
                     if not appended and not stop_signal.is_set():
                         return (
@@ -731,6 +806,7 @@ class LocalLLMRunner:
         failure_reason: str | None = None,
         attempt: int | None = None,
         stage: ErrorStage = ErrorStage.PIPELINE,
+        context_reference: ContextUse | None = None,
     ) -> None:
         """요청 정보와 새 입력·답변의 로그 저장.
 
@@ -751,6 +827,9 @@ class LocalLLMRunner:
                         "format_valid": format_valid,
                         "input": new_input,
                         "output": output,
+                        "context": context_reference.model_dump(mode="json")
+                        if context_reference
+                        else None,
                         "failure_reason": failure_reason,
                         "attempt": attempt,
                         "error": describe_error(
@@ -825,6 +904,10 @@ class LocalLLMRunner:
         with self._busy:
             if self._llm is not None:
                 self._llm.close()
+        with self._context_lock:
+            self.context_managers.clear()
+            self._chat_contexts.clear()
+            self._chat_bindings.clear()
 
     def __enter__(self) -> LocalLLMRunner:
         """with 문에서 사용할 현재 객체 반환. 모델 준비는 생성자에서 처리."""

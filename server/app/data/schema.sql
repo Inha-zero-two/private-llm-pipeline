@@ -1,5 +1,6 @@
 -- ChatManager가 빈 DB를 만들 때 실행하는 SQLite 스키마.
--- 기존 DB의 분류 범위는 ChatManager 초기화 시 마이그레이션한다.
+-- 기존 DB는 삭제하지 않는다. ChatManager가 user_version별로 트랜잭션 갱신한다.
+-- 2→3 갱신은 아래 Context persistence 구조와 기존 메시지 연결을 함께 적용한다.
 -- 컬럼 설명은 docs/db-schema.md에 있으며, 둘이 다르면 이 파일이 기준이다.
 
 CREATE TABLE chats (
@@ -73,4 +74,25 @@ CREATE INDEX runs_chat ON runs(chatId, runId);
 CREATE INDEX events_run ON run_events(runId, eventId);
 CREATE INDEX consents_run ON consent_requests(runId, consentId);
 CREATE INDEX queries_run ON frontier_queries(runId, round);
-PRAGMA user_version = 2;
+-- Context persistence
+CREATE TABLE context_entries (
+    chatId INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
+    contextKey TEXT NOT NULL,
+    contextSeq INTEGER NOT NULL CHECK(contextSeq > 0),
+    messageId INTEGER NOT NULL REFERENCES messages ON DELETE CASCADE,
+    PRIMARY KEY(chatId, contextKey, contextSeq),
+    UNIQUE(chatId, contextKey, messageId)
+);
+CREATE TABLE context_compactions (
+    compactionId INTEGER PRIMARY KEY AUTOINCREMENT,
+    chatId INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
+    contextKey TEXT NOT NULL,
+    coveredThroughSeq INTEGER NOT NULL CHECK(coveredThroughSeq > 0),
+    summary TEXT NOT NULL CHECK(length(trim(summary)) > 0),
+    runId INTEGER REFERENCES runs ON DELETE SET NULL,
+    createdAt TEXT NOT NULL,
+    FOREIGN KEY(chatId, contextKey, coveredThroughSeq)
+        REFERENCES context_entries(chatId, contextKey, contextSeq) ON DELETE CASCADE
+);
+CREATE INDEX compactions_chat ON context_compactions(chatId, contextKey, compactionId);
+PRAGMA user_version = 3;

@@ -64,7 +64,7 @@ class AnswerGenerator:
         생성은 별도 스레드에서 바로 시작. 호출자는 next()로 토큰을 하나씩 꺼냄.
         중지(stop(run_id))되면 그때까지의 토큰만 내보내고 조용히 끝남.
         생성 실패는 반복 도중 원인별 PipelineError 또는 원래 요청 예외로 전달.
-        chat_id는 Main 호출 규격을 다른 모듈과 맞추기 위한 자리(이전 대화 미사용).
+        이전 사용자 대화는 Runner가 run_id에 고정한 채팅 경계로 자동 주입한다.
         """
         # 1. 입력값 확인과 모델 입력 구성. 질문 원문은 로컬에서만 쓰므로 그대로 사용
         if not isinstance(question, str) or not question.strip():

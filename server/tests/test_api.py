@@ -65,6 +65,7 @@ class RoutedLlama:
         self.outputs = {name: deque(values) for name, values in outputs.items()}
         self.outputs.setdefault("CHECK", deque(["OK"]))
         self.calls: list[str] = []
+        self.inputs: list[tuple[str, str]] = []
         self.detect_prompts: list[str] = []
         self._base_detect = prompts.get_prompt(PromptIdx.DETECT)
 
@@ -79,8 +80,11 @@ class RoutedLlama:
         if system.startswith(self._base_detect):
             task = "DETECT"
             self.detect_prompts.append(system)
+        if system.startswith("Summarize the conversation in at most"):
+            task = "COMPACTION"
         assert task is not None, f"알 수 없는 시스템 프롬프트: {system[:40]}"
         self.calls.append(task)
+        self.inputs.append((task, messages[-1]["content"]))
         queue = self.outputs.get(task)
         assert queue, f"{task} 작업의 출력을 정해 두지 않았습니다"
         output = queue.popleft() if len(queue) > 1 else queue[0]
@@ -688,3 +692,94 @@ def test_primary_and_cleanup_failures_do_not_expose_exception_text(
     ]
     assert [e["code"] for e in errors] == ["LOCAL_LLM_TIMEOUT", "CLEANUP_ERROR"]
     assert gateway.requests == []
+
+
+@pytest.mark.parametrize("restore", ["warm", "evicted", "restart", "compacted"])
+def test_followup_model_inputs_use_prior_question_and_delivered_answer(
+    make_client: Callable[..., tuple[TestClient, RoutedLlama, Gateway]], restore: str
+) -> None:
+    client, model, gateway = make_client(SIMPLE_RUN)
+    question = "AI glasses exam cheating news"
+    chat, first = start(client, question)
+    events_of(client, first)
+    services = client.app.state.pipeline.services
+    runner = services.main.local_llm_runner
+    store = services.chat_manager
+    if restore == "compacted":
+        # The summary must be the actual input after a cold restore.
+        model.outputs["COMPACTION"] = deque(["AI glasses"])
+        runner.get_chat_context_manager(chat)._limit = 80
+    if restore == "evicted":
+        for _ in range(9):
+            runner.get_chat_context_manager(store.create_chat())
+        assert chat not in runner._chat_contexts
+    if restore == "restart":
+        make_client.close(client)
+        client, model, gateway = make_client(SIMPLE_RUN)
+        runner = client.app.state.pipeline.services.main.local_llm_runner
+    model.outputs["JUDGE"] = deque([JUDGE_ASK_NOTHING, JUDGE_ENOUGH])
+    model.inputs.clear()
+    followup = "Actual links please"
+    response = client.post(f"/api/chats/{chat}/messages", json={"text": followup})
+    second = response.json()["runId"]
+    events_of(client, second)
+    detail = client.get(f"/api/runs/{second}").json()
+    assert detail["errorCode"] is None
+    for task in ["NEEDS", "JUDGE", "WRITE", "ANSWER"]:
+        inputs = [text for stage, text in model.inputs if stage == task]
+        assert inputs, task
+        for text in inputs:
+            expected_history = "AI glasses" if restore == "compacted" else question
+            assert expected_history in text
+            previous, current = text.split("[현재 입력]\n", 1)
+            assert followup not in previous
+            assert followup in current
+            if task == "NEEDS":
+                assert current.count(followup) == 1
+            if restore != "compacted":
+                assert text.count(ANSWER) == 1
+    assert [text for task, text in model.inputs if task == "DETECT"] == [followup]
+    assert all(
+        "[user]" not in text
+        for task, text in model.inputs
+        if task in {"GUARD", "REWRITE"}
+    )
+    assert runner._chat_bindings == {}
+    assert runner.context_managers == {}
+    assert gateway.requests[-1] == REQUEST
+    if restore == "compacted":
+        compacted_input = [text for task, text in model.inputs if task == "NEEDS"][0]
+        runner.forget_chat(chat)
+        manager = runner.get_chat_context_manager(chat)
+        # Same boundary and current input after cache loss use the adopted summary.
+        needs_input = next(
+            e["payload"]["input"]
+            for e in [event.model_dump() for event in store.get_events(second)]
+            if e["type"] == "llm_call" and e["payload"]["prompt_idx"] == "NEEDS"
+        )
+        assert (
+            manager.prepare_input(needs_input, "sys", 2, second).text == compacted_input
+        )
+        make_client.close(client)
+        client, _, _ = make_client(SIMPLE_RUN)
+        restored = client.app.state.pipeline.services.main.local_llm_runner
+        assert (
+            restored.get_chat_context_manager(chat)
+            .prepare_input(needs_input, "sys", 2, second)
+            .text
+            == compacted_input
+        )
+
+
+def test_prior_chat_is_not_injected_into_another_chat(
+    make_client: Callable[..., tuple[TestClient, RoutedLlama, Gateway]],
+) -> None:
+    client, model, _ = make_client(SIMPLE_RUN)
+    _, run = start(client, "unique previous question")
+    events_of(client, run)
+    model.inputs.clear()
+    model.outputs["JUDGE"] = deque([JUDGE_ENOUGH])
+    _, other = start(client, "different chat")
+    events_of(client, other)
+    assert all("unique previous question" not in text for _, text in model.inputs)
+    assert all(ANSWER not in text for _, text in model.inputs)

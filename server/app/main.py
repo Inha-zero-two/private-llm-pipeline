@@ -202,6 +202,12 @@ class Main:
             assert task is not None  # run_pipeline은 항상 asyncio 작업 안에서 돈다
             self._runs[run_id] = _RunState(chat_id=chat_id, task=task)
             await self._emit("run", {"run_id": run_id})  # 화면이 중지 버튼에 쓸 ID
+            await self._call(
+                self.local_llm_runner.begin_turn_context,
+                run_id,
+                chat_id,
+                user_message_id,
+            )
 
             # 질문 속 개인정보를 찾아 이 채팅의 개인정보 테이블(PDTable)에 더한다.
             await self._step(run_id, "개인정보 검출 중", ErrorStage.DETECT)
@@ -651,6 +657,7 @@ class Main:
                 await self._try(errors, self.memo_manager.clear)
             # 이번 실행의 프론티어 대화를 지워 다음 실행·채팅과 섞이지 않게 한다.
             await self._try(errors, self.frontier_client.clear, run_id)
+            await self._try(errors, self.local_llm_runner.end_turn_context, run_id)
             if errors:
                 await self._try(
                     errors,
@@ -763,8 +770,12 @@ class Main:
             return await func(*args)
         task = asyncio.create_task(asyncio.to_thread(func, *args))
         bound = func.func if isinstance(func, functools.partial) else func
-        if getattr(bound, "__self__", None) is self.chat_manager:
-            # 취소돼도 시작한 DB 트랜잭션을 먼저 마쳐 종료 기록과 순서가 뒤집히지 않게 한다.
+        owner = getattr(bound, "__self__", None)
+        if owner is self.chat_manager or (
+            owner is self.local_llm_runner
+            and getattr(bound, "__name__", None) == "begin_turn_context"
+        ):
+            # 시작한 DB 저장·컨텍스트 연결을 먼저 마쳐 종료 정리가 앞서지 않게 한다.
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:

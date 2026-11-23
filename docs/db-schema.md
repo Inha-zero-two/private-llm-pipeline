@@ -9,9 +9,9 @@ pd_items의 allowed/allowedBy는 사전 설정 상태만 저장한다. 임시 �
 전송 당시 허용 상태는 query_items에 보존한다. 항목별 동의 결정은 JSON으로 저장한다.
 오류는 status=finished, endReason=NULL, errorCode/errorStage/notice로 기록한다. [오류 계약](errors.md)을 따른다.
 
-빈 DB의 스키마 버전은 2다. 버전 1은 runs.errorStage TEXT를 트랜잭션으로 추가하며 기존 데이터를 보존한다.
+빈 DB의 스키마 버전은 3이다. 버전 1은 runs.errorStage TEXT를 트랜잭션으로 추가하며 기존 데이터를 보존한다.
 기존 버전 0은 최초 연결 시 개인정보 ID와 전송 기록을
-보존하면서 `기타` 분류를 허용하도록 1로 갱신한 뒤 2로 갱신한다. 공개 설정의 영문 검출 설명은
+보존하면서 `기타` 분류를 허용하도록 1로 갱신한 뒤 2로 갱신한다. 버전 2는 컨텍스트 테이블 생성·기존 user/assistant 메시지 연결·버전 3 확정을 한 트랜잭션으로 수행한다. 공개 설정의 영문 검출 설명은
 `privacy_settings.rules` JSON의 `detect_en`에 저장한다.
 
 실행 종료 후 채팅을 삭제할 때 runs를 먼저 삭제하고 chats를 삭제한다.
@@ -151,3 +151,35 @@ pd_items의 allowed/allowedBy는 사전 설정 상태만 저장한다. 임시 �
 - query_items: `(queryId, pdId)` 유일, allowed는 0/1
 - messages(chatId, messageId), runs(chatId, runId), run_events(runId, eventId),
   consent_requests(runId, consentId), frontier_queries(runId, round)에 조회 인덱스
+
+## context_entries / context_compactions
+
+context_entries는 실제 반영 대상인 사용자 질문·최종 답변 메시지를 참조한다.
+
+| 컬럼 | 제약 / 의미 |
+| --- | --- |
+| chatId | chats 참조, ON DELETE CASCADE |
+| contextKey | NOT NULL, 현재 영속 사용자 대화는 conversation |
+| contextSeq | 양의 정수, (chatId, contextKey)별 단조 증가 |
+| messageId | messages 참조, ON DELETE CASCADE |
+
+PK는 (chatId, contextKey, contextSeq), 고유 키는 (chatId, contextKey, messageId)다. 메시지 저장과 순번 발급은 같은 쓰기 트랜잭션이다.
+
+context_compactions는 실제 채택된 요약과 포함 경계를 기록한다.
+
+| 컬럼 | 제약 / 의미 |
+| --- | --- |
+| compactionId | PK / AUTOINCREMENT |
+| chatId / contextKey | 컨텍스트 구분 |
+| coveredThroughSeq | 양의 정수, context_entries의 복합 키 참조 / CASCADE |
+| summary | 공백이 아닌 요약 |
+| runId | 요약 호출의 현재 실행, runs 참조 / SET NULL |
+| createdAt | UTC ISO 8601 |
+
+압축 기록에는 새 contextSeq를 발급하지 않는다. 최신 유효 요약과 포함 순번 이후의 증분을 복원하며, 최신 compactionId를 비교해 stale 저장을 거부한다. compaction 이벤트와 요약은 함께 커밋한다.
+
+### 기존 DB 갱신 절차
+
+기존 DB를 삭제하거나 schema.sql을 다시 실행하지 않는다. 서버를 정상 종료하고 DB를 백업한 뒤 새 버전으로 기동하면 ChatManager가 PRAGMA user_version에 따라 0→1→2→3 갱신을 순서대로 적용한다. WAL을 사용하는 실행 중 DB 파일 하나만 복사하는 방식은 피하고, 정상 종료 후 백업하거나 SQLite backup API를 사용한다.
+
+각 갱신은 트랜잭션이며 실패하면 해당 단계 전체를 롤백하고 서버 시작을 중단한다. 원인을 해결하고 재기동하면 마지막 완료 버전부터 재시도한다. 버전 3에서 반복 기동해도 메시지를 다시 연결하지 않는다. 질문·답변·실행·개인정보 설정·전송·동의 이력과 기존 ID는 보존한다. 이전 context_compacted 메시지는 보존하되 경계 정보가 없으므로 체크포인트로 재사용하지 않는다.

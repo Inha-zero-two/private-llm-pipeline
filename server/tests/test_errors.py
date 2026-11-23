@@ -98,8 +98,9 @@ def test_existing_db_upgrade_preserves_errors_and_is_repeatable(
     path = tmp_path / "history.sqlite3"
     schema = (
         SCHEMA_PATH.read_text(encoding="utf-8")
+        .split("-- Context persistence")[0]
         .replace(", errorStage TEXT", "")
-        .replace("PRAGMA user_version = 2;", f"PRAGMA user_version = {version};")
+        + f"\nPRAGMA user_version = {version};"
     )
     if version == 0:
         schema = schema.replace("category BETWEEN 0 AND 3", "category BETWEEN 0 AND 2")
@@ -122,7 +123,7 @@ def test_existing_db_upgrade_preserves_errors_and_is_repeatable(
             assert run.notice == MESSAGES[ErrorCode.INTERNAL_ERROR]
             assert store.get_chat(1).messages[0].content == "question"
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (2,)
+        assert db.execute("PRAGMA user_version").fetchone() == (3,)
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -227,8 +228,9 @@ def test_failed_schema_upgrade_can_be_retried_without_data_loss(
     path = tmp_path / "old.sqlite3"
     schema = (
         SCHEMA_PATH.read_text(encoding="utf-8")
+        .split("-- Context persistence")[0]
         .replace(", errorStage TEXT", "")
-        .replace("PRAGMA user_version = 2;", "PRAGMA user_version = 1;")
+        + "\nPRAGMA user_version = 1;"
     )
     with sqlite3.connect(path) as db:
         db.executescript(schema)

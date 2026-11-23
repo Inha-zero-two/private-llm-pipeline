@@ -177,6 +177,7 @@ def create_app(
     async def delete_chat(chat_id: int = Path(ge=1)) -> Response:
         # 실행 중인 채팅이면 ChatManager가 CHAT_RUNNING(409)을 낸다
         await db(pipeline.services.chat_manager.delete_chat, chat_id)
+        await db(pipeline.services.main.local_llm_runner.forget_chat, chat_id)
         return Response(status_code=200)
 
     # API-05 ~ 08, 11 실행

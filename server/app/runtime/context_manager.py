@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from threading import RLock
 
+from ..models.context import CONVERSATION, ContextInput, ContextUse
 from ..models.errors import (
     ErrorCode,
     ErrorStage,
     PipelineError,
+    StateConflictError,
     describe_error,
     model_failure,
 )
@@ -21,23 +24,31 @@ COMPACTION_TARGET = MAX_OUTPUT_TOKENS
 COMPACTION_MAX_TOKENS = MAX_OUTPUT_TOKENS
 
 
+@dataclass(frozen=True)
+class _History:
+    text: str = ""
+    through_seq: int = 0
+    compaction_id: int | None = None
+
+
 class ContextManager:
     def __init__(
         self,
         runner: LocalLLMRunner,
-        run_id: int,
+        chat_id: int,
         *,
         compaction_limit: int = COMPACTION_LIMIT,
         compaction_target: int = COMPACTION_TARGET,
     ) -> None:
-        """한 실행에서 사용할 이전 대화 저장 공간과 압축 설정 초기화.
+        """채팅의 영속 대화 또는 실행의 임시 작업 공간과 압축 설정 초기화.
 
-        runner: 프로그램에서 공유하는 모델 실행 객체. run_id: 실행 ID.
-        compaction_limit: 자동 요약 기준 토큰 수. compaction_target: 요약 목표 토큰 수.
-        같은 실행에서 객체를 재사용하고 이전 대화는 메모리에 저장.
+        prepare_input은 chat_id의 DB 기록을 복원한다. get_id/append는 별도의
+        임시 작업 공간이며 Runner가 실행별 객체로 격리한다.
         """
         self._runner = runner
-        self.run_id = run_id
+        self.chat_id = chat_id
+        self._store = getattr(runner, "chat_manager", None)
+        self._history: _History | None = None
         self._target = compaction_target
         self._system_prompt = (
             f"Summarize the conversation in at most {self._target} tokens. "
@@ -59,16 +70,15 @@ class ContextManager:
                 "Require 0 < compaction_target < compaction_limit",
             )
         self._contexts: dict[int, str] = {}  # 대화 번호별 저장 내용
-        self._ids: dict[tuple[str, str | int], int] = {}  # 채팅·작업별 대화 번호
+        self._ids: dict[tuple[int, str | int], int] = {}  # 채팅·작업별 대화 번호
         self._next_id = 0  # 다음에 할당할 대화 번호
         self._lock = RLock()  # 같은 스레드에서 다시 획득할 수 있는 대화 접근 잠금
-        # 일반 대화는 메모리에 저장. 요약 결과를 반영한 경우에만 로그 함수 호출
 
     def new_id(self) -> int:
         """현재 객체 안에서 사용할 새 대화 번호를 발급하고 빈 대화 생성.
 
         채팅·작업에 대화 번호를 연결하는 역할은 get_id에서 처리.
-        직접 발급한 번호로 요약을 기록하려면 먼저 어느 채팅의 대화인지 연결 필요.
+        이 임시 작업 공간은 영속 대화의 순번·압축 기록과 별개다.
         """
         with self._lock:
             context_id = self._next_id
@@ -100,13 +110,14 @@ class ContextManager:
         """
         return len(self._runner.tokenize(self.get_context(context_id)))
 
-    def append(self, context_id: int, additional_context: str) -> bool:
+    def append(
+        self, context_id: int, additional_context: str, *, run_id: int | None = None
+    ) -> bool:
         """이전 대화에 새 내용을 추가하고 토큰 한도에 도달하면 기존 내용 요약.
 
         새 내용은 요약하지 않고 유지. 요약 결과와 새 내용을 합쳐 토큰 수 다시 확인.
-        검사 통과 후 메모리의 대화를 교체하고 요약 로그 함수 한 번 호출.
-        성공 시 True. 새 내용이 너무 길거나 요약이 출력 상한으로 3회 잘리면
-        기존 대화를 유지하고 False 반환.
+        검사 통과 후 메모리의 대화를 교체하고 True 반환.
+        길이 초과·압축 실패는 기존 대화를 유지하고 원인별 예외로 전달.
         요청 오류는 예외 전달. 교체 전 오류 발생 시 기존 대화 유지.
         """
         with self._lock:
@@ -119,7 +130,7 @@ class ContextManager:
                     raise PipelineError(
                         ErrorCode.INPUT_LIMIT_EXCEEDED, ErrorStage.COMPACTION
                     )
-                summary = self._compact_text(current)
+                summary = self._compact_text(current, run_id=run_id)
                 if summary is None:
                     return False
                 candidate = summary + additional_context
@@ -128,29 +139,28 @@ class ContextManager:
                         ErrorCode.COMPACTION_FAILED, ErrorStage.COMPACTION
                     )
             self._contexts[context_id] = candidate
-            if summary is not None:
-                self._log_compaction(context_id, summary)
             return True
 
-    def compact_context(self, context_id: int) -> bool:
+    def compact_context(self, context_id: int, *, run_id: int | None = None) -> bool:
         """현재 저장된 대화를 바로 요약하고 결과로 교체.
 
-        빈 대화는 생략. 요약을 메모리에 반영한 뒤 요약 로그 함수 호출.
-        성공 또는 빈 대화는 True. 출력 상한으로 3회 실패하면 기존 대화 유지 후 False 반환.
+        빈 대화는 생략. 요약을 메모리에 반영한다.
+        성공 또는 빈 대화는 True. 실패는 기존 대화를 유지하고 원인별 예외로 전달.
         요약 결과는 get_context로 조회.
         """
         with self._lock:
             current = self._contexts[context_id]
             if not current:
                 return True
-            summary = self._compact_text(current)
+            summary = self._compact_text(current, run_id=run_id)
             if summary is None:
                 return False
             self._contexts[context_id] = summary
-            self._log_compaction(context_id, summary)
             return True
 
-    def _compact_text(self, text: str) -> str | None:
+    def _compact_text(
+        self, text: str, *, run_id: int | None = None, target: int | None = None
+    ) -> str | None:
         """전달받은 대화로 요약을 요청하고 요약 문자열 반환.
 
         기본 목표와 최대 응답은 5,000토큰. 중지 신호와 관계없이 끝까지 수신.
@@ -161,8 +171,12 @@ class ContextManager:
         try:
             summary, success, _, _, reason = self._runner.manual_request(
                 text,
-                self._system_prompt,
-                run_id=self.run_id,
+                self._system_prompt
+                if target is None
+                else self._system_prompt.replace(
+                    f"at most {self._target} tokens", f"at most {target} tokens"
+                ),
+                run_id=run_id,
                 max_tokens=COMPACTION_MAX_TOKENS,
                 log_call=False,
                 interruptible=False,
@@ -178,17 +192,209 @@ class ContextManager:
         # 목표 토큰 수를 넘긴 요약도 자르거나 수정하지 않고 사용
         return summary
 
-    def _log_compaction(self, context_id: int, result: str) -> None:
-        """대화 압축 시점과 요약 결과 기록. 실제 저장은 미구현.
+    @staticmethod
+    def _summary_text(summary: str) -> str:
+        return f"\n[대화 요약]\n{summary}\n"
 
-        저장 대상: context_id에 해당하는 채팅의 messages 기록 한 건.
-        role은 context_compacted, content는 요약 결과. 저장 시각은 ChatManager에서 기록.
-        """
-        # 미구현: 대화 번호에 해당하는 채팅 ID 조회 후 요약 저장
-        # chat_id = next(
-        #     chat for (chat, _), saved_id in self._ids.items() if saved_id == context_id
-        # )
-        # self.chat_manager.save_message(chat_id, "context_compacted", result)
-        # role: 기록 종류. content: 요약 결과. createdAt: ChatManager에서 기록할 저장 시각
-        # new_id()로 직접 발급한 대화 번호는 먼저 채팅과 연결 필요
-        # 저장 제외 항목: 요약 전 대화 원문. 일반 요청 로그는 log_call=False로 생략
+    @staticmethod
+    def _input(history: str, current: str) -> str:
+        return (
+            "[이전 대화: 현재 입력을 이해하기 위한 참고 자료]\n"
+            f"{history}\n\n[현재 입력]\n{current}"
+        )
+
+    def _commit(self, history: _History, summary: str, run_id: int) -> int:
+        if self._store is None:
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.COMPACTION)
+        try:
+            result = self._store.save_compaction(
+                self.chat_id,
+                run_id,
+                history.through_seq,
+                summary,
+                history.compaction_id,
+            )
+        except StateConflictError:
+            # 다음 요청은 DB의 최신 요약을 다시 읽는다. 충돌한 결과는 채택하지 않는다.
+            self._history = None
+            raise
+        return result.compaction_id
+
+    def _sync_history(self, through_seq: int, run_id: int) -> _History:
+        if self._store is None:
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.COMPACTION)
+        history = self._history
+        snapshot = self._store.load_context(
+            self.chat_id,
+            through_seq,
+            after_seq=history.through_seq if history else 0,
+            expected_compaction_id=history.compaction_id if history else None,
+        )
+        saved = snapshot.compaction
+        saved_id = saved.compaction_id if saved else None
+        if (
+            history is None
+            or history.through_seq > through_seq
+            or history.compaction_id != saved_id
+        ):
+            history = (
+                _History(
+                    self._summary_text(saved.summary),
+                    saved.covered_through_seq,
+                    saved.compaction_id,
+                )
+                if saved
+                else _History()
+            )
+        for record in snapshot.records:
+            if record.context_seq != history.through_seq + 1 or record.role not in {
+                "user",
+                "assistant",
+            }:
+                raise PipelineError(
+                    ErrorCode.STATE_CONSISTENCY_ERROR, ErrorStage.COMPACTION
+                )
+            addition = f"\n[{record.role}]\n{record.content}\n"
+            addition_tokens = len(self._runner.tokenize(addition))
+            if (
+                addition_tokens
+                >= self._limit - len(self._runner.tokenize(self._summary_text(""))) - 1
+            ):
+                history = self._compact_record(
+                    history, addition, record.context_seq, run_id
+                )
+                self._history = history
+                continue
+            candidate = history.text + addition
+            compaction_id = history.compaction_id
+            if len(self._runner.tokenize(candidate)) >= self._limit:
+                target = min(self._target, max(1, (self._limit - addition_tokens) // 2))
+                summary = self._compact_text(history.text, run_id=run_id, target=target)
+                if summary is None:
+                    raise PipelineError(
+                        ErrorCode.COMPACTION_FAILED, ErrorStage.COMPACTION
+                    )
+                candidate = self._summary_text(summary) + addition
+                if len(self._runner.tokenize(candidate)) >= self._limit:
+                    # 기록 자체는 한도 이내여도 요약을 붙일 여유가 없으면 분할한다.
+                    history = self._compact_record(
+                        history, addition, record.context_seq, run_id
+                    )
+                    self._history = history
+                    continue
+                compaction_id = self._commit(history, summary, run_id)
+            history = _History(candidate, record.context_seq, compaction_id)
+            self._history = history
+        if history.through_seq != through_seq:
+            raise PipelineError(
+                ErrorCode.STATE_CONSISTENCY_ERROR, ErrorStage.COMPACTION
+            )
+        self._history = history
+        return history
+
+    def prepare_input(
+        self,
+        current: str,
+        system_prompt: str,
+        through_seq: int,
+        run_id: int,
+        *,
+        max_tokens: int = MAX_OUTPUT_TOKENS,
+    ) -> ContextInput:
+        """고정된 이전 대화 범위만 복원·증분 반영하고 실제 요청 예산에 맞춘다."""
+        with self._lock:
+            history = self._sync_history(through_seq, run_id)
+            if not history.text:
+                return ContextInput(text=current)
+            limit = self._runner.get_input_limit(system_prompt, max_tokens=max_tokens)
+            combined = self._input(history.text, current)
+            if len(self._runner.tokenize(combined)) > limit:
+                fixed_tokens = len(self._runner.tokenize(self._input("", current)))
+                available = limit - fixed_tokens
+                if available <= 0:
+                    raise PipelineError(
+                        ErrorCode.INPUT_LIMIT_EXCEEDED, ErrorStage.COMPACTION
+                    )
+                summary = self._compact_text(
+                    history.text,
+                    run_id=run_id,
+                    target=min(self._target, max(1, available // 2)),
+                )
+                if summary is None:
+                    raise PipelineError(
+                        ErrorCode.COMPACTION_FAILED, ErrorStage.COMPACTION
+                    )
+                candidate = self._summary_text(summary)
+                combined = self._input(candidate, current)
+                if (
+                    len(self._runner.tokenize(combined)) > limit
+                    or len(self._runner.tokenize(candidate)) >= self._limit
+                ):
+                    raise PipelineError(
+                        ErrorCode.COMPACTION_FAILED, ErrorStage.COMPACTION
+                    )
+                compaction_id = self._commit(history, summary, run_id)
+                history = _History(candidate, through_seq, compaction_id)
+                self._history = history
+            return ContextInput(
+                text=combined,
+                reference=ContextUse(
+                    chat_id=self.chat_id,
+                    through_seq=through_seq,
+                    context_key=CONVERSATION,
+                    compaction_id=history.compaction_id,
+                    history_tokens=len(self._runner.tokenize(history.text)),
+                ),
+            )
+
+    def _compact_record(
+        self, history: _History, addition: str, through_seq: int, run_id: int
+    ) -> _History:
+        """기존 이력과 원본 메시지 전체를 처리한 요약만 원자적으로 확정한다."""
+        summary = self._summarize_large_record(history.text, addition, run_id)
+        covered = _History(history.text, through_seq, history.compaction_id)
+        compaction_id = self._commit(covered, summary, run_id)
+        return _History(self._summary_text(summary), through_seq, compaction_id)
+
+    def _summarize_large_record(self, previous: str, addition: str, run_id: int) -> str:
+        """긴 원본을 모델 입력 한도 내 조각으로 처리하고 전체를 포함한 요약 반환."""
+        budget = self._limit // 3
+        if budget < 1:
+            raise PipelineError(ErrorCode.INPUT_LIMIT_EXCEEDED, ErrorStage.COMPACTION)
+        prefix = previous
+        summary = ""
+        if len(self._runner.tokenize(prefix)) > budget:
+            summary = self._compact_text(
+                prefix, run_id=run_id, target=min(self._target, max(1, budget // 2))
+            )
+            prefix = self._summary_text(summary)
+        while addition:
+            if len(self._runner.tokenize(prefix)) > budget:
+                raise PipelineError(ErrorCode.COMPACTION_FAILED, ErrorStage.COMPACTION)
+            # 문자 경계로 자르되 모델 tokenizer로 실제 길이를 확인한다.
+            low, high = 0, len(addition)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if len(self._runner.tokenize(addition[:middle])) <= budget:
+                    low = middle
+                else:
+                    high = middle - 1
+            if low == 0:
+                raise PipelineError(
+                    ErrorCode.INPUT_LIMIT_EXCEEDED, ErrorStage.COMPACTION
+                )
+            model_input = prefix + addition[:low]
+            if len(self._runner.tokenize(model_input)) >= self._limit:
+                raise PipelineError(
+                    ErrorCode.INPUT_LIMIT_EXCEEDED, ErrorStage.COMPACTION
+                )
+            summary = self._compact_text(
+                model_input,
+                run_id=run_id,
+                target=min(self._target, max(1, budget // 2)),
+            )
+            prefix = self._summary_text(summary)
+            if len(self._runner.tokenize(prefix)) > budget:
+                raise PipelineError(ErrorCode.COMPACTION_FAILED, ErrorStage.COMPACTION)
+            addition = addition[low:]
+        return summary
