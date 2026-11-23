@@ -73,4 +73,25 @@ CREATE INDEX runs_chat ON runs(chatId, runId);
 CREATE INDEX events_run ON run_events(runId, eventId);
 CREATE INDEX consents_run ON consent_requests(runId, consentId);
 CREATE INDEX queries_run ON frontier_queries(runId, round);
-PRAGMA user_version = 2;
+-- Context persistence
+CREATE TABLE context_entries (
+    chatId INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
+    contextKey TEXT NOT NULL,
+    contextSeq INTEGER NOT NULL CHECK(contextSeq > 0),
+    messageId INTEGER NOT NULL REFERENCES messages ON DELETE CASCADE,
+    PRIMARY KEY(chatId, contextKey, contextSeq),
+    UNIQUE(chatId, contextKey, messageId)
+);
+CREATE TABLE context_compactions (
+    compactionId INTEGER PRIMARY KEY AUTOINCREMENT,
+    chatId INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
+    contextKey TEXT NOT NULL,
+    coveredThroughSeq INTEGER NOT NULL CHECK(coveredThroughSeq > 0),
+    summary TEXT NOT NULL CHECK(length(trim(summary)) > 0),
+    runId INTEGER REFERENCES runs ON DELETE SET NULL,
+    createdAt TEXT NOT NULL,
+    FOREIGN KEY(chatId, contextKey, coveredThroughSeq)
+        REFERENCES context_entries(chatId, contextKey, contextSeq) ON DELETE CASCADE
+);
+CREATE INDEX compactions_chat ON context_compactions(chatId, contextKey, compactionId);
+PRAGMA user_version = 3;

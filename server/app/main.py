@@ -202,6 +202,12 @@ class Main:
             assert task is not None  # run_pipeline은 항상 asyncio 작업 안에서 돈다
             self._runs[run_id] = _RunState(chat_id=chat_id, task=task)
             await self._emit("run", {"run_id": run_id})  # 화면이 중지 버튼에 쓸 ID
+            await self._call(
+                self.local_llm_runner.begin_turn_context,
+                run_id,
+                chat_id,
+                user_message_id,
+            )
 
             # 질문 속 개인정보를 찾아 이 채팅의 개인정보 테이블(PDTable)에 더한다.
             await self._step(run_id, "개인정보 검출 중", ErrorStage.DETECT)
@@ -651,6 +657,7 @@ class Main:
                 await self._try(errors, self.memo_manager.clear)
             # 이번 실행의 프론티어 대화를 지워 다음 실행·채팅과 섞이지 않게 한다.
             await self._try(errors, self.frontier_client.clear, run_id)
+            await self._try(errors, self.local_llm_runner.end_turn_context, run_id)
             if errors:
                 await self._try(
                     errors,

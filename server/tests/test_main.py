@@ -334,6 +334,14 @@ class FakeSimple(Recorder):
         self.record("model_load")
         return True
 
+    def begin_turn_context(
+        self, run_id: int, chat_id: int, user_message_id: int
+    ) -> None:
+        pass
+
+    def end_turn_context(self, run_id: int) -> None:
+        pass
+
     def stop(self, run_id: int) -> None:
         self.record("local_stop", run_id)
 

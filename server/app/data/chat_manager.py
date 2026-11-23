@@ -13,6 +13,7 @@ from typing import Self
 
 from pydantic import BaseModel, JsonValue
 
+from app.models.context import CONVERSATION, Compaction, ContextRecord, ContextSnapshot
 from app.models.enums import EndReason
 from app.models.llm_results import Rule
 from app.models.schemas import (
@@ -99,7 +100,9 @@ class ChatManager:
                 with self._transaction() as db:
                     db.execute("ALTER TABLE runs ADD COLUMN errorStage TEXT")
                     db.execute("PRAGMA user_version = 2")
-            if self._db.execute("PRAGMA user_version").fetchone()[0] != 2:
+            if self._db.execute("PRAGMA user_version").fetchone()[0] == 2:
+                self._migrate_context()
+            if self._db.execute("PRAGMA user_version").fetchone()[0] != 3:
                 raise PipelineError(
                     ErrorCode.CONFIGURATION_ERROR,
                     ErrorStage.STARTUP,
@@ -146,6 +149,24 @@ class ChatManager:
                 db.execute("PRAGMA user_version = 1")
         finally:
             self._db.execute("PRAGMA foreign_keys = ON")
+
+    def _migrate_context(self) -> None:
+        """기존 메시지를 순서대로 연결하고 압축·반영 기록 저장 구조를 추가한다."""
+        schema = SCHEMA_PATH.read_text(encoding="utf-8").split(
+            "-- Context persistence", 1
+        )[1]
+        with self._transaction() as db:
+            for statement in schema.split(";"):
+                if statement.strip():
+                    db.execute(statement)
+            db.execute(
+                """
+                INSERT INTO context_entries(chatId, contextKey, contextSeq, messageId)
+                SELECT chatId, ?, ROW_NUMBER() OVER (PARTITION BY chatId ORDER BY messageId), messageId
+                FROM messages WHERE role IN ('user', 'assistant')
+            """,
+                (CONVERSATION,),
+            )
 
     def __enter__(self) -> Self:
         return self
@@ -278,11 +299,134 @@ class ChatManager:
             "INSERT INTO messages(chatId, role, content, createdAt) VALUES (?, ?, ?, ?)",
             (chat_id, role, content, now),
         ).lastrowid
+        if role in {"user", "assistant"}:
+            self._db.execute(
+                """
+                INSERT INTO context_entries(chatId, contextKey, contextSeq, messageId)
+                SELECT ?, ?, COALESCE(MAX(contextSeq), 0) + 1, ?
+                FROM context_entries WHERE chatId=? AND contextKey=?
+            """,
+                (chat_id, CONVERSATION, message_id, chat_id, CONVERSATION),
+            )
         self._db.execute(
             "UPDATE chats SET updatedAt=?, title=CASE WHEN ? THEN ? ELSE title END WHERE chatId=?",
             (now, first, content[:30], chat_id),
         )
         return int(message_id)
+
+    def context_boundary(self, chat_id: int, message_id: int) -> int:
+        """이번 질문은 별도 입력이므로 그 직전 반영 순번을 반환한다."""
+        with self._transaction(write=False) as db:
+            self._message(chat_id, message_id, "user")
+            row = db.execute(
+                "SELECT contextSeq FROM context_entries WHERE chatId=? AND contextKey=? AND messageId=?",
+                (chat_id, CONVERSATION, message_id),
+            ).fetchone()
+            if row is None:
+                raise StateConflictError("질문의 컨텍스트 반영 기록이 없습니다.")
+            return int(row[0]) - 1
+
+    def _context_records(
+        self, chat_id: int, context_key: str, after_seq: int, through_seq: int
+    ) -> list[ContextRecord]:
+        return [
+            ContextRecord.model_validate(dict(row))
+            for row in self._db.execute(
+                """
+            SELECT e.contextSeq AS context_seq, e.messageId AS message_id, m.role, m.content
+            FROM context_entries e JOIN messages m ON m.messageId=e.messageId AND m.chatId=e.chatId
+            WHERE e.chatId=? AND e.contextKey=? AND e.contextSeq>? AND e.contextSeq<=?
+            ORDER BY e.contextSeq
+        """,
+                (chat_id, context_key, after_seq, through_seq),
+            )
+        ]
+
+    def load_context(
+        self, chat_id: int, through_seq: int, context_key: str = CONVERSATION
+    ) -> ContextSnapshot:
+        with self._transaction(write=False) as db:
+            self._require("chats", "chatId", chat_id)
+            row = db.execute(
+                """
+                SELECT compactionId AS compaction_id, coveredThroughSeq AS covered_through_seq, summary
+                FROM context_compactions WHERE chatId=? AND contextKey=? AND coveredThroughSeq<=?
+                ORDER BY compactionId DESC LIMIT 1
+            """,
+                (chat_id, context_key, through_seq),
+            ).fetchone()
+            compaction = (
+                Compaction.model_validate(dict(row)) if row is not None else None
+            )
+            after_seq = compaction.covered_through_seq if compaction else 0
+            return ContextSnapshot(
+                compaction=compaction,
+                records=self._context_records(
+                    chat_id, context_key, after_seq, through_seq
+                ),
+            )
+
+    def context_delta(
+        self,
+        chat_id: int,
+        after_seq: int,
+        through_seq: int,
+        context_key: str = CONVERSATION,
+    ) -> list[ContextRecord]:
+        with self._transaction(write=False):
+            self._require("chats", "chatId", chat_id)
+            return self._context_records(chat_id, context_key, after_seq, through_seq)
+
+    def save_compaction(
+        self,
+        chat_id: int,
+        run_id: int,
+        covered_through_seq: int,
+        summary: str,
+        expected_compaction_id: int | None,
+        context_key: str = CONVERSATION,
+    ) -> Compaction:
+        """검증된 요약과 compaction 이벤트를 같은 트랜잭션으로 확정한다."""
+        if not summary.strip():
+            raise StateConflictError("빈 압축 결과입니다.")
+        with self._transaction() as db:
+            run = self._running(run_id)
+            if run["chatId"] != chat_id:
+                raise StateConflictError("다른 채팅의 압축 결과입니다.")
+            latest = db.execute(
+                "SELECT compactionId FROM context_compactions WHERE chatId=? AND contextKey=? ORDER BY compactionId DESC LIMIT 1",
+                (chat_id, context_key),
+            ).fetchone()
+            if (latest[0] if latest else None) != expected_compaction_id:
+                raise StateConflictError(
+                    "압축 기준이 변경되었습니다. 컨텍스트를 다시 불러와야 합니다."
+                )
+            source = db.execute(
+                "SELECT 1 FROM context_entries WHERE chatId=? AND contextKey=? AND contextSeq=?",
+                (chat_id, context_key, covered_through_seq),
+            ).fetchone()
+            if source is None:
+                raise StateConflictError("압축 범위의 반영 기록이 없습니다.")
+            compaction_id = db.execute(
+                "INSERT INTO context_compactions(chatId,contextKey,coveredThroughSeq,summary,runId,createdAt) VALUES (?,?,?,?,?,?)",
+                (chat_id, context_key, covered_through_seq, summary, run_id, _now()),
+            ).lastrowid
+            self._append_event(
+                run_id,
+                "compaction",
+                {
+                    "compaction_id": compaction_id,
+                    "chat_id": chat_id,
+                    "context_key": context_key,
+                    "covered_through_seq": covered_through_seq,
+                    "summary": summary,
+                },
+            )
+            return Compaction(
+                compaction_id=compaction_id,
+                covered_through_seq=covered_through_seq,
+                summary=summary,
+            )
 
     def save_setting(self, text: str, rules: list[Rule]) -> PrivacySetting:
         rules = [Rule.model_validate(rule) for rule in rules]
