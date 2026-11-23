@@ -13,13 +13,14 @@ ContextMode = Literal["keep", "reset"]
 class DetectedItem(BaseModel):
     # 데이터베이스 ID와 실행 중 허용 상태는 호출자가 정의
     text: str  # 검출한 개인정보 문자열
-    category: Annotated[int, Field(ge=0, le=2)]  # 개인정보 분류(0 식별, 1 민감, 2 속성)
+    category: Annotated[int, Field(ge=0, le=3)]  # 0 식별, 1 민감, 2 속성, 3 기타
 
 
 class Rule(BaseModel):
     target: str  # 규칙 적용 대상
     scope: Literal["item", "category"]  # 항목 또는 분류 단위의 규칙 적용 범위
     action: Literal["allow", "deny"]  # 허용·거절 구분
+    detect_en: str | None = None  # 검출 대상의 영문 설명. 이전에 저장한 규칙에는 없음
 
 
 class RuleMatch(BaseModel):

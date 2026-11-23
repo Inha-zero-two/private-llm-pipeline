@@ -193,8 +193,14 @@ class Main:
 
             # 질문 속 개인정보를 찾아 이 채팅의 개인정보 테이블(PDTable)에 더한다.
             await self._step(run_id, "개인정보 검출 중")
+            setting = await self._call(self.chat_manager.load_run_setting, run_id)
             found_items = await self._call(
-                self.pd_detector.detect, run_id, chat_id, user_message_id, question
+                self.pd_detector.detect,
+                run_id,
+                chat_id,
+                user_message_id,
+                question,
+                setting,
             )
             await self._call(
                 self.chat_manager.set_pd_items, chat_id, user_message_id, found_items
@@ -203,7 +209,9 @@ class Main:
 
             # 사용자가 미리 정한 허용/금지 설정을 테이블의 각 항목에 적용한다.
             await self._step(run_id, "허용 설정 적용 중")
-            await self._call(self.privacy_settings.apply_to_table, run_id, pd_table)
+            await self._call(
+                self.privacy_settings.apply_to_table, run_id, pd_table, setting
+            )
 
             # 임시 메모를 시작하고, 답하는 데 필요한 정보 목록을 적어 둔다.
             await self._step(run_id, "필요한 정보 정리 중")

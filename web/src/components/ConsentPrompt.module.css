@@ -69,6 +69,10 @@
   color: var(--cat-2);
 }
 
+.category[data-category='3'] {
+  color: var(--cat-3);
+}
+
 .label {
   font-weight: 600;
 }

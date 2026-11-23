@@ -9,8 +9,9 @@ pd_items의 allowed/allowedBy는 사전 설정 상태만 저장한다. 임시 �
 전송 당시 허용 상태는 query_items에 보존한다. 항목별 동의 결정은 JSON으로 저장한다.
 오류는 status=finished, endReason=NULL, errorCode/notice로 기록한다.
 
-스키마 버전과 마이그레이션은 관리하지 않는다. 빈 DB에서만 스키마를 초기화하고,
-스키마가 바뀌면 기존 DB 파일을 수동으로 지운 뒤 새로 만든다.
+빈 DB의 스키마 버전은 1이다. 기존 버전 0은 최초 연결 시 개인정보 ID와 전송 기록을
+보존하면서 `기타` 분류를 허용하도록 갱신한다. 공개 설정의 영문 검출 설명은
+`privacy_settings.rules` JSON의 `detect_en`에 저장한다.
 
 실행 종료 후 채팅을 삭제할 때 runs를 먼저 삭제하고 chats를 삭제한다.
 채팅 관련 하위 기록은 ON DELETE CASCADE로 제거한다. 앱 공통 privacy_settings는 유지한다.
@@ -141,7 +142,7 @@ pd_items의 allowed/allowedBy는 사전 설정 상태만 저장한다. 임시 �
 
 ## 추가 제약과 인덱스
 
-- pd_items: `(chatId, text, category)` 유일. category는 0~2, allowed는 0/1
+- pd_items: `(chatId, text, category)` 유일. category는 0~3(3은 기타), allowed는 0/1
 - consent_requests: result는 NULL/answered/cancelled. 미응답 요청은 runId마다 하나만 허용하는 부분 유일 인덱스
 - runs: status는 running/finished
 - frontier_queries: `(runId, round)` 유일. status는 ok/failed/uncertain
