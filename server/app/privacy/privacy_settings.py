@@ -134,13 +134,16 @@ class PrivacySettings:
             return False
         return rules[index].action == "allow"
 
-    def apply_to_table(self, run_id: int, pd_table: PDTable) -> None:
+    def apply_to_table(
+        self, run_id: int, pd_table: PDTable, setting: PrivacySetting | None = None
+    ) -> None:
         """실행 시작 시 고정된 설정으로 전체 테이블을 평가하고 영구 상태를 저장한다."""
         # 이전 실행의 허용이나 임시 동의가 새 실행으로 넘어가지 않게 먼저 금지한다.
         for item in pd_table:
             item.allowed = False
             item.allowed_by = "none"
-        setting = self._chat_manager.load_run_setting(run_id)
+        if setting is None:
+            setting = self._chat_manager.load_run_setting(run_id)
         chat_id = self._chat_manager.get_run(run_id).chat_id
         decisions = [item.model_copy(deep=True) for item in pd_table]
         if setting.rules and pd_table:

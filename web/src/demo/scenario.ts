@@ -12,7 +12,6 @@ export const LIMITED_TEXT = {
   call_limit: '질문 횟수 한도에 도달해 지금까지 모은 정보로 답했습니다.',
   offline: '외부 모델에 연결할 수 없어 현재까지 취합한 정보를 바탕으로 로컬 모델로 답했습니다.',
   stopped: '중지되었습니다.',
-  consent_denied: '공개 동의가 필요한 정보는 보내지 않고 지금까지 모은 정보로 답했습니다.',
 }
 
 type Detector = { pattern: RegExp; category: PDCategory; label: string }

@@ -202,7 +202,11 @@ export default function App() {
         onDelete={setDeleteTarget}
         onOpenSettings={() => setSettingsOpen(true)}
       >
-        <RunLogPanel turns={current?.turns ?? []} consent={running ? consent : null} />
+        <RunLogPanel
+          turns={current?.turns ?? []}
+          consent={running ? consent : null}
+          demo={backend.name === 'demo'}
+        />
       </Sidebar>
 
       <div className={styles.workspace}>

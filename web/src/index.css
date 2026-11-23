@@ -23,6 +23,7 @@
   --cat-0: #b42318;
   --cat-1: #8e3fbf;
   --cat-2: #2a64b8;
+  --cat-3: #665091;
   --shadow: 0 1px 2px rgb(0 0 0 / 4%), 0 4px 16px rgb(0 0 0 / 6%);
   --shadow-lg: 0 8px 40px rgb(0 0 0 / 18%);
 
@@ -69,6 +70,7 @@
     --cat-0: #f2766b;
     --cat-1: #c792ea;
     --cat-2: #7aa7ee;
+    --cat-3: #c9a7fa;
     --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 16px rgb(0 0 0 / 30%);
     --shadow-lg: 0 8px 40px rgb(0 0 0 / 50%);
     color-scheme: dark;

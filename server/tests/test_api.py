@@ -65,6 +65,8 @@ class RoutedLlama:
         self.outputs = {name: deque(values) for name, values in outputs.items()}
         self.outputs.setdefault("CHECK", deque(["OK"]))
         self.calls: list[str] = []
+        self.detect_prompts: list[str] = []
+        self._base_detect = prompts.get_prompt(PromptIdx.DETECT)
 
     def tokenize(self, text: bytes, **kwargs: Any) -> list[int]:
         return list(range(len(text.decode("utf-8"))))
@@ -74,6 +76,9 @@ class RoutedLlama:
     ) -> Iterator[dict[str, Any]]:
         system = next(m["content"] for m in messages if m["role"] == "system")
         task = self._task_of.get(system)
+        if system.startswith(self._base_detect):
+            task = "DETECT"
+            self.detect_prompts.append(system)
         assert task is not None, f"알 수 없는 시스템 프롬프트: {system[:40]}"
         self.calls.append(task)
         queue = self.outputs.get(task)
@@ -417,19 +422,37 @@ def test_consent_partial_allow_masks_denied_item(make_client: Any) -> None:
     assert len(detail["consents"]) == 1
 
 
-def test_quick_deny_all_ends_with_consent_denied(make_client: Any) -> None:
-    client, model, gateway = make_client({**CONSENT_RUN, "JUDGE": [JUDGE_ASK_BOTH]})
+def test_quick_deny_all_sends_only_generalized_request(make_client: Any) -> None:
+    safe_request = "직장인의 일반적인 이직 준비 방법을 알려 주세요."
+    client, model, gateway = make_client(
+        {
+            **CONSENT_RUN,
+            # 재판단에서 모델이 같은 항목을 요구해도 동의는 한 번만 묻는다.
+            "JUDGE": [JUDGE_ASK_BOTH, JUDGE_ASK_BOTH, JUDGE_ENOUGH],
+            "WRITE": ["삼전 직원의 이직 준비 방법을 알려 주세요."],
+            "GUARD": ['{"hits": [1]}', GUARD_PASS],
+            "REWRITE": [safe_request],
+        }
+    )
     _, run_id = start(client)
     consent = pending_consent(client, run_id)
 
     reply = answer(client, run_id, consent["consentId"], "모두 공개하지 마")
-    assert reply.json()["ok"] is True
+    assert reply.json()["decisions"] == [
+        {"pdId": 1, "allow": False},
+        {"pdId": 2, "allow": False},
+    ]
     assert "INTERPRET_CONSENT" not in model.calls  # 빠른 응답은 모델 없이
 
-    done = events_of(client, run_id)[-1]["data"]
-    assert done["endReason"] == "consent_denied"
-    assert done["limited"] == LIMITED_MESSAGES[EndReason.CONSENT_DENIED]
-    assert gateway.requests == []  # 외부 모델에 묻지 않았다
+    wait_finished(client, run_id)
+    events = events_of(client, run_id)
+    assert [e["event"] for e in events].count("consent_request") == 1
+    assert model.calls.count("REWRITE") == 1
+    assert gateway.requests == [safe_request]
+    assert [e["data"] for e in events if e["event"] == "frontier"] == [
+        {"request": safe_request, "answer": FRONTIER_ANSWER}
+    ]
+    assert events[-1]["data"]["endReason"] == "info_enough"
 
 
 def test_unclear_consent_answer_keeps_waiting(make_client: Any) -> None:
@@ -484,7 +507,7 @@ def test_privacy_setting_is_parsed_saved_and_applied(make_client: Any) -> None:
         **SIMPLE_RUN,
         "DETECT": [DETECT_TWO],
         "PARSE_RULES": [
-            '{"rules": [{"target": "나이", "scope": "category", "action": "allow"}]}',
+            '{"rules": [{"target": "나이", "scope": "category", "action": "allow", "detect_en": "Age"}]}',
             '{"rules": []}',
         ],
         # 27살은 나이 규칙으로 허용, 삼성전자는 대응 규칙 없음
@@ -520,6 +543,52 @@ def test_privacy_setting_is_parsed_saved_and_applied(make_client: Any) -> None:
     assert model.calls.count("PARSE_RULES") == 2
     assert "MATCH_RULES" in model.calls
     assert "GUARD" in model.calls
+    assert model.detect_prompts == [PromptManager().get_prompt(PromptIdx.DETECT)]
+
+
+def test_custom_rule_reaches_consent_and_survives_restart(make_client: Any) -> None:
+    rule = {
+        "target": "삼성 공정 수치",
+        "scope": "category",
+        "action": "deny",
+        "detect_en": "Process measurements at 삼성 (Samsung)",
+    }
+    client, _, _ = make_client({"PARSE_RULES": [json.dumps({"rules": [rule]})]})
+    saved = client.put(
+        "/api/settings/privacy", json={"text": "삼성 공정 수치는 보호해 줘"}
+    )
+    assert saved.json()["ok"]
+    make_client.close(client)
+
+    safe_request = "공정의 에너지 효율을 개선하는 일반적인 방법을 알려 주세요."
+    client, model, gateway = make_client(
+        {
+            **CONSENT_RUN,
+            "DETECT": ['{"items":[{"text":"0.62V","category":3}]}'],
+            "MATCH_RULES": ['{"matches":[{"item":0,"rules":[0]}]}'],
+            "NEEDS": ['{"needs":["공정 개선 방법"]}'],
+            "JUDGE": [
+                JUDGE_ASK_NOTHING,
+                '{"enough":false,"needConsent":true,"consentItems":[1],"needIdx":[0]}',
+                JUDGE_ENOUGH,
+            ],
+            "WRITE": ["동작 전압이 0.62V인 공정을 개선하려면 어떻게 해야 하나요?"],
+            "GUARD": ['{"hits":[0]}', GUARD_PASS],
+            "REWRITE": [safe_request],
+            "INTERPRET_CONSENT": ['{"decisions":[{"pdId":1,"allow":false}]}'],
+        }
+    )
+    _, run_id = start(client, "삼성 공정의 동작 전압은 0.62V야. 개선안을 알려 줘.")
+    consent = pending_consent(client, run_id)
+    assert rule["detect_en"] in model.detect_prompts[0]
+    assert consent["items"] == [
+        {"pdId": 1, "text": "0.62V", "label": "기타", "category": 3}
+    ]
+    reply = answer(client, run_id, consent["consentId"], "공개하지 마")
+    assert reply.json()["decisions"] == [{"pdId": 1, "allow": False}]
+    wait_finished(client, run_id)
+    assert model.calls.count("REWRITE") == 1
+    assert gateway.requests == [safe_request]
 
 
 def test_history_survives_restart(make_client: Any) -> None:
