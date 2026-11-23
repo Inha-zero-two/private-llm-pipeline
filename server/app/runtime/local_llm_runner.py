@@ -59,7 +59,7 @@ class LocalLLMRunner:
         prompt_manager: PromptManager | None = None,
         chat_manager: ChatManager | None = None,
     ) -> None:
-        """공유 모델과 실행별 대화 관리 객체 초기화.
+        """공유 모델과 채팅·실행별 대화 관리 객체 초기화.
 
         model_path: 모델 파일 경로. timeout: 한 번의 응답을 기다리는 최대 시간(초).
         prompt_manager: Main과 공유할 프롬프트 관리자. 직접 프롬프트를 전달하면 생략 가능.
@@ -81,13 +81,14 @@ class LocalLLMRunner:
         self._request_condition = Condition(self._state_lock)
         self._pending_requests: deque[tuple[int | str | None, Event]] = deque()
         self._request_thread: int | None = None
-        self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
+        self._context_lock = Lock()  # 대화 객체와 실행별 조회 경계의 접근 잠금
         self._stop_event: Event | None = None  # 진행 중인 요청의 중지 신호
         self._active_run_id: int | None = None  # 진행 중인 요청의 실행 ID
         self._closed = False
         self._llm: Any = None
-        # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
+        # 내부 작업은 실행별 임시 공간, 사용자 대화는 채팅별 DB 복원 캐시.
         self.context_managers: dict[int, ContextManager] = {}
+        self._chat_contexts: dict[int, ContextManager] = {}
         self._chat_bindings: dict[int, ContextBinding] = {}
         self.model_load()
 
@@ -150,21 +151,26 @@ class LocalLLMRunner:
                     self._request_thread = None
                     self._request_condition.notify_all()
 
-    def get_context_manager(self, chat_id: int) -> ContextManager:
-        """실행 ID에 해당하는 ContextManager 조회 또는 생성.
-
-        같은 실행 ID는 기존 객체 재사용. 새 객체도 이 Runner의 모델을 공유.
-        동시에 같은 실행 ID로 조회할 때 객체가 중복 생성되지 않도록 잠금 사용.
-        """
+    def get_context_manager(self, run_id: int) -> ContextManager:
+        """내부 작업의 임시 컨텍스트. 실행·채팅·작업별로 격리한다."""
         from .context_manager import ContextManager
 
         with self._context_lock:
-            if chat_id not in self.context_managers:
-                if len(self.context_managers) >= CONTEXT_CACHE_SIZE:
-                    self.context_managers.pop(next(iter(self.context_managers)))
-                self.context_managers[chat_id] = ContextManager(self, chat_id)
-            manager = self.context_managers.pop(chat_id)
-            self.context_managers[chat_id] = manager
+            if run_id not in self.context_managers:
+                self.context_managers[run_id] = ContextManager(self, run_id)
+            return self.context_managers[run_id]
+
+    def get_chat_context_manager(self, chat_id: int) -> ContextManager:
+        """질문·최종 답변의 DB 복원 가능한 채팅별 LRU 캐시."""
+        from .context_manager import ContextManager
+
+        with self._context_lock:
+            if chat_id not in self._chat_contexts:
+                if len(self._chat_contexts) >= CONTEXT_CACHE_SIZE:
+                    self._chat_contexts.pop(next(iter(self._chat_contexts)))
+                self._chat_contexts[chat_id] = ContextManager(self, chat_id)
+            manager = self._chat_contexts.pop(chat_id)
+            self._chat_contexts[chat_id] = manager
             return manager
 
     def begin_turn_context(
@@ -181,10 +187,11 @@ class LocalLLMRunner:
     def end_turn_context(self, run_id: int) -> None:
         with self._context_lock:
             self._chat_bindings.pop(run_id, None)
+            self.context_managers.pop(run_id, None)
 
     def forget_chat(self, chat_id: int) -> None:
         with self._context_lock:
-            self.context_managers.pop(chat_id, None)
+            self._chat_contexts.pop(chat_id, None)
 
     def _chat_input(
         self,
@@ -203,7 +210,7 @@ class LocalLLMRunner:
             raise PipelineError(
                 ErrorCode.STATE_CONSISTENCY_ERROR, ErrorStage.COMPACTION
             )
-        return self.get_context_manager(binding.chat_id).prepare_input(
+        return self.get_chat_context_manager(binding.chat_id).prepare_input(
             input_, system_prompt, binding.through_seq, run_id, max_tokens=max_tokens
         )
 
@@ -535,7 +542,7 @@ class LocalLLMRunner:
                 input_limit = self.get_input_limit(system_prompt, max_tokens=max_tokens)
                 if len(self.tokenize(input_)) > input_limit:
                     return None, False, 0, 0, "context_full"
-                manager = self.get_context_manager(chat_id)
+                manager = self.get_context_manager(run_id)
                 context_id = manager.get_id(chat_id, prompt_idx)
                 context = manager.get_context(context_id)
                 if context:
@@ -719,7 +726,6 @@ class LocalLLMRunner:
         run_id: int | None = None,
         use_context: bool = False,
         context_id: int | None = None,
-        chat_id: int | None = None,
         max_tokens: int = MAX_OUTPUT_TOKENS,
         on_token: Callable[[str], None] | None = None,
     ) -> RequestResult:
@@ -737,9 +743,7 @@ class LocalLLMRunner:
                 raise ValueError("컨텍스트를 사용하는 재생성에는 context_id가 필요함")
             if run_id is None:
                 raise ValueError("컨텍스트를 사용하는 재생성에는 run_id가 필요함")
-            if chat_id is None:
-                raise ValueError("컨텍스트를 사용하는 재생성에는 chat_id가 필요함")
-            context = self.get_context_manager(chat_id).get_context(context_id)
+            context = self.get_context_manager(run_id).get_context(context_id)
             if context:
                 model_input = (
                     f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
@@ -902,6 +906,7 @@ class LocalLLMRunner:
                 self._llm.close()
         with self._context_lock:
             self.context_managers.clear()
+            self._chat_contexts.clear()
             self._chat_bindings.clear()
 
     def __enter__(self) -> LocalLLMRunner:

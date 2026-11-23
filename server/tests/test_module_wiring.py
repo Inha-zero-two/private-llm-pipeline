@@ -264,3 +264,28 @@ def test_main_calls_connected_modules(
     )
     assert chat.save_message.call_args_list[-1] == call(1, "assistant", "답변")
     frontier.send.assert_not_called()
+
+
+def test_task_context_and_regeneration_keep_run_chat_and_task_isolation(
+    connected: tuple[LocalLLMRunner, ScriptedLlama],
+) -> None:
+    runner, model = connected
+    model.outputs.extend(['{"needs": ["first"]}'] * 4 + ["regenerated"])
+    assert runner.request(
+        1, "private task history", PromptIdx.NEEDS, 10, use_context=True
+    )[1]
+    for run, task, chat in [
+        (2, PromptIdx.NEEDS, 10),
+        (1, PromptIdx.WRITE, 10),
+        (1, PromptIdx.NEEDS, 11),
+    ]:
+        assert runner.request(run, "isolated input", task, chat, use_context=True)[1]
+        assert "private task history" not in model.messages[-1][1]["content"]
+    context = runner.get_context_manager(1).get_id(10, PromptIdx.NEEDS)
+    assert runner.regen(
+        "regenerate", "system", run_id=1, use_context=True, context_id=context
+    )[1]
+    assert "private task history" in model.messages[-1][1]["content"]
+    assert "isolated input" not in model.messages[-1][1]["content"]
+    runner.end_turn_context(1)
+    assert 1 not in runner.context_managers

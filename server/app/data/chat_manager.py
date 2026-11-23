@@ -343,8 +343,15 @@ class ChatManager:
         ]
 
     def load_context(
-        self, chat_id: int, through_seq: int, context_key: str = CONVERSATION
+        self,
+        chat_id: int,
+        through_seq: int,
+        context_key: str = CONVERSATION,
+        *,
+        after_seq: int = 0,
+        expected_compaction_id: int | None = None,
     ) -> ContextSnapshot:
+        """캐시 기준이 유효하면 증분만, 변경됐으면 새 요약 이후 전체를 읽는다."""
         with self._transaction(write=False) as db:
             self._require("chats", "chatId", chat_id)
             row = db.execute(
@@ -358,11 +365,14 @@ class ChatManager:
             compaction = (
                 Compaction.model_validate(dict(row)) if row is not None else None
             )
-            after_seq = compaction.covered_through_seq if compaction else 0
+            saved_id = compaction.compaction_id if compaction else None
+            start_seq = compaction.covered_through_seq if compaction else 0
+            if saved_id == expected_compaction_id and after_seq <= through_seq:
+                start_seq = max(start_seq, after_seq)
             return ContextSnapshot(
                 compaction=compaction,
                 records=self._context_records(
-                    chat_id, context_key, after_seq, through_seq
+                    chat_id, context_key, start_seq, through_seq
                 ),
             )
 
@@ -394,12 +404,16 @@ class ChatManager:
             if run["chatId"] != chat_id:
                 raise StateConflictError("다른 채팅의 압축 결과입니다.")
             latest = db.execute(
-                "SELECT compactionId FROM context_compactions WHERE chatId=? AND contextKey=? ORDER BY compactionId DESC LIMIT 1",
+                "SELECT compactionId, coveredThroughSeq FROM context_compactions WHERE chatId=? AND contextKey=? ORDER BY compactionId DESC LIMIT 1",
                 (chat_id, context_key),
             ).fetchone()
             if (latest[0] if latest else None) != expected_compaction_id:
                 raise StateConflictError(
                     "압축 기준이 변경되었습니다. 컨텍스트를 다시 불러와야 합니다."
+                )
+            if latest and covered_through_seq < latest[1]:
+                raise StateConflictError(
+                    "압축 범위를 이전 순번으로 되돌릴 수 없습니다."
                 )
             source = db.execute(
                 "SELECT 1 FROM context_entries WHERE chatId=? AND contextKey=? AND contextSeq=?",

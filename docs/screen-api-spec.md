@@ -570,3 +570,11 @@ data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답�
 ```json
 {"code":"NOT_FOUND","message":"실행을 찾을 수 없습니다."}
 ```
+
+## 채팅 대화 맥락과 실행 로그
+
+API-05로 같은 chatId에 추가한 질문은 그 이전 사용자 질문·실제 제공된 최종 답변을 로컬 NEEDS/JUDGE/WRITE/ANSWER에서 참고한다. 재시작 후에도 최신 채택 요약과 이후 증분 기록으로 복원한다. 요청·응답 필드는 추가하지 않는다.
+
+llm_call payload의 context는 미사용 시 null, 사용 시 chat_id/context_key/through_seq/compaction_id/history_tokens다. input에는 현재 모듈 입력을 기록하고 과거 대화 전체를 중복 저장하지 않는다. compaction 이벤트는 compaction_id/chat_id/context_key/covered_through_seq/summary로 실제 채택된 요약을 나타낸다. 중간 조각 요약과 실패한 요약은 복원 기준이 아니다.
+
+이전 대화를 현재 보호 규칙으로 재검출하지 않는다. 현재 질문 검출·기존 개인정보 설정·외부 전송 전 LeakGuard·실행별 동의 해제는 유지한다. 프론티어 이력은 기존 runId 단위다. [컨텍스트 구현](context-manager.md), [DB 보존·갱신](db-schema.md)을 참고한다.

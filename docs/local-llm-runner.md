@@ -2,7 +2,7 @@
 
 **대상:** [local_llm_runner.py](../server/app/runtime/local_llm_runner.py)의 `LocalLLMRunner`. 설계 5.1의 모델 준비, 응답 요청, 결과 파싱, 재생성 및 중지 처리.
 
-**객체 수:** 프로그램당 LocalLLMRunner 1개를 생성해 공유. `run_id`는 작업 실행 ID로 요청마다 전달. 이전 대화 내용(컨텍스트)은 [실행 ID별 ContextManager](context-manager.md)에서 관리. 생성자에서 짧은 응답으로 연결 확인 후 사용하고, 프로그램 종료 시 `close()` 호출.
+**객체 수:** 프로그램당 LocalLLMRunner 1개를 생성해 공유. `run_id`는 작업 실행 ID로 요청마다 전달. 사용자 대화는 [채팅별 ContextManager](context-manager.md)에서 DB 복원하고 내부 작업용 호출 이력은 실행별 임시 공간에서 관리. 생성자에서 짧은 응답으로 연결 확인 후 사용하고, 프로그램 종료 시 `close()` 호출.
 
 | 토큰 길이 한도 | 값 |
 | --- | --- |
@@ -28,8 +28,8 @@ flowchart TD
     G --> H["실행 ID 정리 후 파싱 결과와 토큰 사용량 반환"]
 ```
 
-- `use_context=False`이면 이전 대화 조회와 저장 생략
-- 요청마다 `_log_call()` 호출. 실제 데이터베이스 저장 코드는 미구현으로 주석 처리
+- `use_context`는 내부 작업용 임시 호출 이력의 조회·저장 여부다. Main이 연결한 채팅의 사용자 질문·최종 답변은 NEEDS/JUDGE/WRITE와 ANSWER에 별도로 자동 주입한다.
+- 요청마다 `_log_call()`로 DB에 새 입력·출력·시도 결과를 저장한다. 이전 대화 전체 대신 chat_id/context_key/through_seq/compaction_id/history_tokens 참조를 남긴다.
 - 일반 응답 생성 중 중지하면 중지 전까지 받은 답변 반환. 모델 요청 오류도 로그 함수 호출 후 재시도하고, 최대 횟수 도달 시 실패값 반환
 - `manual_request()`와 `regen()`은 `_generate()`로 응답을 요청하고 결과 파싱과 이전 대화 저장은 생략
 - Runner는 파싱·재생성·대화 저장을 포함해 한 번에 요청 하나 처리한다. 설정 해석과 실행 요청이 겹치면 도착 순서대로 대기한다. Main은 별도 스레드로 호출하므로 모델 대기가 이벤트 루프를 막지 않는다.
@@ -107,8 +107,14 @@ result = runner.request(
 - **최종 실패:** 결과는 None, 성공 여부는 False이며 출력 길이·형식·시간 초과·연결·입력 초과를 위 반환 규격으로 구분한다. 호출 모듈이 원인별 코드와 작업 단계를 보존한다.
 - **응답 생성:** `manual_request()`, `request()`, `regen()`에서 `_generate()`를 공유. request 안에서 다른 공개 요청 함수를 호출하는 방식은 사용하지 않음
 - **재생성:** 설계 30쪽의 이전 출력·오류·수정 지시 추가 없이 같은 입력으로 요청. 파싱 오류뿐 아니라 모델 요청·수신 실패도 재시도하고 종류를 합쳐 최초 요청 포함 최대 3회 시도. 최종 성공한 입력·답변만 한 번 저장. manual_request와 regen은 length 종료만 최대 3회 요청
-- **이전 대화 사용:** 작업 종류에 따라 고정하지 않고 요청마다 use_context로 선택. Runner는 프로그램당 1개, ContextManager는 실행 ID마다 1개. run_id는 설계대로 요청마다 전달
+- **이전 대화 사용:** 사용자 대화는 chat_id별 최대 8개 LRU 캐시이며 DB의 요약과 증분으로 복원한다. 내부 작업용 use_context 이력은 실행·채팅·작업별로 분리하고 end_turn_context에서 제거한다.
 - **중지:** `stop(run_id)`로 실행 ID가 일치하는 요청만 중지. 생성·파싱·재생성·대화 저장까지 같은 중지 신호를 공유하고 요청 종료 시 실행 ID 정리. Event와 별도 수신 스레드로 중지 처리. 원격 서버에서 진행 중인 생성 작업 취소는 별도 기능
 - **모델 실행:** 기존 로컬 모델 래퍼를 사용하고 인증키 검색도 래퍼에서 처리. llama-cpp-python 직접 사용 시 Llama import 변경. 설계 31쪽의 세부 그래픽카드 설정 중 일부만 현재 생성자에 지정
 - **연결 확인:** 생성자에서 실제 응답 확인 후 사용. 응답 대기 시간은 요청 한 번당 기본 120초. request의 최종 실패는 반환값으로 전달. 생성자 확인과 manual_request는 오류 발생 시 즉시 예외 전달
-- **프롬프트와 로그:** LocalLLMRunner가 생성자로 받은 PromptManager의 `get_prompt()`로 본문을, `get_version()`으로 버전을 조회. 로그 항목은 실행 ID·작업 종류·버전·소요 시간·검사 결과·새 입력·생성된 답변. ChatManager의 저장 코드도 미구현으로 주석 처리
+- **프롬프트와 로그:** LocalLLMRunner가 생성자로 받은 PromptManager의 `get_prompt()`로 본문을, `get_version()`으로 버전을 조회. 로그 항목은 실행 ID·작업 종류·버전·소요 시간·검사 결과·새 입력·생성된 답변. ChatManager에 저장하며 이전 대화 전체는 참조 메타데이터로 대체
+
+## 채팅 실행 연결
+
+Main은 start_turn 직후 begin_turn_context(run_id, chat_id, user_message_id)를 호출하고 종료 정리에서 end_turn_context(run_id)를 호출한다. 이 경계로 NEEDS/JUDGE/WRITE 및 stage=ANSWER인 manual_request 입력을 구성한다. 현재 질문 이후 기록은 이번 실행의 이력에 다시 포함하지 않는다. forget_chat(chat_id)는 삭제된 채팅 캐시를 제거한다.
+
+DETECT/GUARD/REWRITE/설정/동의에는 과거 대화를 자동 주입하지 않는다. 과거 대화를 현행 규칙으로 재검출하지 않으며 프론티어 이력·중지·비용·일시적 동의는 run_id 기준이다. 요약의 실패·저장 원자성과 분할 정책은 [ContextManager](context-manager.md)를 참고한다.

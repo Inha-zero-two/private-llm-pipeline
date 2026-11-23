@@ -1,5 +1,6 @@
 -- ChatManager가 빈 DB를 만들 때 실행하는 SQLite 스키마.
--- 기존 DB의 분류 범위는 ChatManager 초기화 시 마이그레이션한다.
+-- 기존 DB는 삭제하지 않는다. ChatManager가 user_version별로 트랜잭션 갱신한다.
+-- 2→3 갱신은 아래 Context persistence 구조와 기존 메시지 연결을 함께 적용한다.
 -- 컬럼 설명은 docs/db-schema.md에 있으며, 둘이 다르면 이 파일이 기준이다.
 
 CREATE TABLE chats (
