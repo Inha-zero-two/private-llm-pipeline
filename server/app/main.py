@@ -770,8 +770,12 @@ class Main:
             return await func(*args)
         task = asyncio.create_task(asyncio.to_thread(func, *args))
         bound = func.func if isinstance(func, functools.partial) else func
-        if getattr(bound, "__self__", None) is self.chat_manager:
-            # 취소돼도 시작한 DB 트랜잭션을 먼저 마쳐 종료 기록과 순서가 뒤집히지 않게 한다.
+        owner = getattr(bound, "__self__", None)
+        if owner is self.chat_manager or (
+            owner is self.local_llm_runner
+            and getattr(bound, "__name__", None) == "begin_turn_context"
+        ):
+            # 시작한 DB 저장·컨텍스트 연결을 먼저 마쳐 종료 정리가 앞서지 않게 한다.
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:

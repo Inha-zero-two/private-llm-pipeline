@@ -845,3 +845,50 @@ def test_stop_after_answer_completes_saves_once() -> None:
     saved = [call for call in log if call[:2] == ("save_message", "assistant")]
     assert saved == [("save_message", "assistant", "최종 답변")]
     assert finished_with(log) == EndReason.INFO_ENOUGH
+
+
+def test_stop_during_context_binding_does_not_leave_late_binding() -> None:
+    log: list[tuple[Any, ...]] = []
+
+    class SlowContextRunner(FakeSimple):
+        def __init__(self) -> None:
+            super().__init__(log)
+            self.entered = threading.Event()
+            self.go = threading.Event()
+            self.bound: set[int] = set()
+
+        def begin_turn_context(
+            self, run_id: int, chat_id: int, user_message_id: int
+        ) -> None:
+            self.entered.set()
+            assert self.go.wait(timeout=5)
+            self.bound.add(run_id)
+            self.record("context_bound")
+
+        def end_turn_context(self, run_id: int) -> None:
+            self.bound.discard(run_id)
+            self.record("context_released")
+
+    runner = SlowContextRunner()
+    main = make_main(log, local_llm_runner=runner)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(main.run_pipeline(1, "질문"))
+        while not runner.entered.is_set():
+            await asyncio.sleep(0.01)
+        stopping = asyncio.create_task(main.stop(1))
+        while not task.cancelling():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        runner.go.set()
+        await stopping
+        assert task.cancelled()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        runner.go.set()
+    assert not runner.bound
+    assert names(log).index("context_bound") < names(log).index("context_released")
+    assert "list_needs" not in names(log)
+    assert finished_with(log) == EndReason.STOPPED
