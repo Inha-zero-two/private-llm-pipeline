@@ -55,11 +55,13 @@ class SampleResult(BaseModel):
     ok: bool  # 검출이 끝까지 성공했는지 (형식 오류·연결 실패·예외면 False)
     reason: str | None = None  # 실패 사유 또는 Runner 종료 사유
     elapsed_s: float
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     expected: list[Label]
     detected: list[Label] = Field(default_factory=list)
-    tp: int = 0
+    tp: int = 0  # 검출된 정답 항목 수. 하나의 검출이 여러 정답을 포함할 수 있다.
+    matched_detections: int = 0  # 정답과 대응하는 검출 항목 수 (정밀도용)
+    matched_expected_indices: list[int] = Field(default_factory=list)
     fn: list[str] = Field(default_factory=list)  # 놓친 정답
     fp: list[str] = Field(default_factory=list)  # 정답에 없는 검출
     wrong_category: list[str] = Field(default_factory=list)
@@ -97,22 +99,31 @@ def load_samples(path: Path) -> list[Sample]:
 
 
 def grade(result: SampleResult) -> SampleResult:
-    """정답과 검출을 항목 단위로 맞춘다. 정답 하나에 검출 하나만 짝짓는다."""
-    unused = list(range(len(result.detected)))
-    for label in result.expected:
-        match = next(
-            (i for i in unused if same(label.text, result.detected[i].text)), None
-        )
-        if match is None:
+    """정답별 포함 여부를 센다. 정밀도는 별도로 검출별 대응 여부를 센다."""
+    matched: set[int] = set()
+    result.tp = result.categorized = 0
+    result.fn, result.fp, result.wrong_category = [], [], []
+    result.matched_expected_indices = []
+    for expected_index, label in enumerate(result.expected):
+        matches = [
+            i
+            for i, detected in enumerate(result.detected)
+            if same(label.text, detected.text)
+        ]
+        if not matches:
             result.fn.append(label.text)
             continue
-        unused.remove(match)
+        matched.update(matches)
+        result.matched_expected_indices.append(expected_index)
         result.tp += 1
         if label.category is not None:
             result.categorized += 1
-            if result.detected[match].category != label.category:
+            if not any(result.detected[i].category == label.category for i in matches):
                 result.wrong_category.append(label.text)
-    result.fp = [result.detected[i].text for i in unused]
+    result.matched_detections = len(matched)
+    result.fp = [
+        item.text for i, item in enumerate(result.detected) if i not in matched
+    ]
     return result
 
 
@@ -154,21 +165,25 @@ def _percentile(values: list[float], p: float) -> float:
 def summarize(results: list[SampleResult], total_s: float) -> dict[str, Any]:
     done = [r for r in results if r.ok]
     tp = sum(r.tp for r in done)
+    matched_detections = sum(r.matched_detections for r in done)
     fn = sum(len(r.fn) for r in done)
     fp = sum(len(r.fp) for r in done)
-    precision, recall = _ratio(tp, tp + fp), _ratio(tp, tp + fn)
-    f1 = 2 * precision * recall / (precision + recall) if precision and recall else None
+    precision = _ratio(matched_detections, matched_detections + fp)
+    recall = _ratio(tp, tp + fn)
+    f1 = _ratio(2 * (precision or 0) * (recall or 0), (precision or 0) + (recall or 0))
+    if f1 is None and (tp + fp + fn):
+        f1 = 0.0
     categorized = sum(r.categorized for r in done)
     per_category: dict[str, dict[str, int]] = {}
     for r in done:
-        for label in r.expected:
+        for index, label in enumerate(r.expected):
             if label.category is None:
                 continue
             row = per_category.setdefault(
                 CATEGORY_LABEL[label.category], {"expected": 0, "found": 0}
             )
             row["expected"] += 1
-            row["found"] += label.text not in r.fn
+            row["found"] += index in r.matched_expected_indices
     latencies = [r.elapsed_s for r in results]
     tenth = max(1, len(latencies) // 10)
     return {
@@ -180,6 +195,7 @@ def summarize(results: list[SampleResult], total_s: float) -> dict[str, Any]:
         "recall": recall,
         "f1": f1,
         "tp": tp,
+        "matched_detections": matched_detections,
         "fp": fp,
         "fn": fn,
         "category_accuracy": _ratio(
@@ -198,8 +214,10 @@ def summarize(results: list[SampleResult], total_s: float) -> dict[str, Any]:
         # 처음과 마지막 10%의 평균 지연. 오래 돌릴수록 느려지는지 본다
         "latency_first10_avg_s": sum(latencies[:tenth]) / tenth if latencies else 0.0,
         "latency_last10_avg_s": sum(latencies[-tenth:]) / tenth if latencies else 0.0,
-        "input_tokens": sum(r.input_tokens for r in results),
-        "output_tokens": sum(r.output_tokens for r in results),
+        "input_tokens": sum(r.input_tokens or 0 for r in results),
+        "output_tokens": sum(r.output_tokens or 0 for r in results),
+        "input_tokens_missing": sum(r.input_tokens is None for r in results),
+        "output_tokens_missing": sum(r.output_tokens is None for r in results),
         "total_s": round(total_s, 1),
     }
 
@@ -216,7 +234,8 @@ def render(summary: dict[str, Any], results: list[SampleResult], dataset: Path) 
         "",
         "| 지표 | 값 |",
         "| --- | --- |",
-        f"| 정밀도 (검출 중 정답) | {_pct(s['precision'])} ({s['tp']}/{s['tp'] + s['fp']}) |",
+        f"| 정밀도 (검출 중 정답과 대응) | {_pct(s['precision'])} "
+        f"({s['matched_detections']}/{s['matched_detections'] + s['fp']}) |",
         f"| 재현율 (정답 중 검출) | {_pct(s['recall'])} ({s['tp']}/{s['tp'] + s['fn']}) |",
         f"| F1 | {_pct(s['f1'])} |",
         f"| 분류 정확도 | {_pct(s['category_accuracy'])} |",
@@ -243,7 +262,9 @@ def render(summary: dict[str, Any], results: list[SampleResult], dataset: Path) 
         f"{s['latency_p50_s']:.2f}s / {s['latency_p95_s']:.2f}s / {s['latency_max_s']:.2f}s |",
         f"| 처음 10% → 마지막 10% 평균 지연 | {s['latency_first10_avg_s']:.2f}s → "
         f"{s['latency_last10_avg_s']:.2f}s |",
-        f"| 토큰 (입력 / 출력) | {s['input_tokens']} / {s['output_tokens']} |",
+        f"| 확인된 토큰 합계 (입력 / 출력) | {s['input_tokens']} / {s['output_tokens']} |",
+        f"| 토큰 미제공 문장 수 (입력 / 출력) | "
+        f"{s['input_tokens_missing']} / {s['output_tokens_missing']} |",
         "",
     ]
 
