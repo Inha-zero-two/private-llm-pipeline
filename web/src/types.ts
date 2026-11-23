@@ -56,6 +56,8 @@ export type Turn = {
   consents: ConsentRecord[]
   answer: string
   notice: Notice | null
+  /** 서버가 확정한 종료 사유. 실행 중·오류·데모에서는 null */
+  endReason: string | null
 }
 
 export type Chat = {

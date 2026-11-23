@@ -41,7 +41,7 @@ export function RunLogPanel({ turns, consent, demo }: Props) {
       <div className={styles.scroll} tabIndex={0}>
         {turns.length === 0 && <p className={styles.muted}>선택한 채팅의 실행 기록이 없습니다.</p>}
         {[...turns].reverse().map((turn, index) => {
-          const log = monitorTurn(turn, consent !== null && turn.running)
+          const log = monitorTurn(turn, consent !== null && turn.running, demo)
           return (
             <article className={styles.entry} key={turn.id}>
               <h3>
