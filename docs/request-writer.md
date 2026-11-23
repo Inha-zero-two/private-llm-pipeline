@@ -15,8 +15,8 @@
 
 - 로컬 모델은 `LocalLLMRunner.request(run_id, 입력, PromptIdx.WRITE | REWRITE, chat_id)`로 호출. 같은 입력의 재시도(최대 3회)는 Runner가 처리
 - `run_id`를 넘겨야 중지 버튼(`Main.stop` → `LocalLLMRunner.stop(run_id)`)이 생성을 끊을 수 있음
-- **입력 크기 한도**: 모델 입력(시스템 프롬프트 제외)이 `INPUT_TOKEN_LIMIT`(21,744토큰, ContextManager 압축 기준과 같음)와 `Runner.get_input_limit()` 중 작은 값을 넘으면 모델을 부르지 않고 `None`. 토큰 수는 `Runner.tokenize()`로 셈
-- **생성 실패는 `None`**: 모델 실패, 중지, 빈 답변, 입력 초과, Runner 없음. `rewrite()`는 `hits`가 표의 어떤 항목과도 맞지 않으면 모델을 부르지 않고 `None`
+- **입력 크기 한도**: 모델 입력이 `INPUT_TOKEN_LIMIT`와 Runner 한도 중 작은 값을 넘으면 INPUT_LIMIT_EXCEEDED를 전달한다. 토큰 수는 Runner.tokenize()로 센다.
+- **실패 원인 보존**: 모델 연결·시간 초과·출력 형식·출력 길이 실패는 [오류 계약](errors.md)의 해당 코드와 WRITE/REWRITE 단계로 전달한다. 빈 요청문도 형식 오류다. 중지는 취소로, Runner 없음은 설정 오류로 처리한다. rewrite의 hits가 표에 없으면 상태 불일치 오류다.
 - **잘못된 호출은 예외**: 빈 질문·빈 직전 요청문·빈 need는 `ValueError`, 자료형 오류는 `TypeError`, 개인정보 표 형식 오류는 `RuntimeError`
 - 모델이 붙인 코드 블록, `요청문:` 같은 머리말, 전체를 감싼 따옴표는 떼어 냄
 - `pd_table`은 `PDItem` 목록이나 같은 필드를 가진 dict 목록 모두 가능
@@ -52,15 +52,15 @@ flowchart TD
     N -->|아니오| G["LeakGuard.detect"]
     G -->|passed| S["FrontierClient로 전송"]
     G -->|hits 있음| C{"재생성 횟수 < regen_limit"}
-    G -->|hits 없음| F["None → regen_limit 종료 (전송 안 함)"]
+    G -->|검사 장애·유효한 hits 없음| E["해당 오류 전파 (전송 안 함)"]
     N -->|예| C
     C -->|예, 직전 요청문 있음| R["rewrite(previous, hits, need, pd_table, run_id, chat_id)"]
     C -->|예, 직전 생성 실패| W
-    C -->|아니오| F
+    C -->|아니오| F["regen_limit 종료"]
     R --> N
 ```
 
-- 반복은 Main의 `_write_safe_request()`가 담당. 생성 실패(`None`)도 검사에 걸린 것과 같이 재생성 횟수에 포함
+- 반복은 Main의 `_write_safe_request()`가 담당한다. 모델 장애는 None으로 합치지 않고 원인별 오류로 전달한다. None 분기는 기존 호출 규격의 호환 경로이며 정상 검사 후 재작성 소진과 구분한다.
 - 재작성 결과도 매번 LeakGuard를 거치며, 통과하지 못한 요청문은 전송하지 않음
 - 동작 로그(`log_event(run_id, "draft", ...)`)는 ChatManager 구현 후 연결. 지금은 주석으로 위치만 표시
 

@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+from ..models.errors import ErrorCode, ErrorStage, PipelineError
+
 DEFAULT_PROMPT_FILE = (
     Path(__file__).resolve().parent.parent / "prompts" / "prompts.json"
 )
@@ -104,17 +106,29 @@ class PromptManager:
         """열거형(PromptIdx), 번호(idx) 또는 이름(str)으로 시스템 프롬프트 문자열 반환."""
         # 로드 상태와 입력 키 자료형·등록 여부 확인 후 본문 반환
         if not self._loaded:
-            raise RuntimeError("시스템 프롬프트가 로드되지 않았습니다")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.STARTUP,
+                "시스템 프롬프트가 로드되지 않았습니다",
+            )
         if isinstance(prompt_idx, bool) or not isinstance(prompt_idx, (int, str)):
             raise TypeError(
                 f"지원하지 않는 프롬프트 키 자료형: {type(prompt_idx).__name__}"
             )
         if prompt_idx not in self._prompts:
-            raise KeyError(f"등록되지 않은 프롬프트 키: {prompt_idx}")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.STARTUP,
+                f"등록되지 않은 프롬프트 키: {prompt_idx}",
+            )
         return self._prompts[prompt_idx]
 
     def get_version(self) -> str:
         """프롬프트 파일 최상단의 버전 반환. Runner에서 본문과 별도로 조회."""
         if not self._loaded:
-            raise RuntimeError("시스템 프롬프트가 로드되지 않았습니다")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.STARTUP,
+                "시스템 프롬프트가 로드되지 않았습니다",
+            )
         return self._version

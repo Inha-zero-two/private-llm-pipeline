@@ -214,10 +214,15 @@
 | `consent_result` | `consentId: integer`, `result: 'answered' 또는 'cancelled'`. answered이면 `text: string`, `decisions: { pdId: integer, allow: boolean }[]` 추가 | 해당 요청 입력 닫기, 항목별 결과 표시. cancelled에는 text·decisions 없음 |
 | `token` | `text: string` | 답변에 순서대로 누적 |
 | `done` | `endReason: string`, `limited: string 또는 null`, `answerMessageId: integer 또는 null` | 실행 완료, 안내 표시, 전송 버튼 복귀 |
-| `error` | `code: string`, `message: string` | 오류 안내, 전송 버튼 복귀 |
+| `error` | `code: string`, `stage: string 또는 null`, `message: string` | 코드·발생 단계·고정 안내 표시, 전송 버튼 복귀 |
 | `replay_complete` | `lastEventId: integer`, `pendingConsentId: integer 또는 null` | 재전송 복원 완료, 현재 대기 중인 동의 입력 활성화 |
 
-`done.endReason`은 `info_enough`, `call_limit`, `regen_limit`, `budget_limit`, `offline`, `stopped`, `consent_denied` 중 하나다. `info_enough`의 `limited`는 null이며, 나머지는 서버 안내 문구다. `stopped`는 새 최종 답변을 만들지 않고 이미 생성한 부분 답변만 보존한다. 나머지 종료 사유는 가능한 정보로 최종 답변을 생성한 후 완료한다.
+`done.endReason`은 `info_enough`, `call_limit`, `regen_limit`, `budget_limit`, `offline`, `stopped` 중 하나다. 공개 거부는 실행 종료 조건이 아니다. 과거 consent_denied 기록은 호환 조회만 지원한다. `info_enough`의 limited는 null이며 stopped는 생성 중인 부분 답변만 보존한다. 나머지는 가능한 정보로 최종 답변을 생성한 후 완료한다.
+
+오류 코드 12종 및 외부 질의 실패 코드 7종, stage 목록과 복구 기준은 [오류 계약](errors.md)을 따른다.
+오류 message는 고정 안내문이며 내부 예외 원문을 포함하지 않는다. 외부 실패를 로컬 답변으로 복구하면
+offline / errorCode=null이고, 상세 실패는 내부 diagnostic에만 남긴다. GUARD 검사 장애는 regen_limit이
+아닌 해당 모델 오류이며 미검사 요청은 전송하지 않는다.
 
 ### 청크 형식과 JSON 예시
 
@@ -277,12 +282,12 @@ data: {"endReason":"info_enough","limited":null,"answerMessageId":2}
 {"code":"NOT_FOUND","message":"실행이 없거나 스트림 기록이 만료되었습니다."}
 ```
 
-연결 후 중간 오류는 HTTP 상태를 변경하지 않고 마지막 `error` 이벤트로 보낸다. 예시 코드는 `LOCAL_LLM_ERROR` 또는 `INTERNAL_ERROR`이며, 화면은 이미 받은 답변을 유지하고 오류 안내를 표시한다. 연결 오류 콜백과 JSON data가 있는 서버의 `error` 이벤트를 구분한다. 프론티어 연결 불가는 가능한 경우 `offline` 사유의 최종 답변과 `done`으로 처리한다.
+연결 후 중간 오류는 HTTP 상태를 변경하지 않고 마지막 `error` 이벤트로 보낸다. 예시 코드는 `LOCAL_LLM_UNAVAILABLE` 또는 `INTERNAL_ERROR`이며, 화면은 이미 받은 답변을 유지하고 오류 안내를 표시한다. 연결 오류 콜백과 JSON data가 있는 서버의 `error` 이벤트를 구분한다. 프론티어 연결 불가는 가능한 경우 `offline` 사유의 최종 답변과 `done`으로 처리한다.
 
 ```text
 id: 5
 event: error
-data: {"code":"LOCAL_LLM_ERROR","message":"로컬 모델 응답을 처리하지 못했습니다."}
+data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답을 처리하지 못했습니다."}
 
 ```
 
@@ -486,6 +491,7 @@ data: {"code":"LOCAL_LLM_ERROR","message":"로컬 모델 응답을 처리하지 
 | `endReason` | string 또는 null | `info_enough`, `call_limit`, `regen_limit`, `budget_limit`, `offline`, `stopped`, `consent_denied`. 진행 중·오류 종료는 null |
 | `notice` | string 또는 null | API-03과 동일한 종료·오류 안내. 진행 중·정상 완료는 null |
 | `errorCode` | string 또는 null | 오류 종료 시 코드, 그 외 null |
+| `errorStage` | string 또는 null | 오류 발생 단계. 진행 중·정상 완료·과거 미제공 기록은 null |
 | `frontierQueries` | object[] | `round` 오름차순 프론티어 내역 |
 | `frontierQueries[].queryId` | integer | 질의 ID |
 | `frontierQueries[].round` | integer | 1부터 시작하는 질의 회차 |
@@ -512,6 +518,7 @@ data: {"code":"LOCAL_LLM_ERROR","message":"로컬 모델 응답을 처리하지 
   "status": "finished",
   "endReason": "info_enough",
   "errorCode": null,
+  "errorStage": null,
   "frontierQueries": [
     {
       "queryId": 1,

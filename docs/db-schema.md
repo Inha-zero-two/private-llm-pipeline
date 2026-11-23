@@ -7,10 +7,11 @@
 설정은 새 버전을 추가하고 기존 실행이 참조하는 settingId는 유지한다.
 pd_items의 allowed/allowedBy는 사전 설정 상태만 저장한다. 임시 동의는 실행별 메모리에만 적용하고,
 전송 당시 허용 상태는 query_items에 보존한다. 항목별 동의 결정은 JSON으로 저장한다.
-오류는 status=finished, endReason=NULL, errorCode/notice로 기록한다.
+오류는 status=finished, endReason=NULL, errorCode/errorStage/notice로 기록한다. [오류 계약](errors.md)을 따른다.
 
-빈 DB의 스키마 버전은 1이다. 기존 버전 0은 최초 연결 시 개인정보 ID와 전송 기록을
-보존하면서 `기타` 분류를 허용하도록 갱신한다. 공개 설정의 영문 검출 설명은
+빈 DB의 스키마 버전은 2다. 버전 1은 runs.errorStage TEXT를 트랜잭션으로 추가하며 기존 데이터를 보존한다.
+기존 버전 0은 최초 연결 시 개인정보 ID와 전송 기록을
+보존하면서 `기타` 분류를 허용하도록 1로 갱신한 뒤 2로 갱신한다. 공개 설정의 영문 검출 설명은
 `privacy_settings.rules` JSON의 `detect_en`에 저장한다.
 
 실행 종료 후 채팅을 삭제할 때 runs를 먼저 삭제하고 chats를 삭제한다.
@@ -72,6 +73,7 @@ pd_items의 allowed/allowedBy는 사전 설정 상태만 저장한다. 임시 �
 | `endReason` | TEXT | NULL 허용 | — | — |
 | `notice` | TEXT | NULL 허용 | — | — |
 | `errorCode` | TEXT | NULL 허용 | — | — |
+| `errorStage` | TEXT | NULL 허용 | — | — |
 | `frontierCalls` | INTEGER | NOT NULL | — | 0 |
 | `regenerations` | INTEGER | NOT NULL | — | 0 |
 | `spentCost` | REAL | NOT NULL | — | 0 |

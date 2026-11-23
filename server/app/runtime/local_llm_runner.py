@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
@@ -11,6 +12,13 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from ..models.enums import PromptIdx
+from ..models.errors import (
+    ErrorCode,
+    ErrorStage,
+    PipelineError,
+    describe_error,
+    model_failure,
+)
 from ..models.llm_results import ParsedRequestResult, RequestResult
 from .local_res_parser import OutputFormatError, parser
 
@@ -33,6 +41,13 @@ class RunnerUnavailableError(ConnectionError):
     """Runner 종료 또는 요청 대기 시간 초과. 내부 구현 오류와 구분한다."""
 
 
+class ModelResponseError(PipelineError):
+    """모델 스트림이 비어 있거나 완료 정보 없이 종료됨."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage.PIPELINE, detail)
+
+
 class LocalLLMRunner:
     def __init__(
         self,
@@ -50,7 +65,11 @@ class LocalLLMRunner:
         초기화 시 짧은 요청으로 실제 응답 확인. 모델 준비나 응답 확인 실패 시 예외 전달.
         """
         if timeout <= 0:
-            raise ValueError("timeout must be positive")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.STARTUP,
+                "timeout must be positive",
+            )
         self._model_path = model_path
         self._timeout = timeout
         self.prompt_manager = prompt_manager
@@ -112,9 +131,7 @@ class LocalLLMRunner:
                             break
                         remaining = deadline - monotonic()
                         if remaining <= 0:
-                            raise RunnerUnavailableError(
-                                "Model request queue timed out"
-                            )
+                            raise TimeoutError("Model request queue timed out")
                         # 이전 수신 정리는 별도 스레드에서 끝날 수 있으므로 주기적으로 확인.
                         self._request_condition.wait(timeout=min(0.05, remaining))
                 finally:
@@ -182,6 +199,7 @@ class LocalLLMRunner:
         log_call: bool = True,
         on_token: Callable[[str], None] | None = None,
         interruptible: bool = True,
+        stage: ErrorStage = ErrorStage.PIPELINE,
     ) -> RequestResult:
         """직접 지정한 입력과 시스템 프롬프트로 응답 요청 후 답변 반환.
 
@@ -200,8 +218,9 @@ class LocalLLMRunner:
             input_tokens: int | None = 0
             output_tokens: int | None = 0
             last_output = ""
-            for _ in range(MAX_ATTEMPTS):
+            for attempt in range(1, MAX_ATTEMPTS + 1):
                 output: list[str] = []
+                attempt_failure: str | None = None
                 started = monotonic()
                 try:
                     result = self._generate(
@@ -213,6 +232,28 @@ class LocalLLMRunner:
                         on_token=on_token,
                         interruptible=interruptible,
                     )
+                    if not result[1]:
+                        attempt_failure = result[4]
+                except Exception as error:
+                    info = describe_error(error, stage)
+                    logging.getLogger(__name__).warning(
+                        "Manual model attempt failed run_id=%s code=%s stage=%s attempt=%s",
+                        run_id,
+                        info.code,
+                        info.stage,
+                        attempt,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+                    attempt_failure = (
+                        "timeout"
+                        if isinstance(error, TimeoutError)
+                        else "parse_failed"
+                        if isinstance(error, ModelResponseError)
+                        else "unavailable"
+                        if isinstance(error, ConnectionError)
+                        else None
+                    )
+                    raise
                 finally:
                     if log_call:
                         self._log_call(
@@ -223,6 +264,9 @@ class LocalLLMRunner:
                             prompt_version=None,
                             elapsed_ms=(monotonic() - started) * 1000,
                             format_valid=None,
+                            failure_reason=attempt_failure,
+                            attempt=attempt,
+                            stage=stage,
                         )
                 input_tokens = (
                     input_tokens + result[2]
@@ -273,7 +317,7 @@ class LocalLLMRunner:
             if interruptible and stop_signal.is_set():
                 return "", False, 0, 0, "stopped"
             if monotonic() >= deadline:
-                raise RunnerUnavailableError("Model cleanup wait timed out")
+                raise TimeoutError("Model cleanup wait timed out")
         with self._state_lock:
             if self._closed:
                 self._busy.release()
@@ -365,9 +409,9 @@ class LocalLLMRunner:
                     answer = "".join(text)
                     if finish_reason is None:
                         if not answer.strip():
-                            error = RuntimeError("Local LLM returned no response")
+                            error = ModelResponseError("Local LLM returned no response")
                         else:
-                            error = RuntimeError(
+                            error = ModelResponseError(
                                 "Local LLM stream ended without a finish reason"
                             )
                         generation_errors.append(error)
@@ -459,12 +503,13 @@ class LocalLLMRunner:
             output_tokens: int | None = 0
             last_output = ""
             failure_reason = "parse_failed"
-            for _ in range(MAX_ATTEMPTS):
+            for attempt in range(1, MAX_ATTEMPTS + 1):
                 if stop_signal.is_set():
                     return last_output, False, input_tokens, output_tokens, "stopped"
                 output: list[str] = []
                 generation_errors: list[Exception] = []  # 모델 요청·수신 중 발생한 오류
                 format_valid = None
+                attempt_failure: str | None = None
                 started = monotonic()
                 try:
                     try:
@@ -482,7 +527,22 @@ class LocalLLMRunner:
                         if not generation_errors:
                             raise
                         input_tokens = output_tokens = None
-                        failure_reason = "unavailable"
+                        cause = generation_errors[-1]
+                        logging.getLogger(__name__).warning(
+                            "Local model attempt failed run_id=%s task=%s attempt=%s",
+                            run_id,
+                            prompt_idx,
+                            attempt,
+                            exc_info=(type(cause), cause, cause.__traceback__),
+                        )
+                        failure_reason = (
+                            "timeout"
+                            if isinstance(cause, TimeoutError)
+                            else "parse_failed"
+                            if isinstance(cause, ModelResponseError)
+                            else "unavailable"
+                        )
+                        attempt_failure = failure_reason
                         last_output = "".join(output) or last_output
                         if stop_signal.is_set():
                             return last_output, False, None, None, "stopped"
@@ -508,6 +568,7 @@ class LocalLLMRunner:
                             "stopped" if stop_signal.is_set() else result[4],
                         )
                     if not result[1]:
+                        attempt_failure = result[4]
                         last_output = result[0]
                         if result[4] == "context_full":
                             return (
@@ -524,9 +585,17 @@ class LocalLLMRunner:
                     # 출력 형식 오류만 재시도. 파서 내부 코드의 오류는 호출자에게 전달
                     try:
                         parsed = parser(result[0], prompt_idx)
-                    except OutputFormatError:
+                    except OutputFormatError as error:
+                        logging.getLogger(__name__).warning(
+                            "Model parse failed run_id=%s task=%s attempt=%s",
+                            run_id,
+                            prompt_idx,
+                            attempt,
+                            exc_info=(type(error), error, error.__traceback__),
+                        )
                         format_valid = False
                         failure_reason = "parse_failed"
+                        attempt_failure = failure_reason
                         last_output = result[0]
                         if stop_signal.is_set():
                             return (
@@ -548,6 +617,8 @@ class LocalLLMRunner:
                         prompt_version=prompt_version,
                         elapsed_ms=(monotonic() - started) * 1000,
                         format_valid=format_valid,
+                        failure_reason=attempt_failure,
+                        attempt=attempt,
                     )
                 if stop_signal.is_set():
                     return result[0], False, input_tokens, output_tokens, "stopped"
@@ -557,7 +628,13 @@ class LocalLLMRunner:
                         context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
                     )
                     if not appended and not stop_signal.is_set():
-                        return None, False, input_tokens, output_tokens, "length_failed"
+                        return (
+                            None,
+                            False,
+                            input_tokens,
+                            output_tokens,
+                            "compaction_failed",
+                        )
                 # 대화 압축 중 중지 신호를 받으면 요약 저장을 마친 뒤 요청 중지
                 if stop_signal.is_set():
                     return result[0], False, input_tokens, output_tokens, "stopped"
@@ -651,6 +728,9 @@ class LocalLLMRunner:
         prompt_version: str | None,
         elapsed_ms: float,
         format_valid: bool | None,
+        failure_reason: str | None = None,
+        attempt: int | None = None,
+        stage: ErrorStage = ErrorStage.PIPELINE,
     ) -> None:
         """요청 정보와 새 입력·답변의 로그 저장.
 
@@ -671,6 +751,18 @@ class LocalLLMRunner:
                         "format_valid": format_valid,
                         "input": new_input,
                         "output": output,
+                        "failure_reason": failure_reason,
+                        "attempt": attempt,
+                        "error": describe_error(
+                            model_failure(
+                                failure_reason,
+                                ErrorStage(prompt_idx)
+                                if prompt_idx in ErrorStage._value2member_map_
+                                else stage,
+                            )
+                        ).model_dump(mode="json")
+                        if failure_reason and failure_reason != "stopped"
+                        else None,
                     },
                 )
             except StorageError as error:

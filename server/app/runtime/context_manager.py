@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from threading import RLock
 
+from ..models.errors import (
+    ErrorCode,
+    ErrorStage,
+    PipelineError,
+    describe_error,
+    model_failure,
+)
 from .local_llm_runner import MAX_OUTPUT_TOKENS, N_CTX, PROMPT_MARGIN, LocalLLMRunner
 
 # 일반 답변 5,000토큰과 요약 5,000토큰을 각각 확보한 자동 압축 기준
@@ -46,7 +53,11 @@ class ContextManager:
             ),
         )
         if not 0 < compaction_target < self._limit:
-            raise ValueError("Require 0 < compaction_target < compaction_limit")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.COMPACTION,
+                "Require 0 < compaction_target < compaction_limit",
+            )
         self._contexts: dict[int, str] = {}  # 대화 번호별 저장 내용
         self._ids: dict[tuple[str, str | int], int] = {}  # 채팅·작업별 대화 번호
         self._next_id = 0  # 다음에 할당할 대화 번호
@@ -105,13 +116,17 @@ class ContextManager:
             # 새 내용을 포함한 토큰 수 확인
             if len(self._runner.tokenize(candidate)) >= self._limit:
                 if not current:
-                    return False
+                    raise PipelineError(
+                        ErrorCode.INPUT_LIMIT_EXCEEDED, ErrorStage.COMPACTION
+                    )
                 summary = self._compact_text(current)
                 if summary is None:
                     return False
                 candidate = summary + additional_context
                 if len(self._runner.tokenize(candidate)) >= self._limit:
-                    return False
+                    raise PipelineError(
+                        ErrorCode.COMPACTION_FAILED, ErrorStage.COMPACTION
+                    )
             self._contexts[context_id] = candidate
             if summary is not None:
                 self._log_compaction(context_id, summary)
@@ -140,22 +155,26 @@ class ContextManager:
 
         기본 목표와 최대 응답은 5,000토큰. 중지 신호와 관계없이 끝까지 수신.
         일반 요청 로그는 생략. 요약 저장과 별도 로그 기록은 호출한 함수에서 처리.
-        length 종료는 manual_request에서 최대 3회 시도. 모두 잘리면 None 반환.
+        length 종료는 manual_request에서 최대 3회 시도. 모두 잘리면 출력 한도 오류.
         요청 중 오류, 나머지 실패 응답 또는 빈 요약은 예외로 전달.
         """
-        summary, success, _, _, reason = self._runner.manual_request(
-            text,
-            self._system_prompt,
-            run_id=self.run_id,
-            max_tokens=COMPACTION_MAX_TOKENS,
-            log_call=False,
-            interruptible=False,
-        )
+        try:
+            summary, success, _, _, reason = self._runner.manual_request(
+                text,
+                self._system_prompt,
+                run_id=self.run_id,
+                max_tokens=COMPACTION_MAX_TOKENS,
+                log_call=False,
+                interruptible=False,
+            )
+        except Exception as error:
+            info = describe_error(error, ErrorStage.COMPACTION)
+            raise PipelineError(info.code, info.stage) from error
         # 중지 신호가 있어도 요약 완료까지 수신. 요청 중 발생한 예외는 호출자에게 전달
         if reason == "length_failed":
-            return None
+            raise model_failure(reason, ErrorStage.COMPACTION)
         if not success or reason != "stop" or not summary.strip():
-            raise RuntimeError(f"Context compaction failed: {reason}")
+            raise model_failure(reason, ErrorStage.COMPACTION)
         # 목표 토큰 수를 넘긴 요약도 자르거나 수정하지 않고 사용
         return summary
 

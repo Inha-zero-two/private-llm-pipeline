@@ -120,6 +120,8 @@ export default function App() {
       answer: '',
       notice: null,
       endReason: null,
+      errorCode: null,
+      errorStage: null,
     }
     const id = chatId
     // 첫 질문을 보낼 때 채팅 제목을 정하고, 질문한 채팅을 목록 맨 위로 올린다

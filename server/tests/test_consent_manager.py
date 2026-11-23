@@ -178,7 +178,7 @@ def test_quick_answer_decides_all_without_model() -> None:
         assert reply.ok is True
         assert runner.calls == [PromptIdx.CONSENT]  # 해석 모델은 부르지 않음
         assert store.updates == [(RUN_ID, 1, result.decisions, ALLOW_ALL, False)]
-        assert [event for event, _ in store.events] == [
+        assert [event for event, _ in store.events if event != "diagnostic"] == [
             "consent_request",
             "consent_result",
         ]

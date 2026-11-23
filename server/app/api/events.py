@@ -15,6 +15,8 @@ import json
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
+from app.models.errors import safe_message
+
 if TYPE_CHECKING:
     from app.data.chat_manager import ChatManager
     from app.models.schemas import RunEvent
@@ -66,6 +68,8 @@ def to_screen(event: RunEvent) -> tuple[str, dict[str, Any]] | None:
     if event.type not in SCREEN_EVENTS or not isinstance(event.payload, dict):
         return None
     data = {key: value for key, value in event.payload.items() if key != "run_id"}
+    if event.type == "error":
+        data["message"] = safe_message(str(data.get("code", "INTERNAL_ERROR")))
     return event.type, data
 
 

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.api.events import EventHub
+from app.models.errors import ErrorStage, describe_error
 
 if TYPE_CHECKING:
     from app.data.chat_manager import ChatManager
@@ -111,8 +112,18 @@ class Pipeline:
         from app.privacy.pd_detector import PDDetector
         from app.privacy.privacy_settings import PrivacySettings
 
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        chat_manager = ChatManager(self._db_path)
+        try:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            chat_manager = ChatManager(self._db_path)
+        except Exception as error:
+            info = describe_error(error, ErrorStage.STORAGE)
+            log.error(
+                "Storage startup failed code=%s stage=%s",
+                info.code,
+                info.stage,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            raise
         try:
             prompts = PromptManager()
             try:
@@ -152,8 +163,20 @@ class Pipeline:
                 emit=self._on_event,
             )
             await main.init()
-        except BaseException:
-            await self._close(chat_manager)
+        except BaseException as error:
+            if isinstance(error, Exception):
+                info = describe_error(error, ErrorStage.STARTUP)
+                log.error(
+                    "Startup failed code=%s stage=%s",
+                    info.code,
+                    info.stage,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            try:
+                await self._close(chat_manager)
+            except Exception as cleanup:
+                log.exception("Startup cleanup failed")
+                error.add_note(f"Startup cleanup failed: {cleanup!r}")
             raise
         self._services = Services(chat_manager, privacy_settings, consent_manager, main)
 

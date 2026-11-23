@@ -61,6 +61,8 @@ export function RunLogPanel({ turns, consent, demo }: Props) {
                 <dd>{turn.notice?.kind === 'error' ? turn.notice.text : '기록 없음'}</dd>
                 <dt>오류 코드</dt>
                 <dd>{log.errorCode ?? '미제공'}</dd>
+                <dt>오류 발생 단계</dt>
+                <dd>{log.errorStage ?? '미제공'}</dd>
               </dl>
               {turn.running && consent && (
                 <p className={styles.muted}>

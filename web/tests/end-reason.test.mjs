@@ -150,3 +150,49 @@ test('error completion clears any end reason', (t) => {
   assert.equal(current.endReason, null)
   assert.equal(monitorTurn(current).endReason, '오류 종료')
 })
+
+for (const code of ['LOCAL_LLM_TIMEOUT', 'MODEL_RESPONSE_INVALID', 'FUTURE_ERROR']) {
+  test(`live error and saved run preserve code and stage: ${code}`, async (t) => {
+    const run = {
+      runId: 2,
+      status: 'finished',
+      endReason: null,
+      notice: 'fixed public message',
+      errorCode: code,
+      errorStage: 'GUARD',
+      frontierQueries: [],
+      consents: [],
+    }
+    const remote = remoteWith(t, run)
+    let current = turn({ running: true })
+    remote.attachRun(2, {
+      update: (fn) => {
+        current = fn(current)
+      },
+      onConsent() {},
+      onFinish() {},
+    })
+    FakeEventSource.latest.dispatch('error', { code, stage: 'GUARD', message: run.notice })
+    const [saved] = await remote.loadTurns('1')
+    assert.equal(current.errorCode, code)
+    assert.equal(saved.errorCode, code)
+    assert.equal(current.errorStage, 'GUARD')
+    assert.equal(saved.errorStage, 'GUARD')
+    assert.deepEqual(monitorTurn(current), monitorTurn(saved))
+  })
+}
+
+test('errors from older servers keep a nullable stage', (t) => {
+  const remote = remoteWith(t, {})
+  let current = turn({ running: true })
+  remote.attachRun(2, {
+    update: (fn) => {
+      current = fn(current)
+    },
+    onConsent() {},
+    onFinish() {},
+  })
+  FakeEventSource.latest.dispatch('error', { code: 'INTERNAL_ERROR', message: 'fixed message' })
+  assert.equal(monitorTurn(current).errorCode, 'INTERNAL_ERROR')
+  assert.equal(monitorTurn(current).errorStage, null)
+})

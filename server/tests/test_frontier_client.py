@@ -140,3 +140,46 @@ def test_stop_before_send_blocks_until_clear() -> None:
     client.clear(1)
     assert client.send(1, "질문").answer == "답"
     assert len(posts) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "code"),
+    [
+        (401, {}, "FRONTIER_AUTH_ERROR"),
+        (403, {}, "FRONTIER_AUTH_ERROR"),
+        (429, {}, "FRONTIER_RATE_LIMITED"),
+        (503, {}, "FRONTIER_UNAVAILABLE"),
+        (422, {}, "FRONTIER_REQUEST_REJECTED"),
+        (422, {"error": {"code": "quota_exceeded"}}, "FRONTIER_QUOTA_EXCEEDED"),
+        (400, {}, "FRONTIER_REQUEST_REJECTED"),
+        (200, {}, "FRONTIER_RESPONSE_INVALID"),
+        (
+            200,
+            {"choices": [{"message": {"content": ["wrong type"]}}]},
+            "FRONTIER_RESPONSE_INVALID",
+        ),
+    ],
+)
+def test_failure_codes_survive_retry_and_connection_check(
+    status: int, body: dict, code: str
+) -> None:
+    client = make_client(lambda request: httpx.Response(status, json=body))
+    if status != 200:
+        assert client.check_connection() is False
+        assert client.connection_failure.code == code
+    with pytest.raises(FrontierError) as caught:
+        client.send(1, "question")
+    assert caught.value.code == code
+    assert caught.value.stage == "FRONTIER"
+
+
+def test_external_timeout_keeps_its_code() -> None:
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("private host", request=request)
+
+    client = make_client(timeout)
+    assert client.check_connection() is False
+    assert client.connection_failure.code == "FRONTIER_TIMEOUT"
+    with pytest.raises(FrontierError) as caught:
+        client.send(1, "question")
+    assert caught.value.code == "FRONTIER_TIMEOUT"
