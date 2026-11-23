@@ -364,16 +364,13 @@ class Main:
                     # 사용자가 응답할 때까지 기다린다. (중지되면 stop()이 이 대기를 끊는다)
                     await self._step(run_id, "공개 동의를 기다리는 중")
                     consent_result = await self.consent_manager.request(consent_req)
-                    if not any(d.allow for d in consent_result.decisions):
-                        return EndReason.CONSENT_DENIED
-                    # 허용한 항목은 이번 실행 동안만 허용으로 바뀐다.
                     await self._call(
                         self.consent_manager.apply,
                         consent_result,
                         consent_req,
                         pd_table,
                     )
-                    # 일부 거절된 정보를 전제로 만든 계획은 다시 판단한다.
+                    # 거절된 항목이 있으면 그 정보를 제외하고 다시 판단한다.
                     if not all(d.allow for d in consent_result.decisions):
                         continue
 
