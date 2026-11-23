@@ -53,7 +53,11 @@ class ContextManager:
             ),
         )
         if not 0 < compaction_target < self._limit:
-            raise ValueError("Require 0 < compaction_target < compaction_limit")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.COMPACTION,
+                "Require 0 < compaction_target < compaction_limit",
+            )
         self._contexts: dict[int, str] = {}  # 대화 번호별 저장 내용
         self._ids: dict[tuple[str, str | int], int] = {}  # 채팅·작업별 대화 번호
         self._next_id = 0  # 다음에 할당할 대화 번호

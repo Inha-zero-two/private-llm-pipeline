@@ -65,7 +65,11 @@ class LocalLLMRunner:
         초기화 시 짧은 요청으로 실제 응답 확인. 모델 준비나 응답 확인 실패 시 예외 전달.
         """
         if timeout <= 0:
-            raise ValueError("timeout must be positive")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.STARTUP,
+                "timeout must be positive",
+            )
         self._model_path = model_path
         self._timeout = timeout
         self.prompt_manager = prompt_manager

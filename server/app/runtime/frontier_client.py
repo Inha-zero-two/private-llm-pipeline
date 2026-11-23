@@ -115,7 +115,9 @@ class FrontierClient:
         생성자에서는 네트워크 요청을 하지 않음. 연결 확인은 check_connection()으로.
         """
         if timeout <= 0:
-            raise ValueError("timeout must be positive")
+            raise FrontierError(
+                "timeout must be positive", ErrorCode.CONFIGURATION_ERROR
+            )
         file_values = read_env_file(env_file) if env_file is not None else {}
         self._api_key = api_key or setting("FRONTIER_API_KEY", file_values, None)
         self._base_url = (
@@ -123,7 +125,10 @@ class FrontierClient:
         ).rstrip("/")
         self.model = model or setting("FRONTIER_MODEL", file_values, DEFAULT_MODEL)
         if self.model not in MODEL_PRICES:
-            raise ValueError(f"단가가 등록되지 않은 모델: {self.model}")
+            raise FrontierError(
+                f"단가가 등록되지 않은 모델: {self.model}",
+                ErrorCode.CONFIGURATION_ERROR,
+            )
         self._timeout = timeout
         self._max_tokens = max_tokens
         self._transport = transport

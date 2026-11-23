@@ -66,7 +66,11 @@ class MemoManager:
             input_limit if max_tokens is None else min(max_tokens, input_limit)
         )
         if self._max_tokens <= 0:
-            raise ValueError("메모 토큰 한도는 양수여야 합니다")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.MEMO,
+                "메모 토큰 한도는 양수여야 합니다",
+            )
 
     def start(self, run_id: int, question: str) -> None:
         """실행 ID를 설정하고 질문을 담은 새 메모로 실행을 시작한다."""

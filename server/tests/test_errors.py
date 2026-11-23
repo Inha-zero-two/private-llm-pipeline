@@ -255,3 +255,15 @@ def test_failed_schema_upgrade_can_be_retried_without_data_loss(
         }
     with ChatManager(path) as store:
         assert store.list_chats()[0].title == "saved"
+
+
+def test_invalid_model_configuration_is_not_an_internal_error() -> None:
+    from app.runtime.frontier_client import FrontierClient, FrontierError
+    from app.runtime.local_llm_runner import LocalLLMRunner
+
+    with pytest.raises(FrontierError) as external:
+        FrontierClient(model="unregistered-model", env_file=None)
+    assert describe_error(external.value).code == ErrorCode.CONFIGURATION_ERROR
+    with pytest.raises(PipelineError) as local:
+        LocalLLMRunner(timeout=0)
+    assert describe_error(local.value).code == ErrorCode.CONFIGURATION_ERROR
