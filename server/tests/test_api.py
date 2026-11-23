@@ -604,3 +604,87 @@ def test_history_survives_restart(make_client: Any) -> None:
     assert restarted.get(f"/api/runs/{run_id}").json()["status"] == "finished"
     # 끝난 실행의 스트림은 DB 기록으로 다시 보낸다
     assert events_of(restarted, run_id)[-1]["event"] == "done"
+
+
+@pytest.mark.parametrize(
+    "stage", ["DETECT", "NEEDS", "JUDGE", "WRITE", "GUARD", "REWRITE", "ANSWER"]
+)
+def test_failed_model_output_keeps_code_stage_and_never_sends_unchecked_request(
+    make_client: Any, stage: str
+) -> None:
+    outputs = {**SIMPLE_RUN, "DETECT": [DETECT_TWO]}
+    outputs[stage] = [""] if stage in {"WRITE", "REWRITE", "ANSWER"} else ["not-json"]
+    if stage == "REWRITE":
+        outputs["GUARD"] = ['{"hits": [0]}']
+    client, _, gateway = make_client(outputs)
+    chat_id, run_id = start(client)
+    events = events_of(client, run_id)
+    terminal = events[-1]
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert terminal["event"] == "error"
+    assert terminal["data"]["code"] == "MODEL_RESPONSE_INVALID"
+    assert terminal["data"]["stage"] == stage
+    assert detail["errorCode"] == terminal["data"]["code"]
+    assert detail["errorStage"] == stage
+    assert detail["notice"] == terminal["data"]["message"]
+    assert detail["endReason"] is None
+    if stage != "ANSWER":
+        assert gateway.requests == []
+    assert client.get(f"/api/chats/{chat_id}").status_code == 200
+
+
+def test_external_fallback_has_diagnostics_without_terminal_error(
+    make_client: Any,
+) -> None:
+    client, _, _ = make_client(SIMPLE_RUN, gateway=Gateway(online=False))
+    _, run_id = start(client)
+    assert events_of(client, run_id)[-1]["data"]["endReason"] == "offline"
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["errorCode"] is None
+    store = client.app.state.pipeline.services.chat_manager
+    diagnostics = [
+        e.payload for e in store.get_events(run_id) if e.type == "diagnostic"
+    ]
+    assert any(
+        e["code"] == "FRONTIER_UNAVAILABLE" and e["recovered"] is False
+        for e in diagnostics
+    )
+    assert any(
+        e["code"] == "FRONTIER_UNAVAILABLE" and e["recovered"] is True
+        for e in diagnostics
+    )
+
+
+def test_primary_and_cleanup_failures_do_not_expose_exception_text(
+    make_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.models.errors import ErrorCode, ErrorStage, PipelineError
+
+    client, _, gateway = make_client(SIMPLE_RUN)
+    services = client.app.state.pipeline.services
+    secret = "/private/secret-path token=private-token"
+
+    def fail_judge(*args: Any, **kwargs: Any) -> None:
+        raise PipelineError(ErrorCode.LOCAL_LLM_TIMEOUT, ErrorStage.JUDGE, secret)
+
+    def fail_cleanup(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(services.main.planner, "judge", fail_judge)
+    monkeypatch.setattr(services.main.consent_manager, "release", fail_cleanup)
+    chat_id, run_id = start(client)
+    events = events_of(client, run_id)
+    detail = client.get(f"/api/runs/{run_id}")
+    chat = client.get(f"/api/chats/{chat_id}")
+    assert events[-1]["data"]["code"] == "LOCAL_LLM_TIMEOUT"
+    assert events[-1]["data"]["stage"] == "JUDGE"
+    assert detail.json()["errorCode"] == "LOCAL_LLM_TIMEOUT"
+    assert detail.json()["errorStage"] == "JUDGE"
+    assert secret not in json.dumps(events) + detail.text + chat.text
+    errors = [
+        e.payload
+        for e in services.chat_manager.get_events(run_id)
+        if e.type == "run_error"
+    ]
+    assert [e["code"] for e in errors] == ["LOCAL_LLM_TIMEOUT", "CLEANUP_ERROR"]
+    assert gateway.requests == []

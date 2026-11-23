@@ -15,7 +15,8 @@ def test_upgrade_preserves_query_items_and_sequence(tmp_path: Path) -> None:
     old_schema = (
         SCHEMA_PATH.read_text(encoding="utf-8")
         .replace("category BETWEEN 0 AND 3", "category BETWEEN 0 AND 2")
-        .replace("PRAGMA user_version = 1;", "")
+        .replace("PRAGMA user_version = 2;", "")
+        .replace(", errorStage TEXT", "")
     )
     with closing(sqlite3.connect(path)) as db:
         db.executescript(old_schema)
@@ -52,4 +53,4 @@ def test_upgrade_preserves_query_items_and_sequence(tmp_path: Path) -> None:
         assert db.execute("SELECT pdId, allowedBy FROM query_items").fetchall() == [
             (5, "setting")
         ]
-        assert db.execute("PRAGMA user_version").fetchone() == (1,)
+        assert db.execute("PRAGMA user_version").fetchone() == (2,)

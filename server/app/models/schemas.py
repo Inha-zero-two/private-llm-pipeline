@@ -127,6 +127,7 @@ class RunDetail(RunSummary):
     config: RunConfig
     end_reason: EndReason | None
     error_code: str | None
+    error_stage: str | None = None
     frontier_calls: int
     regenerations: int
     spent_cost: float

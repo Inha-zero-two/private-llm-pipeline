@@ -17,6 +17,7 @@ web은 vite 프록시로 /api 요청을 이 서버(127.0.0.1:8000)에 보낸다.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path as FilePath
@@ -44,6 +45,7 @@ from app.api.schemas import (
 from app.api.services import BusyError, FrontierFactory, Pipeline, RunnerFactory
 from app.config import db_path as configured_db_path
 from app.data.chat_manager import StorageError
+from app.models.errors import ErrorCode, ErrorStage, PipelineError, describe_error
 from app.privacy.consent_manager import NoPendingConsentError
 
 T = TypeVar("T")
@@ -131,9 +133,23 @@ def create_app(
             return _error(404, "NOT_FOUND", "없는 주소입니다.")
         return _error(exc.status_code, "HTTP_ERROR", str(exc.detail))
 
+    @app.exception_handler(PipelineError)
     @app.exception_handler(Exception)
-    async def on_unexpected(_: Request, __: Exception) -> JSONResponse:
-        return _error(500, "INTERNAL_ERROR", "서버에서 요청을 처리하지 못했습니다.")
+    async def on_unexpected(_: Request, error: Exception) -> JSONResponse:
+        info = describe_error(error)
+        logging.getLogger(__name__).error(
+            "API failure code=%s stage=%s",
+            info.code,
+            info.stage,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        status = (
+            503
+            if info.code
+            in {ErrorCode.LOCAL_LLM_UNAVAILABLE, ErrorCode.LOCAL_LLM_TIMEOUT}
+            else 500
+        )
+        return JSONResponse(status_code=status, content=info.model_dump(mode="json"))
 
     # API-01 ~ 04 채팅
 
@@ -231,8 +247,9 @@ def create_app(
             raise ApiError(
                 409, "NO_PENDING_CONSENT", "현재 응답할 수 있는 동의 요청이 아닙니다."
             ) from None
-        except ConnectionError:
-            raise _local_llm_unavailable() from None
+        except (ConnectionError, TimeoutError) as error:
+            info = describe_error(error, ErrorStage.INTERPRET_CONSENT)
+            raise PipelineError(info.code, info.stage) from error
         return ConsentReply.model_validate(reply.model_dump())
 
     @app.get("/api/runs/{run_id}")
@@ -252,7 +269,10 @@ def create_app(
         try:
             # 로컬 LLM이 설정문을 규칙으로 해석한다. 해석 실패면 기존 설정을 유지한다.
             result = await db(pipeline.services.privacy_settings.save, body.text)
-        except (ConnectionError, InterruptedError):
+        except (ConnectionError, TimeoutError) as error:
+            info = describe_error(error, ErrorStage.PARSE_RULES)
+            raise PipelineError(info.code, info.stage) from error
+        except InterruptedError:
             raise _local_llm_unavailable() from None
         return SettingSaved.model_validate(result.model_dump())
 

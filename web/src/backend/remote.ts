@@ -36,6 +36,7 @@ type ApiRunDetail = {
   endReason: string | null
   notice: string | null
   errorCode: string | null
+  errorStage: string | null
   frontierQueries: { round: number; request: string; answer: string | null }[]
   consents: {
     items: ApiItem[]
@@ -105,11 +106,24 @@ function follow(runId: number, h: RunHandlers): RunHandle {
   let lastId = 0
   let finished = false
 
-  const finish = (notice: Notice | null, endReason: string | null = null) => {
+  const finish = (
+    notice: Notice | null,
+    endReason: string | null = null,
+    errorCode: string | null = null,
+    errorStage: string | null = null,
+  ) => {
     if (finished) return
     finished = true
     source.close()
-    h.update((t) => ({ ...t, running: false, step: null, notice, endReason }))
+    h.update((t) => ({
+      ...t,
+      running: false,
+      step: null,
+      notice,
+      endReason,
+      errorCode,
+      errorStage,
+    }))
     h.onConsent(null)
     h.onFinish()
   }
@@ -179,8 +193,8 @@ function follow(runId: number, h: RunHandlers): RunHandle {
   source.addEventListener('error', (e) => {
     // 서버가 보낸 error 이벤트(data 있음)와 연결 오류(data 없음)를 구분한다
     if (e instanceof MessageEvent && e.data) {
-      const d = JSON.parse(e.data) as { message: string }
-      finish({ kind: 'error', text: d.message })
+      const d = JSON.parse(e.data) as { message: string; code: string; stage?: string | null }
+      finish({ kind: 'error', text: d.message }, null, d.code, d.stage ?? null)
       return
     }
     // 연결이 끊기면 EventSource가 마지막 ID로 다시 붙는다. 완전히 닫혔을 때만 상태를 확인한다
@@ -192,6 +206,8 @@ function follow(runId: number, h: RunHandlers): RunHandle {
               ? noticeOf(run.endReason, run.errorCode, run.notice)
               : { kind: 'error', text: '진행 상황 연결이 끊겼습니다. 채팅을 다시 열어 주세요.' },
             run.status === 'finished' && !run.errorCode ? run.endReason : null,
+            run.status === 'finished' ? run.errorCode : null,
+            run.status === 'finished' ? (run.errorStage ?? null) : null,
           ),
         )
         .catch((err: ApiError) => finish({ kind: 'error', text: err.message }))
@@ -272,6 +288,8 @@ async function loadTurns(chatId: string): Promise<Turn[]> {
       answer: '',
       notice: run && !running ? noticeOf(run.endReason, run.errorCode, run.notice) : null,
       endReason: run && !running && !run.errorCode ? run.endReason : null,
+      errorCode: run && !running ? run.errorCode : null,
+      errorStage: run && !running ? (run.errorStage ?? null) : null,
     })
   }
   return turns

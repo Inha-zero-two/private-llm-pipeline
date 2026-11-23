@@ -32,7 +32,7 @@ CREATE TABLE runs (
     settingId INTEGER REFERENCES privacy_settings,
     config TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running'
         CHECK(status IN ('running', 'finished')),
-    endReason TEXT, notice TEXT, errorCode TEXT,
+    endReason TEXT, notice TEXT, errorCode TEXT, errorStage TEXT,
     frontierCalls INTEGER NOT NULL DEFAULT 0,
     regenerations INTEGER NOT NULL DEFAULT 0, spentCost REAL NOT NULL DEFAULT 0,
     memoFinal TEXT, startedAt TEXT NOT NULL, endedAt TEXT
@@ -73,4 +73,4 @@ CREATE INDEX runs_chat ON runs(chatId, runId);
 CREATE INDEX events_run ON run_events(runId, eventId);
 CREATE INDEX consents_run ON consent_requests(runId, consentId);
 CREATE INDEX queries_run ON frontier_queries(runId, round);
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;

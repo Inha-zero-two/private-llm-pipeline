@@ -13,6 +13,7 @@ import pytest
 from app.data.memo_manager import MemoManager
 from app.main import STOPPED_MARK, Main
 from app.models.enums import EndReason
+from app.models.errors import ErrorCode, ErrorStage, PipelineError
 from app.models.schemas import PrivacySetting, RunConfig, RunEvent, StartedRun
 
 
@@ -620,10 +621,15 @@ def test_guard_format_failure_does_not_rewrite() -> None:
     guard = FakeLeakGuard(log)
     guard.passed = False  # hits 없이 실패 = 검사 모델이 형식을 못 맞춤
     main = make_main(log, planner=FakePlanner(log, enough_after=99), leak_guard=guard)
-    asyncio.run(main.run_pipeline(1, "질문"))
+    with pytest.raises(PipelineError) as caught:
+        asyncio.run(main.run_pipeline(1, "질문"))
+    assert (caught.value.code, caught.value.stage) == (
+        ErrorCode.MODEL_RESPONSE_INVALID,
+        ErrorStage.GUARD,
+    )
 
     assert "rewrite" not in names(log)
-    assert finished_with(log) == EndReason.REGEN_LIMIT
+    assert finished_with(log) is None
 
 
 def test_deny_all_can_finish_when_replan_has_enough_information() -> None:

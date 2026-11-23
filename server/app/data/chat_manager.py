@@ -35,6 +35,14 @@ from app.models.schemas import (
     StartedRun,
 )
 
+from ..models.errors import (
+    ErrorCode,
+    ErrorStage,
+    PipelineError,
+    StateConflictError,
+    safe_message,
+)
+
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 NOTICES: dict[EndReason, str] = {
@@ -47,7 +55,7 @@ NOTICES: dict[EndReason, str] = {
 }
 
 
-class StorageError(RuntimeError):
+class StorageError(StateConflictError):
     """API 계층이 code를 HTTP 오류로 변환할 수 있는 저장소 오류."""
 
     def __init__(self, code: str, message: str) -> None:
@@ -87,6 +95,16 @@ class ChatManager:
                 self._db.executescript("BEGIN IMMEDIATE;\n" + schema + "\nCOMMIT;")
             elif self._db.execute("PRAGMA user_version").fetchone()[0] == 0:
                 self._migrate_pd_categories()
+            if self._db.execute("PRAGMA user_version").fetchone()[0] == 1:
+                with self._transaction() as db:
+                    db.execute("ALTER TABLE runs ADD COLUMN errorStage TEXT")
+                    db.execute("PRAGMA user_version = 2")
+            if self._db.execute("PRAGMA user_version").fetchone()[0] != 2:
+                raise PipelineError(
+                    ErrorCode.CONFIGURATION_ERROR,
+                    ErrorStage.STARTUP,
+                    "Unsupported database version",
+                )
         except BaseException:
             self._db.close()
             raise
@@ -145,7 +163,9 @@ class ChatManager:
     def _transaction(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:
         with self._lock:
             if self._closed:
-                raise RuntimeError("저장소가 닫혔습니다.")
+                raise PipelineError(
+                    ErrorCode.STORAGE_ERROR, ErrorStage.STORAGE, "저장소가 닫혔습니다."
+                )
             self._db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
                 yield self._db
@@ -172,14 +192,14 @@ class ChatManager:
     def _message(self, chat_id: int, message_id: int, role: str) -> None:
         row = self._require("messages", "messageId", message_id)
         if row["chatId"] != chat_id or row["role"] != role:
-            raise ValueError("메시지의 채팅 또는 역할이 맞지 않습니다.")
+            raise StateConflictError("메시지의 채팅 또는 역할이 맞지 않습니다.")
 
     def _items(self, chat_id: int, ids: list[int]) -> None:
         if len(ids) != len(set(ids)):
-            raise ValueError("개인정보 ID가 중복되었습니다.")
+            raise StateConflictError("개인정보 ID가 중복되었습니다.")
         for pd_id in ids:
             if self._require("pd_items", "pdId", pd_id)["chatId"] != chat_id:
-                raise ValueError("다른 채팅의 개인정보입니다.")
+                raise StateConflictError("다른 채팅의 개인정보입니다.")
 
     def create_chat(self) -> int:
         with self._transaction() as db:
@@ -210,7 +230,14 @@ class ChatManager:
                 )
             ]
             runs = [
-                RunSummary.model_validate(dict(r))
+                RunSummary.model_validate(
+                    {
+                        **dict(r),
+                        "notice": safe_message(r["errorCode"])
+                        if r["errorCode"]
+                        else r["notice"],
+                    }
+                )
                 for r in db.execute(
                     "SELECT * FROM runs WHERE chatId=? ORDER BY runId", (chat_id,)
                 )
@@ -375,6 +402,8 @@ class ChatManager:
             notice = notice or row["notice"]
             if end_reason is None and error_code is None:
                 error_code = "INTERNAL_ERROR"
+            if error_code:
+                notice = safe_message(error_code)
             notice = notice or (
                 "실행 중 오류가 발생했습니다."
                 if error_code
@@ -432,7 +461,8 @@ class ChatManager:
                 "error",
                 {
                     "code": run["errorCode"] or "INTERNAL_ERROR",
-                    "message": run["notice"] or "실행 중 오류가 발생했습니다.",
+                    "message": safe_message(run["errorCode"] or "INTERNAL_ERROR"),
+                    "stage": run["errorStage"],
                 },
             )
         return self._append_event(
@@ -454,7 +484,7 @@ class ChatManager:
                 (now,),
             )
             count = db.execute(
-                "UPDATE runs SET status='finished', endReason=NULL, errorCode='RUN_INTERRUPTED', notice='앱 종료로 실행이 중단되었습니다.', endedAt=? WHERE status='running'",
+                "UPDATE runs SET status='finished', endReason=NULL, errorCode='RUN_INTERRUPTED', errorStage='STARTUP', notice='앱 종료로 실행이 중단되었습니다.', endedAt=? WHERE status='running'",
                 (now,),
             ).rowcount
             for row in db.execute(
@@ -681,10 +711,11 @@ class ChatManager:
                 raise ValueError("종료 이벤트는 finish_run()으로 기록합니다.")
             if type_ == "error" and isinstance(payload, dict):
                 db.execute(
-                    "UPDATE runs SET errorCode=COALESCE(errorCode, ?), notice=COALESCE(notice, ?) WHERE runId=?",
+                    "UPDATE runs SET errorStage=CASE WHEN errorCode IS NULL THEN ? ELSE errorStage END, errorCode=COALESCE(errorCode, ?), notice=COALESCE(notice, ?) WHERE runId=?",
                     (
+                        payload.get("stage"),
                         payload.get("code", "INTERNAL_ERROR"),
-                        payload.get("message", "실행 중 오류가 발생했습니다."),
+                        safe_message(str(payload.get("code", "INTERNAL_ERROR"))),
                         run_id,
                     ),
                 )
@@ -731,6 +762,9 @@ class ChatManager:
             return RunDetail.model_validate(
                 {
                     **dict(row),
+                    "notice": safe_message(row["errorCode"])
+                    if row["errorCode"]
+                    else row["notice"],
                     "config": json.loads(row["config"]),
                     "consents": consents,
                     "frontier_queries": queries,

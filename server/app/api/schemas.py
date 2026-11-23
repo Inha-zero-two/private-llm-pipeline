@@ -150,5 +150,6 @@ class RunDetail(ApiModel):
     end_reason: str | None
     notice: str | None
     error_code: str | None
+    error_stage: str | None = None
     frontier_queries: list[FrontierQueryOut]
     consents: list[ConsentOut]

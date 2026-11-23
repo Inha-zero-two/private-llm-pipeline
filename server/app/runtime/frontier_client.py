@@ -14,6 +14,13 @@ from pydantic import BaseModel
 
 from ..config import ENV_FILE, read_env_file, setting
 from ..models.enums import PromptIdx
+from ..models.errors import (
+    ErrorCode,
+    ErrorInfo,
+    ErrorStage,
+    ServiceError,
+    describe_error,
+)
 from ..models.llm_results import ContextMode, FrontierReply
 
 if TYPE_CHECKING:
@@ -46,8 +53,13 @@ FATAL_STATUS = {
 }
 
 
-class FrontierError(ConnectionError):
+class FrontierError(ServiceError):
     """프론티어 연결·전송 실패. Main은 ConnectionError로 받아 offline으로 종료."""
+
+    def __init__(
+        self, detail: str, code: ErrorCode = ErrorCode.FRONTIER_UNAVAILABLE
+    ) -> None:
+        super().__init__(detail, code, ErrorStage.FRONTIER)
 
 
 class FrontierCancelledError(RuntimeError):
@@ -120,6 +132,7 @@ class FrontierClient:
         self.frontier_sys_prom_idx = PromptIdx.FRONTIER
         # 가장 최근 질의 기록
         self.last_request: FrontierQuery | None = None
+        self.connection_failure: ErrorInfo | None = None
         self._lock = Lock()  # 실행별 상태 변경용 잠금
         # 실행 ID별 프론티어 대화 기록(user·assistant 메시지). 실행 사이 공유하지 않음
         self._contexts: dict[int, list[dict[str, str]]] = {}
@@ -140,6 +153,9 @@ class FrontierClient:
         비용이 들지 않는 GET /models로 확인. 실패는 예외 없이 False 반환.
         """
         if not self._api_key:
+            self.connection_failure = describe_error(
+                FrontierError("API key missing", ErrorCode.CONFIGURATION_ERROR)
+            )
             return False
         try:
             with httpx.Client(
@@ -148,10 +164,49 @@ class FrontierClient:
                 response = client.get(
                     f"{self._base_url}/models", headers=self._headers()
                 )
-        except (httpx.HTTPError, httpx.InvalidURL):
+        except (httpx.HTTPError, httpx.InvalidURL) as error:
             # InvalidURL은 HTTPError 하위가 아님. 주소가 잘못돼도 offline으로 처리
+            code = (
+                ErrorCode.FRONTIER_TIMEOUT
+                if isinstance(error, httpx.TimeoutException)
+                else ErrorCode.CONFIGURATION_ERROR
+                if isinstance(error, httpx.InvalidURL)
+                else ErrorCode.FRONTIER_UNAVAILABLE
+            )
+            self.connection_failure = describe_error(FrontierError(str(error), code))
             return False
+        self.connection_failure = (
+            None
+            if response.status_code == 200
+            else describe_error(
+                FrontierError(
+                    f"HTTP {response.status_code}", self._status_code(response)
+                )
+            )
+        )
         return response.status_code == 200
+
+    @staticmethod
+    def _status_code(response: httpx.Response) -> ErrorCode:
+        try:
+            body = response.json()
+            detail = body.get("error", {}) if isinstance(body, dict) else {}
+            provider_code = detail.get("code") if isinstance(detail, dict) else None
+        except ValueError:
+            provider_code = None
+        if isinstance(provider_code, str) and provider_code in {
+            "insufficient_quota",
+            "quota_exceeded",
+            "budget_exceeded",
+        }:
+            return ErrorCode.FRONTIER_QUOTA_EXCEEDED
+        if response.status_code in {401, 403}:
+            return ErrorCode.FRONTIER_AUTH_ERROR
+        if response.status_code == 429:
+            return ErrorCode.FRONTIER_RATE_LIMITED
+        if response.status_code >= 500:
+            return ErrorCode.FRONTIER_UNAVAILABLE
+        return ErrorCode.FRONTIER_REQUEST_REJECTED
 
     def decide_context(self, run_id: int, need: list[str] | None) -> ContextMode:
         """이번 요청에 이전 프론티어 대화를 이어 붙일지(keep) 새로 시작할지(reset) 판단.
@@ -185,7 +240,9 @@ class FrontierClient:
         stop(run_id) 호출 시 즉시 FrontierCancelledError.
         """
         if not self._api_key:
-            raise FrontierError("FRONTIER_API_KEY가 설정되지 않음")
+            raise FrontierError(
+                "FRONTIER_API_KEY가 설정되지 않음", ErrorCode.CONFIGURATION_ERROR
+            )
         # 중지 신호는 전송 준비보다 먼저 등록해야 그동안의 stop()도 받음
         stop_event = Event()
         with self._lock:
@@ -302,31 +359,54 @@ class FrontierClient:
             try:
                 response = self._post(run_id, messages, stop_event)
             except (httpx.TransportError, TimeoutError) as exc:
-                last_error = exc
+                code = (
+                    ErrorCode.FRONTIER_TIMEOUT
+                    if isinstance(exc, (httpx.TimeoutException, TimeoutError))
+                    else ErrorCode.FRONTIER_UNAVAILABLE
+                )
+                last_error = FrontierError(str(exc), code)
                 continue
             except httpx.InvalidURL as exc:
                 # 주소 설정 오류는 다시 시도해도 같음
-                raise FrontierError(f"잘못된 FRONTIER_BASE_URL: {exc}") from exc
+                raise FrontierError(
+                    f"잘못된 FRONTIER_BASE_URL: {exc}", ErrorCode.CONFIGURATION_ERROR
+                ) from exc
             if response.status_code == 429 or response.status_code >= 500:
-                last_error = FrontierError(f"HTTP {response.status_code}")
+                last_error = FrontierError(
+                    f"HTTP {response.status_code}", self._status_code(response)
+                )
+                if last_error.code == ErrorCode.FRONTIER_QUOTA_EXCEEDED:
+                    raise last_error
                 continue
             if response.status_code != 200:
                 reason = FATAL_STATUS.get(response.status_code, "요청 실패")
                 raise FrontierError(
-                    f"HTTP {response.status_code}: {reason} ({response.text[:200]})"
+                    f"HTTP {response.status_code}: {reason} ({response.text[:200]})",
+                    self._status_code(response),
                 )
             try:
                 data = response.json()
                 _add_usage(usage, data.get("usage"))
                 answer = data["choices"][0]["message"]["content"] or ""
+                if not isinstance(answer, str):
+                    raise TypeError("External answer must be text")
             except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
-                raise FrontierError(f"응답 형식 오류: {exc}") from exc
+                raise FrontierError(
+                    f"응답 형식 오류: {exc}", ErrorCode.FRONTIER_RESPONSE_INVALID
+                ) from exc
             if not answer.strip():
                 # 추론에 출력 토큰을 다 쓰면 빈 답변이 옴. 같은 입력으로 다시 시도
-                last_error = FrontierError("빈 답변")
+                last_error = FrontierError(
+                    "빈 답변", ErrorCode.FRONTIER_RESPONSE_INVALID
+                )
                 continue
             return answer
-        raise FrontierError(f"전송 {MAX_ATTEMPTS}회 실패: {last_error}")
+        raise FrontierError(
+            f"전송 {MAX_ATTEMPTS}회 실패: {last_error}",
+            last_error.code
+            if isinstance(last_error, FrontierError)
+            else ErrorCode.FRONTIER_UNAVAILABLE,
+        ) from last_error
 
     def _post(
         self, run_id: int, messages: list[dict[str, str]], stop_event: Event

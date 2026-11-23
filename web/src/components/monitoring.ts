@@ -6,6 +6,7 @@ export type RunMonitoring = {
   step: string | null
   endReason: string | null
   errorCode: string | null
+  errorStage: string | null
   frontierQueries: FrontierQuery[]
   consents: ConsentRecord[]
 }
@@ -36,7 +37,7 @@ export function monitorTurn(turn: Turn, pending = false, demo = false): RunMonit
   if (turn.running) {
     status = pending ? '동의 대기' : '실행 중'
     endReason = null
-  } else if (turn.notice?.kind === 'error') {
+  } else if (turn.errorCode || turn.notice?.kind === 'error') {
     status = '오류'
     endReason = '오류 종료'
   } else if (reason) {
@@ -56,8 +57,8 @@ export function monitorTurn(turn: Turn, pending = false, demo = false): RunMonit
     status,
     step: turn.step,
     endReason,
-    // 데모에는 오류 코드가 없다. 안내 문구를 API 코드로 추정하지 않는다.
-    errorCode: null,
+    errorCode: turn.running ? null : (turn.errorCode ?? null),
+    errorStage: turn.running ? null : (turn.errorStage ?? null),
     frontierQueries: turn.frontier,
     consents: turn.consents,
   }

@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from app.models.enums import PromptIdx
+from app.models.errors import ErrorCode, ErrorStage, PipelineError, model_failure
 from app.models.schemas import PDId as PDId
 from app.models.schemas import PDItem as PDItem
 from app.models.schemas import PDTable as PDTable
@@ -48,24 +49,34 @@ class PDDetector:
             raise ValueError("질문이 비어 있습니다")
 
         deny_rules = [r for r in setting.rules if r.action == "deny"] if setting else []
+        if found_items is None and ok and self._runner is None:
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.DETECT)
         # 2. 직접 전달한 결과가 없으면 공유 실행기로 개인정보 검출 요청
         if found_items is None and ok and self._runner is not None:
             options: dict[str, str] = {}
             if deny_rules and setting is not None:
                 prompts = self._runner.prompt_manager
                 if prompts is None:
-                    raise RuntimeError(
-                        "추가 보호 규칙에 적용할 기본 프롬프트가 없습니다"
+                    raise PipelineError(
+                        ErrorCode.CONFIGURATION_ERROR,
+                        ErrorStage.DETECT,
+                        "추가 보호 규칙에 적용할 기본 프롬프트가 없습니다",
                     )
                 options["system_prompt"] = self._build_detect_prompt(
                     prompts.get_prompt(PromptIdx.DETECT), deny_rules, setting.text
                 )
                 options["prompt_version"] = prompts.get_version()
-            found_items, ok, *_ = self._runner.request(
+            found_items, ok, *_, reason = self._runner.request(
                 run_id, question, PromptIdx.DETECT, chat_id, **options
             )
+            if not ok:
+                raise model_failure(reason, ErrorStage.DETECT)
         if not ok or not isinstance(found_items, list):
-            raise RuntimeError("개인정보 검출에 실패했습니다")
+            raise PipelineError(
+                ErrorCode.MODEL_RESPONSE_INVALID,
+                ErrorStage.DETECT,
+                "개인정보 검출에 실패했습니다",
+            )
 
         # 3. 찾은 항목을 기본 금지 상태(allowed=False)로 묶어 반환
         items: list[PDItem] = []
@@ -85,7 +96,11 @@ class PDDetector:
                 or category not in CATEGORY_LABEL
                 or (category == 3 and (not deny_rules or text not in question))
             ):
-                raise RuntimeError("개인정보 검출 결과 형식이 맞지 않습니다")
+                raise PipelineError(
+                    ErrorCode.MODEL_RESPONSE_INVALID,
+                    ErrorStage.DETECT,
+                    "개인정보 검출 결과 형식이 맞지 않습니다",
+                )
 
             items.append(PDItem(text=text, category=category))
 
