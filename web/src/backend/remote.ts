@@ -11,7 +11,7 @@ import type {
   Rule,
   Turn,
 } from '@/types'
-import { ApiError, type Backend, type RunHandle, type RunHandlers } from './types'
+import { ApiError, type Backend, type RunHandle, type RunHandlers } from './types.ts'
 
 // 서버 응답 형식 (명세서 그대로)
 
@@ -105,11 +105,11 @@ function follow(runId: number, h: RunHandlers): RunHandle {
   let lastId = 0
   let finished = false
 
-  const finish = (notice: Notice | null) => {
+  const finish = (notice: Notice | null, endReason: string | null = null) => {
     if (finished) return
     finished = true
     source.close()
-    h.update((t) => ({ ...t, running: false, step: null, notice }))
+    h.update((t) => ({ ...t, running: false, step: null, notice, endReason }))
     h.onConsent(null)
     h.onFinish()
   }
@@ -174,7 +174,7 @@ function follow(runId: number, h: RunHandlers): RunHandle {
   )
   on('token', (d: { text: string }) => h.update((t) => ({ ...t, answer: t.answer + d.text })))
   on('done', (d: { endReason: string; limited: string | null }) =>
-    finish(noticeOf(d.endReason, null, d.limited)),
+    finish(noticeOf(d.endReason, null, d.limited), d.endReason),
   )
   source.addEventListener('error', (e) => {
     // 서버가 보낸 error 이벤트(data 있음)와 연결 오류(data 없음)를 구분한다
@@ -191,6 +191,7 @@ function follow(runId: number, h: RunHandlers): RunHandle {
             run.status === 'finished'
               ? noticeOf(run.endReason, run.errorCode, run.notice)
               : { kind: 'error', text: '진행 상황 연결이 끊겼습니다. 채팅을 다시 열어 주세요.' },
+            run.status === 'finished' && !run.errorCode ? run.endReason : null,
           ),
         )
         .catch((err: ApiError) => finish({ kind: 'error', text: err.message }))
@@ -270,6 +271,7 @@ async function loadTurns(chatId: string): Promise<Turn[]> {
           }),
       answer: '',
       notice: run && !running ? noticeOf(run.endReason, run.errorCode, run.notice) : null,
+      endReason: run && !running && !run.errorCode ? run.endReason : null,
     })
   }
   return turns

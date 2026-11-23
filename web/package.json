@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "dev": "vite",
     "dev:demo": "vite --mode demo",
     "build": "tsc -b && vite build",
