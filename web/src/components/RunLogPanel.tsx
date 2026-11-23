@@ -27,12 +27,17 @@ export function ConsentHistory({ records }: { records: ConsentRecord[] }) {
   )
 }
 
-export function RunLogPanel({ turns, consent }: { turns: Turn[]; consent: ConsentRequest | null }) {
+type Props = {
+  turns: Turn[]
+  consent: ConsentRequest | null
+  /** 브라우저 안 데모로 실행 중이면 제목 옆에 '데모'를 표시한다 */
+  demo: boolean
+}
+
+export function RunLogPanel({ turns, consent, demo }: Props) {
   return (
     <section className={styles.panel} aria-label="실행 로그">
-      <h2 className={styles.heading}>
-        실행 로그 <span>데모</span>
-      </h2>
+      <h2 className={styles.heading}>실행 로그 {demo && <span>데모</span>}</h2>
       <div className={styles.scroll} tabIndex={0}>
         {turns.length === 0 && <p className={styles.muted}>선택한 채팅의 실행 기록이 없습니다.</p>}
         {[...turns].reverse().map((turn, index) => {
