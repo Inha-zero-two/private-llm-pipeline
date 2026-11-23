@@ -417,19 +417,37 @@ def test_consent_partial_allow_masks_denied_item(make_client: Any) -> None:
     assert len(detail["consents"]) == 1
 
 
-def test_quick_deny_all_ends_with_consent_denied(make_client: Any) -> None:
-    client, model, gateway = make_client({**CONSENT_RUN, "JUDGE": [JUDGE_ASK_BOTH]})
+def test_quick_deny_all_sends_only_generalized_request(make_client: Any) -> None:
+    safe_request = "직장인의 일반적인 이직 준비 방법을 알려 주세요."
+    client, model, gateway = make_client(
+        {
+            **CONSENT_RUN,
+            # 재판단에서 모델이 같은 항목을 요구해도 동의는 한 번만 묻는다.
+            "JUDGE": [JUDGE_ASK_BOTH, JUDGE_ASK_BOTH, JUDGE_ENOUGH],
+            "WRITE": ["삼전 직원의 이직 준비 방법을 알려 주세요."],
+            "GUARD": ['{"hits": [1]}', GUARD_PASS],
+            "REWRITE": [safe_request],
+        }
+    )
     _, run_id = start(client)
     consent = pending_consent(client, run_id)
 
     reply = answer(client, run_id, consent["consentId"], "모두 공개하지 마")
-    assert reply.json()["ok"] is True
+    assert reply.json()["decisions"] == [
+        {"pdId": 1, "allow": False},
+        {"pdId": 2, "allow": False},
+    ]
     assert "INTERPRET_CONSENT" not in model.calls  # 빠른 응답은 모델 없이
 
-    done = events_of(client, run_id)[-1]["data"]
-    assert done["endReason"] == "consent_denied"
-    assert done["limited"] == LIMITED_MESSAGES[EndReason.CONSENT_DENIED]
-    assert gateway.requests == []  # 외부 모델에 묻지 않았다
+    wait_finished(client, run_id)
+    events = events_of(client, run_id)
+    assert [e["event"] for e in events].count("consent_request") == 1
+    assert model.calls.count("REWRITE") == 1
+    assert gateway.requests == [safe_request]
+    assert [e["data"] for e in events if e["event"] == "frontier"] == [
+        {"request": safe_request, "answer": FRONTIER_ANSWER}
+    ]
+    assert events[-1]["data"]["endReason"] == "info_enough"
 
 
 def test_unclear_consent_answer_keeps_waiting(make_client: Any) -> None:

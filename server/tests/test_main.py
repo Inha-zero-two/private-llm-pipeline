@@ -616,18 +616,24 @@ def test_guard_format_failure_does_not_rewrite() -> None:
     assert finished_with(log) == EndReason.REGEN_LIMIT
 
 
-def test_consent_denied() -> None:
+def test_deny_all_can_finish_when_replan_has_enough_information() -> None:
     log: list[tuple[Any, ...]] = []
-    planner = FakePlanner(log, enough_after=99)
-    planner.need_consent = True
+    planner = Mock(wraps=FakePlanner(log))
+    planner.judge.side_effect = [
+        SimpleNamespace(
+            enough=False, need=["경력"], need_consent=True, consent_items=[1]
+        ),
+        SimpleNamespace(enough=True),
+    ]
     main = make_main(
         log, planner=planner, consent_manager=FakeConsentManager(log, allow=False)
     )
     asyncio.run(main.run_pipeline(1, "질문"))
 
-    assert "consent_apply" not in names(log)
+    assert names(log).count("consent_apply") == 1
+    assert planner.judge.call_count == 2
     assert "send" not in names(log)
-    assert finished_with(log) == EndReason.CONSENT_DENIED
+    assert finished_with(log) == EndReason.INFO_ENOUGH
 
 
 def test_send_failure_ends_offline() -> None:
