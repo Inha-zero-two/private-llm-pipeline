@@ -729,7 +729,8 @@ def test_followup_model_inputs_use_prior_question_and_delivered_answer(
         inputs = [text for stage, text in model.inputs if stage == task]
         assert inputs, task
         for text in inputs:
-            assert question in text or "AI glasses" in text
+            expected_history = "AI glasses" if restore == "compacted" else question
+            assert expected_history in text
             previous, current = text.split("[현재 입력]\n", 1)
             assert followup not in previous
             assert followup in current

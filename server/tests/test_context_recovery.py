@@ -324,3 +324,35 @@ def test_warm_cache_reads_only_new_records(
     next_boundary = store.context_boundary(chat, next_turn.user_message_id)
     manager.prepare_input("next", "sys", next_boundary, next_turn.run_id)
     assert read.call_args.args == (chat, "conversation", boundary, next_boundary)
+
+
+def test_record_below_chunk_threshold_recovers_when_prefix_summary_is_too_long(
+    store: ChatManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat = store.create_chat()
+    store.save_message(chat, "user", "previous " * 5)
+    original = "new content " * 8
+    store.save_message(chat, "assistant", original)
+    turn = store.start_turn(chat, "follow up", None, CONFIG)
+    runner = SummaryRunner(store)
+    runner.summary = "short"
+    request = runner.manual_request
+
+    def oversized_first_summary(*args: object, **kwargs: object) -> tuple:
+        result = request(*args, **kwargs)
+        return ("x" * 50, *result[1:]) if len(runner.inputs) == 1 else result
+
+    monkeypatch.setattr(runner, "manual_request", oversized_first_summary)
+    manager = ContextManager(runner, chat, compaction_limit=150, compaction_target=10)
+    result = manager.prepare_input("current", "sys", 2, turn.run_id)
+    assert len(runner.inputs) > 2
+    assert "short" in result.text
+    snapshot = store.load_context(chat, 2)
+    assert snapshot.compaction.covered_through_seq == 2
+    assert snapshot.records == []
+    assert store.get_chat(chat).messages[1].content == original
+    assert len(store.get_events(turn.run_id)) == 1
+    assert (
+        ContextManager(runner, chat).prepare_input("current", "sys", 2, turn.run_id)
+        == result
+    )

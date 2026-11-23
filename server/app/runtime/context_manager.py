@@ -260,14 +260,8 @@ class ContextManager:
                 addition_tokens
                 >= self._limit - len(self._runner.tokenize(self._summary_text(""))) - 1
             ):
-                summary = self._summarize_large_record(history.text, addition, run_id)
-                # 조각 요약은 저장하지 않는다. 원본 메시지 전체를 포함한 결과만 확정.
-                covered = _History(
-                    history.text, record.context_seq, history.compaction_id
-                )
-                compaction_id = self._commit(covered, summary, run_id)
-                history = _History(
-                    self._summary_text(summary), record.context_seq, compaction_id
+                history = self._compact_record(
+                    history, addition, record.context_seq, run_id
                 )
                 self._history = history
                 continue
@@ -282,9 +276,12 @@ class ContextManager:
                     )
                 candidate = self._summary_text(summary) + addition
                 if len(self._runner.tokenize(candidate)) >= self._limit:
-                    raise PipelineError(
-                        ErrorCode.COMPACTION_FAILED, ErrorStage.COMPACTION
+                    # 기록 자체는 한도 이내여도 요약을 붙일 여유가 없으면 분할한다.
+                    history = self._compact_record(
+                        history, addition, record.context_seq, run_id
                     )
+                    self._history = history
+                    continue
                 compaction_id = self._commit(history, summary, run_id)
             history = _History(candidate, record.context_seq, compaction_id)
             self._history = history
@@ -349,6 +346,15 @@ class ContextManager:
                     history_tokens=len(self._runner.tokenize(history.text)),
                 ),
             )
+
+    def _compact_record(
+        self, history: _History, addition: str, through_seq: int, run_id: int
+    ) -> _History:
+        """기존 이력과 원본 메시지 전체를 처리한 요약만 원자적으로 확정한다."""
+        summary = self._summarize_large_record(history.text, addition, run_id)
+        covered = _History(history.text, through_seq, history.compaction_id)
+        compaction_id = self._commit(covered, summary, run_id)
+        return _History(self._summary_text(summary), through_seq, compaction_id)
 
     def _summarize_large_record(self, previous: str, addition: str, run_id: int) -> str:
         """긴 원본을 모델 입력 한도 내 조각으로 처리하고 전체를 포함한 요약 반환."""
