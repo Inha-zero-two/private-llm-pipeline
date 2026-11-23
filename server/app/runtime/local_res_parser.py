@@ -92,6 +92,10 @@ def parser(raw_output: str, prompt_idx: PromptIdx | str) -> ParsedResult:
         result = adapter.validate_python(data, strict=True)
     except ValidationError as exc:
         raise OutputFormatError(str(exc)) from exc
+    if prompt_idx == PromptIdx.PARSE_RULES and any(
+        not rule.detect_en or not rule.detect_en.strip() for rule in result
+    ):
+        raise OutputFormatError("규칙의 영문 검출 대상(detect_en)이 필요합니다")
     # 기본값과 별개로 모델 응답에는 판단 필드 네 개가 모두 필요
     if isinstance(result, JudgeResult) and result.model_fields_set != set(
         JudgeResult.model_fields

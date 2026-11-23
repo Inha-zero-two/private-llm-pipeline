@@ -1,6 +1,5 @@
 -- ChatManager가 빈 DB를 만들 때 실행하는 SQLite 스키마.
--- 스키마 버전은 관리하지 않는다. 이 파일을 바꾸면 기존 DB 파일
--- (chat.sqlite3와 -wal·-shm 보조 파일)을 지우고 다시 실행한다.
+-- 기존 DB의 분류 범위는 ChatManager 초기화 시 마이그레이션한다.
 -- 컬럼 설명은 docs/db-schema.md에 있으며, 둘이 다르면 이 파일이 기준이다.
 
 CREATE TABLE chats (
@@ -20,7 +19,7 @@ CREATE TABLE pd_items (
     pdId INTEGER PRIMARY KEY AUTOINCREMENT,
     chatId INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
     messageId INTEGER NOT NULL REFERENCES messages ON DELETE CASCADE,
-    text TEXT NOT NULL, category INTEGER NOT NULL CHECK(category BETWEEN 0 AND 2),
+    text TEXT NOT NULL, category INTEGER NOT NULL CHECK(category BETWEEN 0 AND 3),
     allowed INTEGER NOT NULL DEFAULT 0 CHECK(allowed IN (0, 1)),
     allowedBy TEXT NOT NULL DEFAULT 'none', createdAt TEXT NOT NULL,
     UNIQUE(chatId, text, category)
@@ -74,3 +73,4 @@ CREATE INDEX runs_chat ON runs(chatId, runId);
 CREATE INDEX events_run ON run_events(runId, eventId);
 CREATE INDEX consents_run ON consent_requests(runId, consentId);
 CREATE INDEX queries_run ON frontier_queries(runId, round);
+PRAGMA user_version = 1;

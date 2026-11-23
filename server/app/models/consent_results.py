@@ -20,7 +20,7 @@ class ConsentTarget(ConsentModel):
     pd_id: int
     label: str
     text: str
-    category: Literal[0, 1, 2]
+    category: Literal[0, 1, 2, 3]
 
 
 class ConsentDecision(ConsentModel):

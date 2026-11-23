@@ -13,7 +13,7 @@ import pytest
 from app.data.memo_manager import MemoManager
 from app.main import STOPPED_MARK, Main
 from app.models.enums import EndReason
-from app.models.schemas import RunConfig, RunEvent, StartedRun
+from app.models.schemas import PrivacySetting, RunConfig, RunEvent, StartedRun
 
 
 class Recorder:
@@ -38,6 +38,9 @@ class FakeChatManager(Recorder):
 
     def recover_interrupted_runs(self) -> int:
         return 0
+
+    def load_run_setting(self, run_id: int) -> PrivacySetting:
+        return PrivacySetting()
 
     def log_event(self, *args: Any) -> int:
         self.event_id += 1
@@ -305,11 +308,18 @@ class FakeSimple(Recorder):
     setting_id = 1
 
     def detect(
-        self, run_id: int, chat_id: int, message_id: int, question: str
+        self,
+        run_id: int,
+        chat_id: int,
+        message_id: int,
+        question: str,
+        setting: PrivacySetting,
     ) -> list[Any]:
         return []
 
-    def apply_to_table(self, run_id: int, pd_table: list[Any]) -> None:
+    def apply_to_table(
+        self, run_id: int, pd_table: list[Any], setting: PrivacySetting
+    ) -> None:
         pass
 
     def load_rules(self) -> None:
@@ -616,18 +626,24 @@ def test_guard_format_failure_does_not_rewrite() -> None:
     assert finished_with(log) == EndReason.REGEN_LIMIT
 
 
-def test_consent_denied() -> None:
+def test_deny_all_can_finish_when_replan_has_enough_information() -> None:
     log: list[tuple[Any, ...]] = []
-    planner = FakePlanner(log, enough_after=99)
-    planner.need_consent = True
+    planner = Mock(wraps=FakePlanner(log))
+    planner.judge.side_effect = [
+        SimpleNamespace(
+            enough=False, need=["경력"], need_consent=True, consent_items=[1]
+        ),
+        SimpleNamespace(enough=True),
+    ]
     main = make_main(
         log, planner=planner, consent_manager=FakeConsentManager(log, allow=False)
     )
     asyncio.run(main.run_pipeline(1, "질문"))
 
-    assert "consent_apply" not in names(log)
+    assert names(log).count("consent_apply") == 1
+    assert planner.judge.call_count == 2
     assert "send" not in names(log)
-    assert finished_with(log) == EndReason.CONSENT_DENIED
+    assert finished_with(log) == EndReason.INFO_ENOUGH
 
 
 def test_send_failure_ends_offline() -> None:

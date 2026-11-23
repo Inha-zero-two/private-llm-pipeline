@@ -12,8 +12,8 @@ import pytest
 from app.data.prompt_manager import PromptManager
 from app.main import Main
 from app.models.enums import EndReason, PromptIdx
-from app.models.llm_results import JudgeResult
-from app.models.schemas import StartedRun
+from app.models.llm_results import JudgeResult, Rule
+from app.models.schemas import PrivacySetting, StartedRun
 from app.pipeline.planner import Plan, Planner
 from app.privacy.pd_detector import PDDetector, PDItem
 from app.runtime.local_llm_runner import LocalLLMRunner
@@ -100,6 +100,31 @@ def test_detector_and_planner_use_prompts_and_parser(
     assert [entry.kwargs["prompt_version"] for entry in log_call.call_args_list] == [
         prompts.get_version()
     ] * 3
+
+
+def test_legacy_rule_uses_original_preference_and_keeps_standard_category(
+    connected: tuple[LocalLLMRunner, ScriptedLlama],
+) -> None:
+    runner, model = connected
+    setting = PrivacySetting(
+        text="삼성 공정 정보를 보호해 줘",
+        rules=[Rule(target="회사", action="deny", scope="item")],
+    )
+    question = "삼성전자 공정 전압은 0.62V야"
+    model.outputs.append(
+        '{"items":[{"text":"삼성전자","category":3},'
+        '{"text":"삼성전자","category":2},{"text":"0.62V","category":3}]}'
+    )
+    found = PDDetector(runner).detect(1, 1, 1, question, setting)
+    assert [(item.text, item.category) for item in found] == [
+        ("삼성전자", 2),
+        ("0.62V", 3),
+    ]
+    assert setting.text in model.messages[-1][0]["content"]
+    assert model.messages[-1][1]["content"] == question
+    model.outputs.append('{"items":[{"text":"설정에만 있는 원문","category":3}]}')
+    with pytest.raises(RuntimeError):
+        PDDetector(runner).detect(2, 1, 2, question, setting)
 
 
 def test_parser_uses_judge_result_and_requires_all_model_output_fields() -> None:
@@ -209,6 +234,7 @@ def test_main_calls_connected_modules(
     chat.save_message.return_value = 2
     chat.start_turn.return_value = StartedRun(user_message_id=1, run_id=1)
     chat.get_pd_table.return_value = []
+    chat.load_run_setting.return_value = PrivacySetting()
     memo, frontier, answer = Mock(), Mock(), Mock()
     memo.read_all.return_value = "Answers: 설명"
     frontier.check_connection.return_value = True

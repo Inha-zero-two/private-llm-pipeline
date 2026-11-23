@@ -79,17 +79,55 @@ class ChatManager:
         try:
             self._db.execute("PRAGMA foreign_keys = ON")
             self._db.execute("PRAGMA journal_mode = WAL")
-            # 스키마 버전은 관리하지 않는다. 빈 DB에만 schema.sql로 스키마를 만들고,
-            # 스키마가 바뀌면 기존 DB 파일을 수동으로 지우고 다시 만든다.
             tables = self._db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
             if not tables:
                 schema = SCHEMA_PATH.read_text(encoding="utf-8")
                 self._db.executescript("BEGIN IMMEDIATE;\n" + schema + "\nCOMMIT;")
+            elif self._db.execute("PRAGMA user_version").fetchone()[0] == 0:
+                self._migrate_pd_categories()
         except BaseException:
             self._db.close()
             raise
+
+    def _migrate_pd_categories(self) -> None:
+        """기존 pdId, 전송 기록 및 AUTOINCREMENT 순번을 보존하며 '기타'를 허용한다."""
+        # SQLite에서 CHECK 변경에는 테이블 재생성이 필요하다. DROP이 query_items로
+        # 연쇄 삭제되지 않게 트랜잭션 밖에서 FK 집행을 끄고, 커밋 직전에 참조를 확인한다.
+        self._db.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with self._transaction() as db:
+                if db.execute("PRAGMA user_version").fetchone()[0] != 0:
+                    return
+                db.execute("""
+                    CREATE TABLE pd_items_new (
+                        pdId INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chatId INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
+                        messageId INTEGER NOT NULL REFERENCES messages ON DELETE CASCADE,
+                        text TEXT NOT NULL, category INTEGER NOT NULL CHECK(category BETWEEN 0 AND 3),
+                        allowed INTEGER NOT NULL DEFAULT 0 CHECK(allowed IN (0, 1)),
+                        allowedBy TEXT NOT NULL DEFAULT 'none', createdAt TEXT NOT NULL,
+                        UNIQUE(chatId, text, category)
+                    )
+                """)
+                db.execute("""
+                    INSERT INTO pd_items_new
+                    SELECT pdId, chatId, messageId, text, category, allowed, allowedBy, createdAt
+                    FROM pd_items
+                """)
+                db.execute("""
+                    UPDATE sqlite_sequence SET seq = MAX(seq, COALESCE(
+                        (SELECT seq FROM sqlite_sequence WHERE name='pd_items'), 0))
+                    WHERE name='pd_items_new'
+                """)
+                db.execute("DROP TABLE pd_items")
+                db.execute("ALTER TABLE pd_items_new RENAME TO pd_items")
+                if db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("분류 마이그레이션 중 외래키 오류")
+                db.execute("PRAGMA user_version = 1")
+        finally:
+            self._db.execute("PRAGMA foreign_keys = ON")
 
     def __enter__(self) -> Self:
         return self

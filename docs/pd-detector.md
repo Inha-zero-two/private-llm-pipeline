@@ -4,8 +4,8 @@
 
 ## 구현 내역
 
-- **`CATEGORY_LABEL` 상수 및 `PDItem` 모델 정의:** 개인정보 분류(`0: 식별정보`, `1: 민감정보`, `2: 속성정보`) 상수와 검출 항목 모델(`pd_id`, `text`, `category`, `allowed`, `allowed_by`) 구현
-- **`detect(run_id, chat_id, message_id, question, *, found_items=None, ok=True) -> list[PDItem]` 구현:** 질문에서 검출한 개인정보 항목을 검증하고 기본 금지 상태(`allowed=False`, `allowed_by="none"`)로 묶어 반환 (`found_items`, `ok`로 검출 결과를 직접 전달할 수도 있음)
+- **분류:** 0 식별정보, 1 민감정보, 2 속성정보, 3 기타. 기타는 실행의 추가 보호 규칙으로 검출한 질문 속 원문이다. 같은 원문이 기존 분류와 겹치면 기존 분류를 우선한다.
+- **`detect(run_id, chat_id, message_id, question, setting=None, *, found_items=None, ok=True) -> list[PDItem]`:** `Main`이 실행 시작 시 고정한 설정을 전달한다. 금지 규칙이 있으면 검출 대상의 영문 설명을 DETECT 프롬프트에 붙이고, 이전 형식의 규칙에는 저장된 원문 설정을 함께 쓴다. 검출 결과는 기본 금지 상태로 반환한다.
 
 ## 함수별 처리 흐름
 
@@ -13,9 +13,9 @@
 | --- | :---: | --- | --- |
 | `detect()` | 1 | 입력 `question`이 비어 있는지 확인 | 비어 있거나 문자열이 아니면 `ValueError` |
 | | 2 | 로컬 모델(`DETECT`) 호출 및 성공 여부(`ok`) 확인 | `ok=False`이거나 결과가 리스트가 아니면 `RuntimeError` |
-| | 3 | 각 항목의 `text`, `category`(`0`~`2`)를 확인하고 `allowed=False`, `allowed_by="none"`을 붙여 `list[PDItem]` 반환 (빈 목록 `[]`은 정상 통과) | 항목 필드가 비어 있거나 분류 번호가 `0`~`2` 밖이면 `RuntimeError` |
+| | 3 | 각 항목의 원문과 분류를 확인하고 기본 금지 상태로 반환 (빈 목록도 허용) | 유효하지 않은 항목, 금지 규칙이 없거나 질문에 없는 분류 3 값은 `RuntimeError` |
 
 ## 설계서 대비 변경 사항
 
-- **모듈 호출:** `LocalLLMRunner.request()` 호출을 연결했습니다. 검출 결과를 직접 전달하지 않으면 모델에 개인정보 검출을 요청합니다. `ChatManager`의 `set_pd_items()`와 `log_event()` 호출은 주석 상태입니다.
+- **모듈 호출:** 검출 결과를 직접 전달하지 않으면 `LocalLLMRunner.request()`로 검출한다. `Main`이 반환된 항목을 `ChatManager.set_pd_items()`로 저장한다.
 - **반환값 수용 방식:** 파서가 반환하는 `DetectedItem` 객체와 `dict` 형식을 모두 `PDItem`으로 변환하도록 처리
