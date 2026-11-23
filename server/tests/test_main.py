@@ -13,7 +13,7 @@ import pytest
 from app.data.memo_manager import MemoManager
 from app.main import STOPPED_MARK, Main
 from app.models.enums import EndReason
-from app.models.schemas import RunConfig, RunEvent, StartedRun
+from app.models.schemas import PrivacySetting, RunConfig, RunEvent, StartedRun
 
 
 class Recorder:
@@ -38,6 +38,9 @@ class FakeChatManager(Recorder):
 
     def recover_interrupted_runs(self) -> int:
         return 0
+
+    def load_run_setting(self, run_id: int) -> PrivacySetting:
+        return PrivacySetting()
 
     def log_event(self, *args: Any) -> int:
         self.event_id += 1
@@ -305,11 +308,18 @@ class FakeSimple(Recorder):
     setting_id = 1
 
     def detect(
-        self, run_id: int, chat_id: int, message_id: int, question: str
+        self,
+        run_id: int,
+        chat_id: int,
+        message_id: int,
+        question: str,
+        setting: PrivacySetting,
     ) -> list[Any]:
         return []
 
-    def apply_to_table(self, run_id: int, pd_table: list[Any]) -> None:
+    def apply_to_table(
+        self, run_id: int, pd_table: list[Any], setting: PrivacySetting
+    ) -> None:
         pass
 
     def load_rules(self) -> None:

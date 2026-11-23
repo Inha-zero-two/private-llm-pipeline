@@ -20,7 +20,7 @@ class Schema(BaseModel):
 class PDItem(Schema):
     pd_id: PDId | None = None
     text: str
-    category: Literal[0, 1, 2]
+    category: Literal[0, 1, 2, 3]
     allowed: bool = False
     allowed_by: str = "none"
 
@@ -74,7 +74,7 @@ class ConsentItem(Schema):
     pd_id: int
     label: str
     text: str
-    category: Literal[0, 1, 2]
+    category: Literal[0, 1, 2, 3]
 
 
 class ConsentDecision(Schema):

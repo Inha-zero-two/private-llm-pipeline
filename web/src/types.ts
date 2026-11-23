@@ -1,12 +1,13 @@
 // 화면에서 쓰는 자료형
 
-/** 0: 식별정보, 1: 민감정보, 2: 속성정보 */
-export type PDCategory = 0 | 1 | 2
+/** 0: 식별정보, 1: 민감정보, 2: 속성정보, 3: 기타 (추가 보호 규칙) */
+export type PDCategory = 0 | 1 | 2 | 3
 
 export const CATEGORY_LABEL: Record<PDCategory, string> = {
   0: '식별정보',
   1: '민감정보',
   2: '속성정보',
+  3: '기타',
 }
 
 export type ConsentItem = {

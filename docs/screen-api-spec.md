@@ -210,7 +210,7 @@
 | --- | --- | --- |
 | `step` | `label: string` | 현재 동작 교체 |
 | `frontier` | `request: string`, `answer: string` | 실제 전송한 요청문과 답변 추가 |
-| `consent_request` | `consentId: integer`, `items: object[]`, `purpose: string`, `benefit: string`, `risk: string` | 자연어 동의 입력 표시. items의 항목은 `{ pdId: integer, label: string, text: string, category: 0 또는 1 또는 2 }` |
+| `consent_request` | `consentId: integer`, `items: object[]`, `purpose: string`, `benefit: string`, `risk: string` | 자연어 동의 입력 표시. items의 항목은 `{ pdId: integer, label: string, text: string, category: 0 또는 1 또는 2 또는 3 }` |
 | `consent_result` | `consentId: integer`, `result: 'answered' 또는 'cancelled'`. answered이면 `text: string`, `decisions: { pdId: integer, allow: boolean }[]` 추가 | 해당 요청 입력 닫기, 항목별 결과 표시. cancelled에는 text·decisions 없음 |
 | `token` | `text: string` | 답변에 순서대로 누적 |
 | `done` | `endReason: string`, `limited: string 또는 null`, `answerMessageId: integer 또는 null` | 실행 완료, 안내 표시, 전송 버튼 복귀 |
@@ -494,7 +494,7 @@ data: {"code":"LOCAL_LLM_ERROR","message":"로컬 모델 응답을 처리하지 
 | `frontierQueries[].status` | string | `ok`, `failed`, `uncertain` |
 | `consents` | object[] | 요청 시각 오름차순 동의 기록 |
 | `consents[].consentId` | integer | 동의 요청 ID |
-| `consents[].items` | object[] | 요청 항목. 각 항목은 `{ pdId: integer, label: string, text: string, category: integer }`. category는 0 식별·1 민감·2 속성 |
+| `consents[].items` | object[] | 요청 항목. 각 항목은 `{ pdId: integer, label: string, text: string, category: integer }`. category는 0 식별·1 민감·2 속성·3 기타 |
 | `consents[].purpose` | string | 공개 목적 |
 | `consents[].benefit` | string | 예상 이점 |
 | `consents[].risk` | string | 예상 불이익 |
