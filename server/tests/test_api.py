@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 from unittest.mock import Mock
@@ -21,6 +21,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.app import create_app
+from app.data.chat_manager import ChatManager
+from app.data.dynamic_prompt_chooser import DynamicPromptChooser
 from app.data.prompt_manager import PromptManager
 from app.models.enums import EndReason, PromptIdx
 from app.pipeline.answer_generator import LIMITED_MESSAGES
@@ -65,6 +67,7 @@ class RoutedLlama:
         self.outputs = {name: deque(values) for name, values in outputs.items()}
         self.outputs.setdefault("CHECK", deque(["OK"]))
         self.calls: list[str] = []
+        self.system_prompts: list[tuple[str, str]] = []
 
     def tokenize(self, text: bytes, **kwargs: Any) -> list[int]:
         return list(range(len(text.decode("utf-8"))))
@@ -74,8 +77,14 @@ class RoutedLlama:
     ) -> Iterator[dict[str, Any]]:
         system = next(m["content"] for m in messages if m["role"] == "system")
         task = self._task_of.get(system)
+        if task is None:
+            for base, name in self._task_of.items():
+                if system.startswith(f"{base}\n\n"):
+                    task = name
+                    break
         assert task is not None, f"알 수 없는 시스템 프롬프트: {system[:40]}"
         self.calls.append(task)
+        self.system_prompts.append((task, system))
         queue = self.outputs.get(task)
         assert queue, f"{task} 작업의 출력을 정해 두지 않았습니다"
         output = queue.popleft() if len(queue) > 1 else queue[0]
@@ -116,6 +125,26 @@ def no_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fc, "RETRY_DELAYS", (0.0, 0.0))
 
 
+_EMBED_TOPICS = (
+    ("취업", "이직", "career", "job", "resume", "interview", "transition"),
+    ("건강", "당뇨", "식단", "health", "diet", "medication", "symptom"),
+    ("공부", "시험", "자격증", "study", "exam", "certification", "learning"),
+    ("개발", "파이썬", "서버", "python", "fastapi", "backend", "database"),
+    ("여행", "일정", "숙소", "travel", "itinerary", "hotel", "flight"),
+)
+
+
+def _keyword_embedder(texts: Sequence[str]) -> list[list[float]]:
+    """테스트용 결정적 키워드 기반 임베더 (모델 다운로드 없이 동작)."""
+    vectors: list[list[float]] = []
+    for text in texts:
+        lower = text.lower()
+        vec = [float(sum(1 for kw in group if kw in lower)) for group in _EMBED_TOPICS]
+        vec.append(0.1)  # 모든 벡터가 영벡터가 되지 않도록 최소 기준 축 추가
+        vectors.append(vec)
+    return vectors
+
+
 @pytest.fixture
 def make_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -141,8 +170,22 @@ def make_client(
                 transport=httpx.MockTransport(gateway),
             )
 
+        def prompt_chooser(
+            prompts: PromptManager, chat_manager: ChatManager
+        ) -> DynamicPromptChooser:
+            return DynamicPromptChooser(
+                prompts,
+                chat_manager=chat_manager,
+                embedder=_keyword_embedder,
+                preload=True,
+            )
+
         client = TestClient(
-            create_app(db_path=tmp_path / "chat.sqlite3", frontier_factory=frontier)
+            create_app(
+                db_path=tmp_path / "chat.sqlite3",
+                frontier_factory=frontier,
+                prompt_chooser_factory=prompt_chooser,
+            )
         )
         client.__enter__()
         clients.append(client)
@@ -325,6 +368,20 @@ def test_run_streams_steps_frontier_tokens_and_done(make_client: Any) -> None:
     assert chat["runs"][0]["status"] == "finished"
     # 모든 단계가 실제 모듈을 거쳐 로컬 모델에 요청했다
     assert {"DETECT", "NEEDS", "JUDGE", "WRITE", "ANSWER"} <= set(model.calls)
+    needs_prompt = next(
+        prompt for task, prompt in model.system_prompts if task == "NEEDS"
+    )
+    assert "Example:" in needs_prompt
+    assert any(
+        kw in needs_prompt.lower() for kw in ("career", "job", "resume", "interview")
+    )
+    stored_events = client.app.state.pipeline.services.chat_manager.get_events(run_id)
+    dyn_events = [e for e in stored_events if e.type == "dynamic_prompt"]
+    assert len(dyn_events) == 1
+    assert dyn_events[0].payload["prompt_idx"] == "NEEDS"
+    assert dyn_events[0].payload["top_n"] == 3
+    assert len(dyn_events[0].payload["selected_indices"]) == 3
+    assert dyn_events[0].payload["fallback"] is False
 
 
 def test_reconnect_resends_only_after_last_event_id(make_client: Any) -> None:

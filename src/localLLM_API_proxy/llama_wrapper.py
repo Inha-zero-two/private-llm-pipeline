@@ -21,8 +21,10 @@ import time
 import uuid
 import warnings
 from collections import deque
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Lock, local
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterator, NoReturn
 from urllib.parse import urlsplit, urlunsplit
@@ -320,6 +322,9 @@ def choose_backend(backend: str = "auto", main_gpu: int | None = None) -> Routin
 
 # 원본 직접 생성 또는 원격 HTTP 호출
 DEFAULT_SERVER_URL = "https://satisshin.top:4000"
+# 실험에서는 공유 원격 클라이언트로 여러 요청을 전송할 수 있음을 Runner에 알린다.
+# False이면 Runner는 기존처럼 한 요청씩 처리한다. 네이티브 모델은 항상 직렬화한다.
+EXPERIMENTAL_BUILD = True
 
 _COMPLETION_DEFAULTS = {
     "suffix": None,
@@ -493,6 +498,42 @@ def _reject_callbacks(params: dict[str, Any]) -> None:
         params.pop(name, None)
 
 
+class _RemoteRequest:
+    """한 요청의 시간 제한과 응답만 관리한다. 공유 HTTP 클라이언트는 닫지 않는다."""
+
+    def __init__(self, timeout: float) -> None:
+        self.deadline = time.monotonic() + timeout
+        self.cancelled = Event()
+        self._lock = Lock()
+        self._response: httpx.Response | None = None
+
+    def timeout(self) -> httpx.Timeout:
+        remaining = self.deadline - time.monotonic()
+        if self.cancelled.is_set() or remaining <= 0:
+            raise TimeoutError("Remote LLM request exceeded its time limit")
+        return httpx.Timeout(remaining, connect=min(5.0, remaining))
+
+    def attach(self, response: httpx.Response) -> None:
+        with self._lock:
+            self._response = response
+            cancelled = self.cancelled.is_set()
+        if cancelled:
+            response.close()
+            raise TimeoutError("Remote LLM request was cancelled")
+
+    def detach(self) -> None:
+        with self._lock:
+            self._response = None
+
+    def cancel(self) -> None:
+        with self._lock:
+            self.cancelled.set()
+            response = self._response
+        if response is not None:
+            with suppress(httpx.HTTPError, OSError):
+                response.close()
+
+
 class AdaptiveLlama:
     def __new__(
         cls,
@@ -560,6 +601,8 @@ class AdaptiveLlama:
         self.routing_info = self._routing_decision
         del self._routing_decision
         self.backend = self.routing_info.backend
+        self.experimental_build = EXPERIMENTAL_BUILD
+        self._request_local = local()
         unsupported_init = {
             key: value
             for key, value in llama_kwargs.items()
@@ -699,15 +742,16 @@ class AdaptiveLlama:
             )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        response = self._client().request(method, path.lstrip("/"), **kwargs)
-        self._check_response(response)
-        result = response.json()
+        with self._response(method, path, **kwargs) as response:
+            response.read()
+            self._check_response(response)
+            result = response.json()
         if isinstance(result, dict) and "error" in result:
             raise RemoteServerError(str(result["error"]))
         return result
 
     def _sse(self, path: str, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        with self._client().stream("POST", path.lstrip("/"), json=payload) as response:
+        with self._response("POST", path, json=payload) as response:
             if response.is_error or response.is_redirect:
                 response.read()
                 self._check_response(response)
@@ -734,6 +778,31 @@ class AdaptiveLlama:
                     if "error" in event:
                         raise RemoteServerError(str(event["error"]))
                     yield event
+
+    @contextmanager
+    def _request_context(self, request: _RemoteRequest) -> Iterator[None]:
+        previous = getattr(self._request_local, "current", None)
+        self._request_local.current = request
+        try:
+            yield
+        finally:
+            self._request_local.current = previous
+
+    @contextmanager
+    def _response(
+        self, method: str, path: str, **kwargs: Any
+    ) -> Iterator[httpx.Response]:
+        request = getattr(self._request_local, "current", None)
+        if request is not None:
+            kwargs.setdefault("timeout", request.timeout())
+        with self._client().stream(method, path.lstrip("/"), **kwargs) as response:
+            try:
+                if request is not None:
+                    request.attach(response)
+                yield response
+            finally:
+                if request is not None:
+                    request.detach()
 
     def _sampling_params(
         self, values: dict[str, Any], *, chat: bool = False
@@ -1138,6 +1207,7 @@ __all__ = [
     "Llama",
     "AdaptiveLlama",
     "DEFAULT_SERVER_URL",
+    "EXPERIMENTAL_BUILD",
     "resolve_server_token",
     "find_token_file",
     "execution_directory",

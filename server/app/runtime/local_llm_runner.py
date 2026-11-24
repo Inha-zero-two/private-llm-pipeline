@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from queue import Empty, Queue
-from threading import Condition, Event, Lock, Thread, get_ident
+from threading import Condition, Event, Lock, Thread, current_thread, get_ident
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
@@ -39,30 +39,38 @@ class LocalLLMRunner:
         *,
         model_path: str = "models/gemma.gguf",
         timeout: float = 120.0,
+        max_concurrent_requests: int = 4,
         prompt_manager: PromptManager | None = None,
         chat_manager: ChatManager | None = None,
     ) -> None:
         """공유 모델과 실행별 대화 관리 객체 초기화.
 
         model_path: 모델 파일 경로. timeout: 한 번의 응답을 기다리는 최대 시간(초).
+        max_concurrent_requests: 실험용 원격 wrapper의 동시 요청 상한(기본 4).
+        네이티브 모델 또는 EXPERIMENTAL_BUILD=False인 wrapper는 한 번에 하나씩 처리.
         prompt_manager: Main과 공유할 프롬프트 관리자. 직접 프롬프트를 전달하면 생략 가능.
         chat_manager: 실행별 호출 로그를 저장할 ChatManager. 생략하면 로그를 저장하지 않음.
         초기화 시 짧은 요청으로 실제 응답 확인. 모델 준비나 응답 확인 실패 시 예외 전달.
         """
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        if max_concurrent_requests < 1:
+            raise ValueError("max_concurrent_requests must be positive")
         self._model_path = model_path
         self._timeout = timeout
         self.prompt_manager = prompt_manager
         self.chat_manager = chat_manager
-        self._busy = Lock()  # 모델 사용 중 중복 접근 방지용 잠금
+        self._busy = Lock()  # 네이티브 모델 사용 중 중복 접근 방지용 잠금
+        self._remote = False
+        self._configured_concurrency = max_concurrent_requests
+        self._max_concurrent_requests = 1
         self._state_lock = Lock()  # 종료 상태와 중지 신호 변경용 잠금
         self._request_condition = Condition(self._state_lock)
         self._pending_requests: deque[tuple[int | str | None, Event]] = deque()
-        self._request_thread: int | None = None
+        self._active_requests: dict[int, tuple[int | str | None, Event]] = {}
+        self._receivers: dict[Thread, Any] = {}
+        self._tokenizers: dict[int, Any] = {}
         self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
-        self._stop_event: Event | None = None  # 진행 중인 요청의 중지 신호
-        self._active_run_id: int | None = None  # 진행 중인 요청의 실행 ID
         self._closed = False
         self._llm: Any = None
         # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
@@ -76,18 +84,19 @@ class LocalLLMRunner:
         """요청의 실행 ID와 중지 신호 등록 후 요청 종료 시 정리.
 
         파싱·재생성·대화 저장까지 같은 실행으로 관리.
-        요청은 도착 순서로 timeout초까지 대기하며 대기 중에도 stop으로 취소 가능.
+        요청은 빈 슬롯을 도착 순서로 timeout초까지 기다리며 stop으로 취소 가능.
+        같은 run_id는 컨텍스트 순서를 보존하도록 직렬화. None은 독립 요청으로 처리.
         같은 스레드·실행의 대화 압축만 기존 중지 신호를 공유하고 완료까지 처리.
         """
         with self._request_condition:
             if self._closed:
                 raise RunnerUnavailableError("Runner is closed")
             owns_request = False
-            if self._request_thread == get_ident():
-                if interruptible or self._active_run_id != run_id:
+            active = self._active_requests.get(get_ident())
+            if active is not None:
+                if interruptible or active[0] != run_id:
                     raise RuntimeError("Only context compaction may nest a request")
-                stop_signal = self._stop_event
-                assert stop_signal is not None
+                stop_signal = active[1]
             else:
                 stop_signal = Event()
                 ticket = (run_id, stop_signal)
@@ -101,13 +110,19 @@ class LocalLLMRunner:
                         if stop_signal.is_set():
                             break
                         if (
-                            self._stop_event is None
+                            len(self._active_requests) < self._max_concurrent_requests
+                            and len(self._receivers) < self._max_concurrent_requests
                             and self._pending_requests[0] is ticket
-                            and not self._busy.locked()
+                            and (self._remote or not self._busy.locked())
+                            and (
+                                run_id is None
+                                or all(
+                                    active_run_id != run_id
+                                    for active_run_id, _ in self._active_requests.values()
+                                )
+                            )
                         ):
-                            self._stop_event = stop_signal
-                            self._active_run_id = run_id
-                            self._request_thread = get_ident()
+                            self._active_requests[get_ident()] = ticket
                             owns_request = True
                             break
                         remaining = deadline - monotonic()
@@ -125,9 +140,7 @@ class LocalLLMRunner:
         finally:
             if owns_request:
                 with self._request_condition:
-                    self._stop_event = None
-                    self._active_run_id = None
-                    self._request_thread = None
+                    del self._active_requests[get_ident()]
                     self._request_condition.notify_all()
 
     def get_context_manager(self, run_id: int) -> ContextManager:
@@ -162,6 +175,9 @@ class LocalLLMRunner:
             n_ctx=N_CTX,
             n_gpu_layers=-1,
         )
+        self._remote = getattr(self._llm, "backend", None) == "remote"
+        if self._remote and getattr(self._llm, "experimental_build", False) is True:
+            self._max_concurrent_requests = self._configured_concurrency
         try:
             result = self.manual_request("Reply OK only.", "Answer briefly.")
             if not result[1] or not result[0].strip():
@@ -193,8 +209,10 @@ class LocalLLMRunner:
         출력 상한(length)으로 끝나면 같은 입력으로 최대 3회 요청 후 length_failed 반환.
         """
         with self._request_scope(run_id, interruptible=interruptible) as stop_signal:
+            with self._state_lock:
+                active = self._active_requests.get(get_ident())
             if stop_signal.is_set() and (
-                interruptible or self._stop_event is not stop_signal
+                interruptible or active is None or active[1] is not stop_signal
             ):
                 return "", False, 0, 0, "stopped"
             input_tokens: int | None = 0
@@ -266,7 +284,7 @@ class LocalLLMRunner:
         if not 0 < max_tokens <= MAX_OUTPUT_TOKENS:
             raise ValueError("max_tokens must be between 1 and 5000")
         deadline = monotonic() + self._timeout
-        while not self._busy.acquire(timeout=0.05):
+        while not self._remote and not self._busy.acquire(timeout=0.05):
             with self._state_lock:
                 if self._closed:
                     raise RunnerUnavailableError("Runner is closed")
@@ -276,70 +294,106 @@ class LocalLLMRunner:
                 raise RunnerUnavailableError("Model cleanup wait timed out")
         with self._state_lock:
             if self._closed:
-                self._busy.release()
+                if not self._remote:
+                    self._busy.release()
                 raise RunnerUnavailableError("Runner is closed")
             if interruptible and stop_signal.is_set():
-                self._busy.release()
+                if not self._remote:
+                    self._busy.release()
                 return "", False, 0, 0, "stopped"
-        try:
-            # 시스템 프롬프트·입력·채팅 형식·최대 출력을 모두 포함한 예산 확인
-            prompt_tokens = sum(
-                len(
-                    self._llm.tokenize(
-                        text.encode("utf-8"), add_bos=False, special=True
-                    )
-                )
-                for text in (system_prompt, input_)
-            )
-        except BaseException as exc:
-            self._busy.release()
-            if isinstance(exc, Exception):
-                generation_errors.append(exc)
-            raise
-        if prompt_tokens + PROMPT_MARGIN + max_tokens > N_CTX:
-            self._busy.release()
-            return "", False, 0, 0, "context_full"
+        remote_request = None
+        if self._remote:
+            from src.localLLM_API_proxy.llama_wrapper import _RemoteRequest
+
+            remote_request = _RemoteRequest(self._timeout)
         # 수신 스레드 종료 신호. 요청 전체의 중지 신호와 구분
         cancel = Event()
         # 수신한 응답, 발생한 예외 또는 수신 완료 표시(None)를 전달할 큐
         events: Queue[dict[str, Any] | Exception | None] = Queue()
+        context_full = False
 
         def receive() -> None:
             """모델 응답과 수신 중 발생한 예외를 큐로 전달.
 
             별도 스레드에서 응답을 받아 요청 함수가 중지 신호를 확인할 수 있도록 분리.
-            수신 종료 후 모델 잠금을 해제하고 None으로 수신 완료 전달.
+            수신 종료 후 네이티브 잠금 또는 원격 슬롯을 해제하고 수신 완료 전달.
             """
+            nonlocal context_full
             try:
-                if interruptible and stop_signal.is_set():
-                    return
-                stream = self._llm.create_chat_completion(
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": input_},
-                    ],
-                    stream=True,
-                    max_tokens=max_tokens,
+                request_scope = (
+                    self._llm._request_context(remote_request)
+                    if remote_request is not None
+                    else nullcontext()
                 )
-                with closing(stream):
-                    for chunk in stream:
-                        if cancel.is_set() or (interruptible and stop_signal.is_set()):
-                            break
-                        events.put(chunk)
+                with request_scope:
+                    if cancel.is_set() or (interruptible and stop_signal.is_set()):
+                        return
+                    # 토큰화도 원격 I/O이므로 같은 시간 제한과 취소 범위에 포함한다.
+                    prompt_tokens = sum(
+                        len(
+                            self._llm.tokenize(
+                                text.encode("utf-8"), add_bos=False, special=True
+                            )
+                        )
+                        for text in (system_prompt, input_)
+                    )
+                    if prompt_tokens + PROMPT_MARGIN + max_tokens > N_CTX:
+                        context_full = True
+                        return
+                    if cancel.is_set() or (interruptible and stop_signal.is_set()):
+                        return
+                    stream = self._llm.create_chat_completion(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": input_},
+                        ],
+                        stream=True,
+                        max_tokens=max_tokens,
+                    )
+                    with closing(stream):
+                        for chunk in stream:
+                            if cancel.is_set() or (
+                                interruptible and stop_signal.is_set()
+                            ):
+                                break
+                            events.put(chunk)
             except Exception as exc:
                 # 큐를 통해 수신 스레드의 예외를 요청 함수로 전달
                 events.put(exc)
             finally:
-                self._busy.release()
+                if not self._remote:
+                    self._busy.release()
+                with self._request_condition:
+                    self._receivers.pop(current_thread(), None)
+                    self._request_condition.notify_all()
                 events.put(None)
 
-        deadline = monotonic() + self._timeout
         worker = Thread(target=receive, daemon=True)
-        try:
-            worker.start()
-        except RuntimeError:
-            self._busy.release()
-            raise
+        with self._request_condition:
+            while (
+                self._remote and len(self._receivers) >= self._max_concurrent_requests
+            ):
+                if self._closed:
+                    raise RunnerUnavailableError("Runner is closed")
+                if interruptible and stop_signal.is_set():
+                    return "", False, 0, 0, "stopped"
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise RunnerUnavailableError("Model cleanup wait timed out")
+                self._request_condition.wait(timeout=min(0.05, remaining))
+            if self._closed:
+                if not self._remote:
+                    self._busy.release()
+                raise RunnerUnavailableError("Runner is closed")
+            self._receivers[worker] = remote_request
+            try:
+                worker.start()
+            except RuntimeError:
+                del self._receivers[worker]
+                if not self._remote:
+                    self._busy.release()
+                self._request_condition.notify_all()
+                raise
         text = output
         input_tokens = output_tokens = None
         finish_reason = None
@@ -362,6 +416,8 @@ class LocalLLMRunner:
                     generation_errors.append(event)
                     raise event
                 if event is None:
+                    if context_full:
+                        return "", False, 0, 0, "context_full"
                     answer = "".join(text)
                     if finish_reason is None:
                         if not answer.strip():
@@ -389,6 +445,8 @@ class LocalLLMRunner:
                     finish_reason = choices[0].get("finish_reason") or finish_reason
         finally:
             cancel.set()
+            if remote_request is not None:
+                remote_request.cancel()
 
     def request(
         self,
@@ -695,12 +753,31 @@ class LocalLLMRunner:
         """응답 생성에 사용하는 모델로 문자열을 토큰 ID 목록으로 변환.
 
         ContextManager에서 반환된 목록의 길이로 저장된 대화의 토큰 수 계산.
-        응답 수신 중이라면 모델 접근 잠금을 얻을 때까지 대기한 뒤 토큰화.
+        네이티브 모델은 생성과 직렬화. 원격 토큰화에는 요청 시간 제한을 적용.
         """
-        with self._busy:
+        with nullcontext() if self._remote else self._busy:
             if self._closed:
                 raise RuntimeError("Runner is closed")
-            return self._llm.tokenize(text.encode("utf-8"), add_bos=False, special=True)
+            request_scope = nullcontext()
+            if self._remote:
+                from src.localLLM_API_proxy.llama_wrapper import _RemoteRequest
+
+                request = _RemoteRequest(self._timeout)
+                with self._request_condition:
+                    if self._closed:
+                        raise RuntimeError("Runner is closed")
+                    self._tokenizers[get_ident()] = request
+                request_scope = self._llm._request_context(request)
+            try:
+                with request_scope:
+                    return self._llm.tokenize(
+                        text.encode("utf-8"), add_bos=False, special=True
+                    )
+            finally:
+                if self._remote:
+                    with self._request_condition:
+                        del self._tokenizers[get_ident()]
+                        self._request_condition.notify_all()
 
     def stop(self, run_id: int | str) -> None:
         """실행 ID가 일치하는 진행·대기 요청에 중지 신호 전달 후 즉시 반환.
@@ -710,8 +787,9 @@ class LocalLLMRunner:
         대화 압축 중에는 압축 완료 후 중지 처리. 원격 서버의 생성 작업 취소는 별도 기능.
         """
         with self._request_condition:
-            if self._active_run_id == run_id and self._stop_event is not None:
-                self._stop_event.set()
+            for active_run_id, stop_signal in self._active_requests.values():
+                if active_run_id == run_id:
+                    stop_signal.set()
             for pending_run_id, stop_signal in self._pending_requests:
                 if pending_run_id == run_id:
                     stop_signal.set()
@@ -720,14 +798,29 @@ class LocalLLMRunner:
     def close(self) -> None:
         """Runner 사용을 종료하고 진행 중인 수신이 끝나면 모델 자원 해제.
 
-        중지 신호 전달 후 모델 접근 잠금을 얻을 때까지 대기.
+        중지 신호 전달 후 원격 응답을 닫고 진행 중인 모델 접근이 끝날 때까지 대기.
         프로그램 종료 시 호출. 종료 후 같은 객체로 새 요청 불가.
         """
         with self._request_condition:
+            if self._closed:
+                return
             self._closed = True
-            if self._stop_event is not None:
-                self._stop_event.set()
+            for _, stop_signal in self._active_requests.values():
+                stop_signal.set()
+            receivers = list(self._receivers.items())
+            tokenizers = list(self._tokenizers.values())
             self._request_condition.notify_all()
+        for request in tokenizers:
+            request.cancel()
+        for _, request in receivers:
+            if request is not None:
+                request.cancel()
+        for worker, _ in receivers:
+            if worker is not current_thread():
+                worker.join()
+        with self._request_condition:
+            while self._tokenizers:
+                self._request_condition.wait(timeout=0.05)
         # 진행 중인 생성·토큰화가 끝난 후 모델 메모리 해제
         # stop은 즉시 반환. close는 진행 중인 작업이 끝날 때까지 대기
         with self._busy:

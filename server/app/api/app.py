@@ -41,7 +41,13 @@ from app.api.schemas import (
     SettingBody,
     SettingSaved,
 )
-from app.api.services import BusyError, FrontierFactory, Pipeline, RunnerFactory
+from app.api.services import (
+    BusyError,
+    FrontierFactory,
+    Pipeline,
+    PromptChooserFactory,
+    RunnerFactory,
+)
 from app.config import db_path as configured_db_path
 from app.data.chat_manager import StorageError
 from app.privacy.consent_manager import NoPendingConsentError
@@ -84,15 +90,17 @@ def create_app(
     db_path: FilePath | None = None,
     runner_factory: RunnerFactory | None = None,
     frontier_factory: FrontierFactory | None = None,
+    prompt_chooser_factory: PromptChooserFactory | None = None,
 ) -> FastAPI:
     """db_path: 채팅·실행 기록 DB. 생략하면 CHAT_DB_PATH 설정(기본 server/data/chat.sqlite3).
-    runner_factory · frontier_factory: 로컬 LLM·프론티어 클라이언트를 만드는 함수.
-    생략하면 실제 LocalLLMRunner·FrontierClient를 만든다. (테스트는 전송 계층만 바꿔 넘긴다)
+    runner_factory · frontier_factory · prompt_chooser_factory: 테스트용 모듈 생성 함수.
+    생략하면 실제 LocalLLMRunner·FrontierClient·DynamicPromptChooser를 만든다.
     """
     pipeline = Pipeline(
         db_path or configured_db_path(),
         runner_factory=runner_factory,
         frontier_factory=frontier_factory,
+        prompt_chooser_factory=prompt_chooser_factory,
     )
 
     @asynccontextmanager

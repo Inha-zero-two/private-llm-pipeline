@@ -1,0 +1,239 @@
+{
+  "version": "0.3",
+  "candidates": {
+    "NEEDS": [
+      {
+        "query": "startup business plan preliminary cost estimation financial projections retail food venture",
+        "prompt": [
+          "Example:",
+          "Input: I am planning to launch an artisan coffee and pastry kiosk in downtown Austin next quarter. Can you help me draft a lean business plan covering estimated startup capital, monthly operating costs, break-even timeline, and local permit requirements?",
+          "Output: {\"needs\": [\"startup capital and equipment cost breakdown\", \"monthly operating expense and revenue projections\", \"break-even analysis methodology\", \"local food service licensing and permit requirements\"]}"
+        ]
+      },
+      {
+        "query": "corporate finance equity valuation CAPM cost of equity dividend growth calculation",
+        "prompt": [
+          "Example:",
+          "Input: Northstar Logistics has a beta of 1.35, a current risk-free Treasury yield of 4.2%, and an expected market risk premium of 5.8%. If its most recent annual dividend was $2.10 and is projected to grow at 6% annually, how do I calculate its cost of equity and intrinsic share price?",
+          "Output: {\"needs\": [\"Capital Asset Pricing Model formula and calculation\", \"Gordon Growth Model stock valuation steps\", \"cost of equity vs dividend growth rate assumptions\"]}"
+        ]
+      },
+      {
+        "query": "corporate digital marketing paid social campaign budget bid strategy ad copy",
+        "prompt": [
+          "Example:",
+          "Input: Design a 14-day LinkedIn and Meta ad campaign to promote our B2B accounting SaaS platform to small business owners in Canada, using a $25 daily budget, recommended bidding strategy, target audience filters, and two sets of ad headlines and calls to action.",
+          "Output: {\"needs\": [\"B2B paid social campaign structure and audience targeting\", \"daily budget allocation and bidding strategy\", \"ad headline, body copy, and call-to-action variations\"]}"
+        ]
+      },
+      {
+        "query": "organizational design functional to matrix business structure corporate restructuring",
+        "prompt": [
+          "Example:",
+          "Input: Our mid-sized textile export firm currently operates under a traditional functional structure with separate sales, sourcing, finance, and logistics departments. How would transitioning to a matrix structure change reporting lines, cross-functional coordination, and key management risks?",
+          "Output: {\"needs\": [\"comparison of functional and matrix organizational structures\", \"dual-reporting workflow and cross-functional governance\", \"implementation risks and change management controls\"]}"
+        ]
+      },
+      {
+        "query": "corporate tax statute interpretation regulatory compliance effective dates plain language",
+        "prompt": [
+          "Example:",
+          "Input: Can you explain in plain business terms what corporate tax compliance obligations apply when a domestic subsidiary transitions from a cash-basis to an accrual-basis accounting method mid-fiscal year, including filing elections and deferred revenue treatment?",
+          "Output: {\"needs\": [\"tax accounting method change rules and filing elections\", \"accrual-basis revenue and expense recognition adjustments\", \"mid-year transition compliance deadlines and penalties\"]}"
+        ]
+      },
+      {
+        "query": "tailor resume bullet points and professional summary for cybersecurity analyst job application",
+        "prompt": [
+          "Example:",
+          "Input: Can you rewrite my IT helpdesk experience into resume bullet points tailored for an entry-level cybersecurity analyst role?",
+          "Output: {\"needs\": [\"applicant's current IT experience and technical skills\", \"target cybersecurity analyst job requirements\", \"action-oriented resume formatting guidelines\"]}"
+        ]
+      },
+      {
+        "query": "draft polite consular follow-up email regarding delayed student visa application processing",
+        "prompt": [
+          "Example:",
+          "Input: I submitted my passport and supporting documents for a student visa three weeks ago and haven't heard back—can you write a polite status inquiry email to the consulate?",
+          "Output: {\"needs\": []}"
+        ]
+      },
+      {
+        "query": "write motivation essay for merit-based graduate scholarship and leadership fellowship application",
+        "prompt": [
+          "Example:",
+          "Input: Can you help me outline a 500-word motivation essay for a graduate leadership scholarship that connects my community volunteering to my public policy goals?",
+          "Output: {\"needs\": [\"applicant's community leadership experience and impact\", \"career objectives in public policy\", \"scholarship selection criteria and essay word limit\"]}"
+        ]
+      },
+      {
+        "query": "draft job offer salary negotiation email and start date adjustment request",
+        "prompt": [
+          "Example:",
+          "Input: I just received a full-time job offer, and I'd like to negotiate a higher base salary based on market rates while asking to push my start date back by two weeks.",
+          "Output: {\"needs\": [\"current compensation offer and target salary range\", \"market compensation benchmarks and supporting qualifications\", \"reason and preferred timeline for start date adjustment\"]}"
+        ]
+      },
+      {
+        "query": "symptom assessment underlying causes warning signs when to see a doctor",
+        "prompt": [
+          "Example:",
+          "Input: My teenager has been waking up with morning headaches, mild blurred vision, and nausea for the past two weeks. What could be causing these symptoms, and when should we seek urgent medical evaluation?",
+          "Output: {\"needs\": [\"persistent headache and vision symptoms\", \"potential neurological or systemic causes\", \"urgent medical evaluation warning signs\"]}"
+        ]
+      },
+      {
+        "query": "chronic condition diet nutrition plan lifestyle adjustments disease management",
+        "prompt": [
+          "Example:",
+          "Input: Can you outline a heart-healthy daily meal plan and realistic lifestyle adjustments for someone recently diagnosed with stage 2 hypertension and borderline high cholesterol?",
+          "Output: {\"needs\": [\"hypertension and cholesterol dietary plan\", \"sodium and saturated fat limits\", \"daily lifestyle management strategies\"]}"
+        ]
+      },
+      {
+        "query": "medication usage dosage side effects drug supplement interactions safety",
+        "prompt": [
+          "Example:",
+          "Input: I take a daily beta-blocker for blood pressure and am considering adding a magnesium supplement and ibuprofen for joint pain. Are there any interaction risks or side effects I should watch out for?",
+          "Output: {\"needs\": [\"beta-blocker and supplement interactions\", \"NSAID risks with blood pressure medication\", \"safe pain management alternatives\"]}"
+        ]
+      },
+      {
+        "query": "mental health anxiety eating behavior stress sleep hygiene coping support",
+        "prompt": [
+          "Example:",
+          "Input: Over the past few months I have noticed growing anxiety around meals, disrupted sleep, and constant worry about my health. What evidence-based coping strategies and professional support options are recommended?",
+          "Output: {\"needs\": [\"anxiety and disordered eating support\", \"evidence-based stress and sleep techniques\", \"finding mental health care options\"]}"
+        ]
+      },
+      {
+        "query": "rewrite polish email polite professional tone payment issue follow up",
+        "prompt": [
+          "Example:",
+          "Input: Can you rewrite this email to sound more polite and professional? 'Hi Billing Team, I submitted the $120 registration fee last week and my bank confirmed it cleared, yet your portal still shows unpaid. Support hasn't replied to my ticket. Please fix this before Friday so my enrollment isn't dropped.'",
+          "Output: {\"needs\": []}"
+        ]
+      },
+      {
+        "query": "apology email reschedule meeting deadline extension delay notice",
+        "prompt": [
+          "Example:",
+          "Input: Help me draft a polite email to a client apologizing for a last-minute travel conflict today and asking to reschedule our project review call to next Tuesday afternoon, while assuring them the revised proposal will be shared beforehand.",
+          "Output: {\"needs\": []}"
+        ]
+      },
+      {
+        "query": "summarize email thread extract action items explain quoted message reply",
+        "prompt": [
+          "Example:",
+          "Input: Here is a long email thread from our warehouse coordinator about delayed customs clearance, missing pallet labels, and a proposed split shipment. Can you extract the key action items and draft a concise confirmation reply?",
+          "Output: {\"needs\": []}"
+        ]
+      },
+      {
+        "query": "python fastapi async sqlalchemy connection pool timeout concurrency debugging",
+        "prompt": [
+          "Example:",
+          "Input: My FastAPI endpoint throws a QueuePool timeout error during load testing even though I use async SQLAlchemy sessions. How do I find and fix the connection leak?",
+          "Output: {\"needs\": [\"async SQLAlchemy session lifecycle and connection release patterns\", \"FastAPI dependency cleanup and exception rollback behavior\", \"connection pool sizing and timeout diagnostics under concurrent load\"]}"
+        ]
+      },
+      {
+        "query": "docker multi-stage build ci cd image size layer caching optimization",
+        "prompt": [
+          "Example:",
+          "Input: My Node.js Docker image is over 1.2 GB and takes 12 minutes to build in CI on every push. How can I shrink the image and speed up the deployment pipeline?",
+          "Output: {\"needs\": [\"Docker multi-stage build optimization and slim base image selection\", \"CI pipeline layer caching and dependency cache configuration\", \"build context exclusions via dockerignore\"]}"
+        ]
+      },
+      {
+        "query": "certification exam six week study schedule spaced repetition practice tests",
+        "prompt": [
+          "Example:",
+          "Input: I have six weeks left before my cloud solutions architect certification exam while working full time. How should I structure my weekly study plan and practice tests?",
+          "Output: {\"needs\": [\"six-week part-time certification study schedule framework\", \"active recall and spaced repetition techniques for technical domains\", \"mock exam pacing and weak-area remediation strategies\"]}"
+        ]
+      },
+      {
+        "query": "foreign language subjunctive grammar rules speaking drills conversation fluency",
+        "prompt": [
+          "Example:",
+          "Input: I keep mixing up the Spanish subjunctive and indicative moods during real conversations even though I understand textbook rules. What drills can help me choose the right form faster?",
+          "Output: {\"needs\": [\"trigger phrases and conceptual contrast between subjunctive and indicative\", \"spoken output drills for automatic grammar selection\", \"contextual listening and self-correction exercises\"]}"
+        ]
+      },
+      {
+        "query": "multi-city train travel itinerary rail pass vs single tickets lodging logistics",
+        "prompt": [
+          "Example:",
+          "Input: I am planning a five-day solo trip across two neighboring cities by train and want to minimize transit friction. How should I choose where to stay and decide between a regional rail pass or point-to-point tickets?",
+          "Output: {\"needs\": [\"cost comparison criteria for regional rail passes versus single tickets\", \"station-adjacent lodging neighborhood selection tradeoffs\", \"five-day two-city itinerary pacing and luggage transit logistics\"]}"
+        ]
+      },
+      {
+        "query": "solo cooking high protein meal prep overlapping ingredients food waste storage",
+        "prompt": [
+          "Example:",
+          "Input: I cook for one person and keep throwing away half-used produce by Friday. How can I plan a four-day high-protein meal prep using overlapping ingredients?",
+          "Output: {\"needs\": [\"cross-utilization ingredient planning for single-person portions\", \"high-protein four-day meal prep recipes with minimal food waste\", \"refrigerated and freezer storage shelf-life guidelines\"]}"
+        ]
+      },
+      {
+        "query": "laptop buying comparison ram capacity oled vs ips display battery life portability",
+        "prompt": [
+          "Example:",
+          "Input: I am choosing between two 14-inch laptops for coding and travel: one has an OLED screen with 16 GB RAM and the other has an IPS screen with 32 GB RAM and a larger battery. Which tradeoffs matter most?",
+          "Output: {\"needs\": [\"RAM capacity impact on software development and multitasking longevity\", \"OLED versus IPS display tradeoffs for text clarity and power draw\", \"portability and real-world battery endurance factors for travel\"]}"
+        ]
+      },
+      {
+        "query": "apartment rental lease clauses security deposit protection move-in checklist",
+        "prompt": [
+          "Example:",
+          "Input: I am about to sign my first apartment lease and want to make sure I get my security deposit back when I move out. What clauses should I check before signing and how should I document the unit?",
+          "Output: {\"needs\": [\"key residential lease clauses on maintenance, fees, and notice periods\", \"security deposit protection rules and normal wear-and-tear standards\", \"move-in inspection photo and written condition checklist\"]}"
+        ]
+      },
+      {
+        "query": "hybrid fitness routine combining strength training 10k running recovery schedule",
+        "prompt": [
+          "Example:",
+          "Input: I want to run a 10K in three months without losing strength. How do I combine three weekly lifting sessions with running mileage without burning out?",
+          "Output: {\"needs\": [\"weekly scheduling of strength workouts alongside 10K running volume\", \"fatigue management and interference effect mitigation between lifting and cardio\", \"sleep, nutrition, and deload recovery guidelines\"]}"
+        ]
+      },
+      {
+        "query": "child homework focus after school routine bedtime screen time parenting",
+        "prompt": [
+          "Example:",
+          "Input: My eight-year-old struggles to sit down for homework after school and ends up going to bed too late. How can we build an afternoon routine that improves focus and protects sleep?",
+          "Output: {\"needs\": [\"after-school decompression and screen-time boundary strategies\", \"age-appropriate homework chunking and focus routines\", \"consistent evening wind-down schedule for elementary school sleep needs\"]}"
+        ]
+      },
+      {
+        "query": "dog separation anxiety desensitization training enrichment routine pet care",
+        "prompt": [
+          "Example:",
+          "Input: My newly adopted two-year-old dog barks and scratches at the door whenever I leave for work. What step-by-step training and enrichment routine can reduce this separation distress?",
+          "Output: {\"needs\": [\"gradual desensitization protocol for canine separation anxiety\", \"mental enrichment and structured feeding routines before departure\", \"signs indicating need for veterinary behaviorist evaluation\"]}"
+        ]
+      },
+      {
+        "query": "personal finance budget debt payoff emergency fund retirement account priority",
+        "prompt": [
+          "Example:",
+          "Input: After paying rent and monthly bills, I have about 900 dollars left each month and some high-interest credit card debt. In what order should I split money between debt payoff, an emergency fund, and retirement contributions?",
+          "Output: {\"needs\": [\"cash-flow prioritization among high-interest debt, emergency savings, and employer match\", \"tax-advantaged retirement account contribution rules and tradeoffs\", \"monthly automated budgeting allocation framework\"]}"
+        ]
+      },
+      {
+        "query": "creative writing story pacing scene structure dialogue show don't tell",
+        "prompt": [
+          "Example:",
+          "Input: The middle chapters of my short story feel slow and rely too much on exposition. How can I tighten the pacing and reveal world-building through character action and dialogue instead?",
+          "Output: {\"needs\": [\"narrative pacing techniques for middle-act tension and scene transitions\", \"show-don't-tell world-building integration through action and conflict\", \"dialogue subtext and exposition trimming methods\"]}"
+        ]
+      }
+    ]
+  }
+}

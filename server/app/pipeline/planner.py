@@ -10,10 +10,13 @@ from app.models.enums import PromptIdx
 from app.models.llm_results import JudgeResult
 
 if TYPE_CHECKING:
+    from app.data.dynamic_prompt_chooser import DynamicPromptChooser
     from app.runtime.local_llm_runner import LocalLLMRunner
 
 # judge 출력의 need 번호(needIdx)가 필요 정보 목록 범위를 벗어났을 때 다시 묻는 횟수
 NEED_RETRIES = 2
+# NEEDS 단계에서 고정 시스템 프롬프트 뒤에 붙일 동적 유사 후보 개수
+NEEDS_DYNAMIC_TOP_N = 3
 
 
 class Plan(BaseModel):
@@ -30,9 +33,17 @@ class Plan(BaseModel):
 class Planner:
     """필요한 정보를 나누고 현재 정보로 답할 수 있는지 판단하는 클래스."""
 
-    def __init__(self, local_llm_runner: LocalLLMRunner | None = None) -> None:
-        """로컬 모델 실행기 저장."""
+    def __init__(
+        self,
+        local_llm_runner: LocalLLMRunner | None = None,
+        dynamic_prompt_chooser: DynamicPromptChooser | None = None,
+        *,
+        needs_top_n: int = NEEDS_DYNAMIC_TOP_N,
+    ) -> None:
+        """로컬 모델 실행기와 동적 프롬프트 선택기 저장."""
         self._runner = local_llm_runner
+        self._chooser = dynamic_prompt_chooser
+        self._needs_top_n = needs_top_n
 
     def list_needs(
         self,
@@ -50,9 +61,22 @@ class Planner:
 
         # 2. 직접 전달한 결과가 없으면 공유 실행기로 필요 정보 분류 요청
         if needs is None and ok and self._runner is not None:
-            needs, ok, *_ = self._runner.request(
-                run_id, question, PromptIdx.NEEDS, chat_id
-            )
+            if self._chooser is not None:
+                system_prompt, prompt_version = self._chooser.build_prompt(
+                    PromptIdx.NEEDS, question, self._needs_top_n, run_id=run_id
+                )
+                needs, ok, *_ = self._runner.request(
+                    run_id,
+                    question,
+                    PromptIdx.NEEDS,
+                    chat_id,
+                    system_prompt=system_prompt,
+                    prompt_version=prompt_version,
+                )
+            else:
+                needs, ok, *_ = self._runner.request(
+                    run_id, question, PromptIdx.NEEDS, chat_id
+                )
         if (
             not ok
             or not isinstance(needs, list)

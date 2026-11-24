@@ -22,6 +22,7 @@ from app.api.events import EventHub
 
 if TYPE_CHECKING:
     from app.data.chat_manager import ChatManager
+    from app.data.dynamic_prompt_chooser import DynamicPromptChooser
     from app.data.prompt_manager import PromptManager
     from app.main import Main
     from app.privacy.consent_manager import ConsentManager
@@ -39,6 +40,9 @@ BUDGET_LIMIT = 1.0
 # 모듈을 만드는 함수. 테스트는 모델·외부 API 전송 계층만 바꾼 것을 넘긴다.
 RunnerFactory = Callable[..., "LocalLLMRunner"]
 FrontierFactory = Callable[["PromptManager"], "FrontierClient"]
+PromptChooserFactory = Callable[
+    ["PromptManager", "ChatManager"], "DynamicPromptChooser | None"
+]
 
 
 class BusyError(Exception):
@@ -57,6 +61,23 @@ def _default_frontier(prompt_manager: PromptManager) -> FrontierClient:
     from app.runtime.frontier_client import FrontierClient
 
     return FrontierClient(prompt_manager)
+
+
+def _default_prompt_chooser(
+    prompt_manager: PromptManager, chat_manager: ChatManager
+) -> DynamicPromptChooser | None:
+    from app import config
+    from app.data.dynamic_prompt_chooser import DynamicPromptChooser
+
+    if not config.dynamic_prompt_enabled():
+        return None
+    chooser = DynamicPromptChooser(
+        prompt_manager,
+        model_name=config.embedding_model(),
+        chat_manager=chat_manager,
+    )
+    chooser.warmup()
+    return chooser
 
 
 @dataclass
@@ -78,13 +99,16 @@ class Pipeline:
         *,
         runner_factory: RunnerFactory | None = None,
         frontier_factory: FrontierFactory | None = None,
+        prompt_chooser_factory: PromptChooserFactory | None = None,
     ) -> None:
         self._db_path = db_path
         self._runner_factory = runner_factory or _default_runner
         self._frontier_factory = frontier_factory or _default_frontier
+        self._prompt_chooser_factory = prompt_chooser_factory or _default_prompt_chooser
         self.hub = EventHub()
         self._services: Services | None = None
         self._runner: LocalLLMRunner | None = None
+        self._prompt_chooser: DynamicPromptChooser | None = None
         self._starting: asyncio.Future[int] | None = None  # 시작 중인 실행의 ID 대기
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -130,9 +154,15 @@ class Pipeline:
                 )
                 raise
             self._runner = runner
+            chooser = await asyncio.to_thread(
+                self._prompt_chooser_factory, prompts, chat_manager
+            )
+            self._prompt_chooser = chooser
             frontier = self._frontier_factory(prompts)
             privacy_settings = PrivacySettings(chat_manager, runner)
             consent_manager = ConsentManager(chat_manager, runner, emit=self._on_event)
+            from app import config
+
             main = Main(
                 call_limit=CALL_LIMIT,
                 regen_limit=REGEN_LIMIT,
@@ -145,7 +175,11 @@ class Pipeline:
                 pd_detector=PDDetector(runner),
                 privacy_settings=privacy_settings,
                 consent_manager=consent_manager,
-                planner=Planner(runner),
+                planner=Planner(
+                    runner,
+                    dynamic_prompt_chooser=chooser,
+                    needs_top_n=config.dynamic_prompt_top_n(),
+                ),
                 request_writer=RequestWriter(runner),
                 leak_guard=LeakGuard(runner),
                 answer_generator=AnswerGenerator(runner, prompts),
@@ -170,6 +204,9 @@ class Pipeline:
         self._services = None
 
     async def _close(self, chat_manager: ChatManager) -> None:
+        if self._prompt_chooser is not None:
+            await asyncio.to_thread(self._prompt_chooser.close)
+            self._prompt_chooser = None
         if self._runner is not None:
             await asyncio.to_thread(self._runner.close)
             self._runner = None
