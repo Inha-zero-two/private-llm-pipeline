@@ -53,4 +53,4 @@ def test_upgrade_preserves_query_items_and_sequence(tmp_path: Path) -> None:
         assert db.execute("SELECT pdId, allowedBy FROM query_items").fetchall() == [
             (5, "setting")
         ]
-        assert db.execute("PRAGMA user_version").fetchone() == (3,)
+        assert db.execute("PRAGMA user_version").fetchone() == (4,)

@@ -102,7 +102,9 @@ class ChatManager:
                     db.execute("PRAGMA user_version = 2")
             if self._db.execute("PRAGMA user_version").fetchone()[0] == 2:
                 self._migrate_context()
-            if self._db.execute("PRAGMA user_version").fetchone()[0] != 3:
+            if self._db.execute("PRAGMA user_version").fetchone()[0] == 3:
+                self._migrate_comparison()
+            if self._db.execute("PRAGMA user_version").fetchone()[0] != 4:
                 raise PipelineError(
                     ErrorCode.CONFIGURATION_ERROR,
                     ErrorStage.STARTUP,
@@ -155,6 +157,8 @@ class ChatManager:
         schema = SCHEMA_PATH.read_text(encoding="utf-8").split(
             "-- Context persistence", 1
         )[1]
+        # 뒤에 붙은 비교 기능 구역은 3→4 갱신에서만 만든다.
+        schema = schema.split("-- Comparison", 1)[0]
         with self._transaction() as db:
             for statement in schema.split(";"):
                 if statement.strip():
@@ -167,6 +171,14 @@ class ChatManager:
             """,
                 (CONVERSATION,),
             )
+
+    def _migrate_comparison(self) -> None:
+        """비교 기능 테이블을 추가한다. 읽기·쓰기는 server/comparison이 맡는다."""
+        schema = SCHEMA_PATH.read_text(encoding="utf-8").split("-- Comparison", 1)[1]
+        with self._transaction() as db:
+            for statement in schema.split(";"):
+                if statement.strip():
+                    db.execute(statement)
 
     def __enter__(self) -> Self:
         return self

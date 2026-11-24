@@ -8,6 +8,8 @@ type Props = {
   chats: Chat[]
   currentChatId: string | null
   runningChatId: string | null
+  /** 비교 답변을 만드는 중인 채팅. 삭제할 수 있다 */
+  comparingChatId: string | null
   onToggle: () => void
   onNewChat: () => void
   onSelect: (chatId: string) => void
@@ -21,6 +23,7 @@ export function Sidebar({
   chats,
   currentChatId,
   runningChatId,
+  comparingChatId,
   onToggle,
   onNewChat,
   onSelect,
@@ -57,7 +60,12 @@ export function Sidebar({
                   onClick={() => onSelect(chat.id)}
                   title={chat.title}
                 >
-                  {running && <span className={styles.runningDot} aria-label="답변 생성 중" />}
+                  {(running || chat.id === comparingChatId) && (
+                    <span
+                      className={styles.runningDot}
+                      aria-label={running ? '답변 생성 중' : '비교 답변 생성 중'}
+                    />
+                  )}
                   {chat.title}
                 </button>
                 <button
