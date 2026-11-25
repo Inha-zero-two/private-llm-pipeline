@@ -110,12 +110,20 @@ class Gateway:
         if request.url.path.endswith("/models"):
             return httpx.Response(200, json={"data": []})
         body = json.loads(request.content)
-        self.requests.append(body["messages"][-1]["content"])
+        assert request.url.path.endswith("/responses")
+        self.requests.append(body["input"])
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": FRONTIER_ANSWER}}],
-                "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+                "id": f"resp_{len(self.requests)}",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": FRONTIER_ANSWER}],
+                    }
+                ],
+                "usage": {"input_tokens": 20, "output_tokens": 10},
             },
         )
 

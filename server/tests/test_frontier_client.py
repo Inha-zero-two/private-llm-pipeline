@@ -2,6 +2,9 @@
 
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier, Event
 
 import httpx
 import pytest
@@ -18,10 +21,17 @@ def reply(content: str, prompt_tokens: int, completion_tokens: int) -> httpx.Res
     return httpx.Response(
         200,
         json={
-            "choices": [{"message": {"content": content}}],
+            "id": f"resp_{content or 'empty'}",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": content}],
+                }
+            ],
             "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
+                "input_tokens": prompt_tokens,
+                "output_tokens": completion_tokens,
             },
         },
     )
@@ -43,6 +53,13 @@ def make_client(
 @pytest.fixture(autouse=True)
 def no_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fc, "RETRY_DELAYS", (0.0, 0.0))
+    for name in (
+        "FRONTIER_API_KEY",
+        "FRONTIER_BASE_URL",
+        "FRONTIER_MODEL",
+        "FRONTIER_WEB_SEARCH",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_invalid_base_url_means_offline() -> None:
@@ -75,10 +92,6 @@ def test_all_empty_answers_still_record_usage() -> None:
     assert client.last_request.cost > 0
 
 
-def sent_messages(request: httpx.Request) -> list[dict[str, str]]:
-    return json.loads(request.content)["messages"]
-
-
 @pytest.mark.parametrize(
     ("first", "second", "expected"),
     [
@@ -104,8 +117,10 @@ def test_keep_context_only_when_need_matches(
     result = client.send(1, "두 번째 질문", need=second)
 
     assert result.context_mode == expected
-    contents = [m["content"] for m in sent_messages(posts[1])]
-    assert ("답1" in contents) == (expected == "keep")
+    payload = json.loads(posts[1].content)
+    assert payload["input"] == "두 번째 질문"
+    assert (payload.get("previous_response_id") == "resp_답1") == (expected == "keep")
+    assert "messages" not in payload  # 이전 대화 전체를 다시 전송하지 않음
 
 
 def test_context_is_not_shared_between_runs() -> None:
@@ -155,7 +170,15 @@ def test_stop_before_send_blocks_until_clear() -> None:
         (200, {}, "FRONTIER_RESPONSE_INVALID"),
         (
             200,
-            {"choices": [{"message": {"content": ["wrong type"]}}]},
+            {
+                "id": "resp_invalid",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": ["wrong type"]}],
+                    }
+                ],
+            },
             "FRONTIER_RESPONSE_INVALID",
         ),
     ],
@@ -183,3 +206,200 @@ def test_external_timeout_keeps_its_code() -> None:
     with pytest.raises(FrontierError) as caught:
         client.send(1, "question")
     assert caught.value.code == "FRONTIER_TIMEOUT"
+
+
+def test_env_file_and_environment_keep_existing_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "FRONTIER_API_KEY=sk-file\n"
+        "FRONTIER_BASE_URL=https://file.test/v1\n"
+        "FRONTIER_MODEL=gpt-6-luna\n"
+        "FRONTIER_WEB_SEARCH=false\n",
+        encoding="utf-8",
+    )
+    posts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return reply("답", 1, 1)
+
+    client = FrontierClient(env_file=env_file, transport=httpx.MockTransport(handler))
+    client.send(1, "질문")
+    assert posts[-1].url == "https://file.test/v1/responses"
+    assert posts[-1].headers["Authorization"] == "Bearer sk-file"
+    assert "tools" not in json.loads(posts[-1].content)
+
+    monkeypatch.setenv("FRONTIER_API_KEY", "sk-environment")
+    monkeypatch.setenv("FRONTIER_BASE_URL", "https://environment.test/v1")
+    monkeypatch.setenv("FRONTIER_WEB_SEARCH", "true")
+    client = FrontierClient(env_file=env_file, transport=httpx.MockTransport(handler))
+    client.send(1, "질문")
+    assert posts[-1].url == "https://environment.test/v1/responses"
+    assert posts[-1].headers["Authorization"] == "Bearer sk-environment"
+    payload = json.loads(posts[-1].content)
+    assert payload["model"] == "gpt-6-luna"
+    assert payload["tools"] == [{"type": "web_search"}]
+    assert payload["tool_choice"] == "auto"
+    assert payload["store"] is True
+    assert payload["max_output_tokens"] == fc.MAX_OUTPUT_TOKENS
+    assert "max_tokens" not in payload
+
+
+def test_instructions_are_sent_on_every_chained_request() -> None:
+    from app.data.prompt_manager import PromptManager
+
+    posts: list[httpx.Request] = []
+    prompts = PromptManager()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return reply("답", 1, 1)
+
+    client = make_client(handler)
+    client.prompt_manager = prompts
+    client.send(1, "첫 질문", need=["역량"])
+    client.send(1, "두 번째 질문", need=["역량"])
+    for request in posts:
+        assert json.loads(request.content)["instructions"] == prompts.get_prompt(
+            fc.PromptIdx.FRONTIER
+        )
+
+
+def test_invalid_search_setting_fails_before_network(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("FRONTIER_WEB_SEARCH=maybe\n", encoding="utf-8")
+    with pytest.raises(FrontierError) as caught:
+        FrontierClient(env_file=env_file)
+    assert caught.value.code == "CONFIGURATION_ERROR"
+
+
+def test_search_usage_cache_and_citations_are_preserved() -> None:
+    data = reply("최신 정보 [1]", 1000, 100).json()
+    data["output"].insert(0, {"type": "web_search_call", "action": {"type": "search"}})
+    data["tool_usage"] = {"web_search": {"num_requests": 2}}
+    data["usage"]["input_tokens_details"] = {
+        "cached_tokens": 500,
+        "cache_write_tokens": 200,
+        "cache_write_tokens_details": {"ttl_12h_tokens": 50, "ttl_30m_tokens": 150},
+    }
+    data["usage"]["output_tokens_details"] = {"reasoning_tokens": 80}
+    data["output"][1]["content"][0]["annotations"] = [
+        {
+            "type": "url_citation",
+            "start_index": 6,
+            "end_index": 9,
+            "url": "https://example.com/news(1)",
+            "title": "출처 제목",
+        }
+    ]
+    client = make_client(lambda request: httpx.Response(200, json=data))
+
+    result = client.send(1, "질문")
+
+    assert result.answer == "최신 정보 [출처](https://example.com/news%281%29)"
+    assert (result.input_tokens, result.output_tokens) == (1000, 100)
+    assert result.cost == pytest.approx(
+        (300 * 0.1 + 500 * 0.01 + 150 * 0.125 + 50 * 0.25 + 100 * 0.5) / 1_000_000
+        + 0.02
+    )
+
+
+def test_long_context_prices_are_applied_per_attempt() -> None:
+    responses = iter([reply("", 200_000, 10), reply("답", 100_000, 20)])
+    client = make_client(lambda request: next(responses))
+    result = client.send(1, "질문")
+    assert result.cost == pytest.approx((300_000 * 0.1 + 30 * 0.5) / 1_000_000)
+    assert client._cost(300_000, 30) == pytest.approx(
+        (300_000 * 0.2 + 30 * 0.75) / 1_000_000
+    )
+
+
+@pytest.mark.parametrize(
+    "provider_code",
+    [
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "organization_usage_limit_exceeded",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+    ],
+)
+def test_quota_errors_are_not_retried(provider_code: str) -> None:
+    posts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        return httpx.Response(429, json={"error": {"code": provider_code}})
+
+    client = make_client(handler)
+    with pytest.raises(FrontierError) as caught:
+        client.send(1, "질문")
+    assert caught.value.code == "FRONTIER_QUOTA_EXCEEDED"
+    assert len(posts) == 1
+
+
+def test_incomplete_answer_does_not_advance_context() -> None:
+    posts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(request)
+        data = reply("첫 답" if len(posts) == 1 else "잘린 답", 10, 20).json()
+        if len(posts) > 1:
+            data["status"] = "incomplete"
+        return httpx.Response(200, json=data)
+
+    client = make_client(handler)
+    client.send(1, "첫 질문", need=["역량"])
+    with pytest.raises(FrontierError):
+        client.send(1, "다음 질문", need=["역량"])
+    assert client.last_request.output_tokens == 20 * fc.MAX_ATTEMPTS
+    assert client.last_request.status == "failed"
+    assert client._response_ids[1] == "resp_첫 답"
+    assert all(
+        json.loads(request.content)["previous_response_id"] == "resp_첫 답"
+        for request in posts[1:]
+    )
+
+
+def test_parallel_runs_keep_response_ids_separate() -> None:
+    barrier = Barrier(2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        barrier.wait(timeout=5)
+        if "previous_response_id" in payload:
+            assert payload["previous_response_id"] == f"resp_{payload['input']}"
+        return reply(payload["input"], 1, 1)
+
+    client = make_client(handler)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for _ in range(2):
+            futures = [
+                pool.submit(client.send, run_id, str(run_id), need=["역량"])
+                for run_id in (1, 2)
+            ]
+            assert [f.result(timeout=10).answer for f in futures] == ["1", "2"]
+
+
+def test_stop_during_request_does_not_restore_cleared_context() -> None:
+    started, release = Event(), Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        started.set()
+        assert release.wait(timeout=5)
+        return reply("답", 1, 1)
+
+    client = make_client(handler)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(client.send, 1, "질문", need=["역량"])
+            assert started.wait(timeout=5)
+            client.stop(1)
+            client.clear(1)
+            with pytest.raises(FrontierCancelledError):
+                future.result(timeout=5)
+            assert 1 not in client._response_ids
+    finally:
+        release.set()
