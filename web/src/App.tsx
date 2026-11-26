@@ -45,7 +45,12 @@ export default function App() {
   const sendingRef = useRef(false)
   /** 서버에서 질문·답변 기록을 불러온 채팅 */
   const loadedRef = useRef(new Set<string>())
-  const demoMonitorRef = useRef<{ chatId: string; turnId: string; startedAt: string } | null>(null)
+  const demoMonitorRef = useRef<{
+    chatId: string
+    turnId: string
+    targetId: string
+    startedAt: string
+  } | null>(null)
   const [monitorBlocked, setMonitorBlocked] = useState(false)
 
   useEffect(() => {
@@ -55,7 +60,7 @@ export default function App() {
     const turn = chat?.turns.find((t) => t.id === active.turnId)
     if (chat && turn)
       publishDemo({
-        target: { kind: 'demo', chatId: chat.id, id: active.turnId },
+        target: { kind: 'demo', chatId: chat.id, id: active.targetId },
         chatTitle: chat.title,
         turn,
         consent,
@@ -155,8 +160,14 @@ export default function App() {
     }
     const id = chatId
     if (backend.name === 'demo') {
-      demoMonitorRef.current = { chatId: id, turnId: turn.id, startedAt: new Date().toISOString() }
-      publishTarget({ kind: 'demo', chatId: id, id: turn.id })
+      const targetId = crypto.randomUUID()
+      demoMonitorRef.current = {
+        chatId: id,
+        turnId: turn.id,
+        targetId,
+        startedAt: new Date().toISOString(),
+      }
+      publishTarget({ kind: 'demo', chatId: id, id: targetId })
     }
     // 첫 질문을 보낼 때 채팅 제목을 정하고, 질문한 채팅을 목록 맨 위로 올린다
     setChats((cs) => {

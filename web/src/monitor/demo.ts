@@ -56,6 +56,7 @@ export function demoState(previous: MonitorState, snapshot: DemoSnapshot): Monit
     step: turn.step,
     events,
     connection: turn.running ? 'connected' : 'finished',
+    demoError: turn.notice?.kind === 'error',
     run: {
       runId: 0,
       chatId: 0,

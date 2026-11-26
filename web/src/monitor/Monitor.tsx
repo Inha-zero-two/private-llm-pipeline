@@ -29,6 +29,7 @@ function MonitorRun({
   hasTarget: boolean
 }) {
   const { run } = state
+  const runError = !!run?.errorCode || state.demoError === true
   const queries = run?.frontierQueries ?? []
   const count = queries.length
   const [selection, setSelection] = useState({ index: 0, count: 0, unseen: false })
@@ -101,7 +102,7 @@ function MonitorRun({
           errorStage: run.errorStage,
           notice: run.notice
             ? {
-                kind: run.errorCode ? 'error' : run.endReason === 'stopped' ? 'stopped' : 'limited',
+                kind: runError ? 'error' : run.endReason === 'stopped' ? 'stopped' : 'limited',
                 text: run.notice,
               }
             : null,
@@ -138,7 +139,7 @@ function MonitorRun({
   const displayStep = terminal ? '실행 종료' : (state.step ?? '시작 대기')
 
   return (
-    <div className={styles.monitor} data-error={!!run?.errorCode}>
+    <div className={styles.monitor} data-error={runError}>
       <section className={styles.left} aria-label="파이프라인 모니터">
         <section className={styles.status} aria-label="현재 실행 상태">
           <div className={styles.context}>
@@ -253,16 +254,12 @@ function MonitorRun({
             <Fact label="종료 사유" value={run ? (log?.endReason ?? '실행 중') : '—'} />
             <Fact
               label="오류"
-              value={run?.errorCode ? (run.notice ?? '상세 미제공') : '기록 없음'}
+              value={runError ? (run?.notice ?? '상세 미제공') : '기록 없음'}
               wide
-              error={!!run?.errorCode}
+              error={runError}
             />
-            <Fact label="오류 코드" value={run?.errorCode ?? '미제공'} error={!!run?.errorCode} />
-            <Fact
-              label="오류 발생 단계"
-              value={run?.errorStage ?? '미제공'}
-              error={!!run?.errorCode}
-            />
+            <Fact label="오류 코드" value={run?.errorCode ?? '미제공'} error={runError} />
+            <Fact label="오류 발생 단계" value={run?.errorStage ?? '미제공'} error={runError} />
             <Fact
               label="공개 동의 대기"
               value={

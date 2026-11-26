@@ -9,6 +9,7 @@ import {
 } from '../src/monitor/model.ts'
 import { parseTarget } from '../src/monitor/bridge.ts'
 import { followMonitor } from '../src/monitor/client.ts'
+import { demoState } from '../src/monitor/demo.ts'
 
 const run = (patch = {}) => ({
   runId: 7,
@@ -100,6 +101,31 @@ test('only previously supplied valid run IDs can become a remote monitor target'
     chatId: '1',
     runId: 7,
   })
+})
+
+test('demo errors retain their source status without inventing a server error code', () => {
+  const value = demoState(emptyMonitor(), {
+    target: { kind: 'demo', chatId: 'demo-1', id: 'unique-run' },
+    chatTitle: 'demo',
+    startedAt: '2026-11-26T00:00:00Z',
+    consent: null,
+    turn: {
+      id: 't1',
+      question: '오류',
+      running: false,
+      step: null,
+      frontier: [],
+      consents: [],
+      answer: '',
+      endReason: null,
+      errorCode: null,
+      errorStage: null,
+      notice: { kind: 'error', text: '데모 오류' },
+    },
+  })
+  assert.equal(value.demoError, true)
+  assert.equal(value.run.errorCode, null)
+  assert.equal(value.run.notice, '데모 오류')
 })
 
 class FakeSource {

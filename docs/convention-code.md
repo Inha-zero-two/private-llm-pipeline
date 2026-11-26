@@ -25,6 +25,9 @@ private-llm-pipeline/
 └── web/         화면 (React · Vite · TypeScript)
 ```
 
+웹의 실행 모니터는 `web/src/monitor/`로 분리합니다. `App.tsx`에는 창 열기와 실행 ID 전달만 연결하며,
+모니터의 조회·SSE 해제는 실행 중지와 구분합니다. 데이터 흐름과 화면 동작은 [실행 모니터](monitor.md)에 있습니다.
+
 ### 서버
 
 모듈은 역할별로 폴더를 나눕니다.

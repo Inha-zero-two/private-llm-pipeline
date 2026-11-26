@@ -57,6 +57,8 @@ export type MonitorState = {
   /** 연결 오류는 실행 오류와 분리한다 */
   connection: 'loading' | 'connected' | 'reconnecting' | 'finished' | 'missing'
   connectionMessage: string | null
+  /** 서버 코드가 없는 브라우저 데모 오류를 임의 코드 없이 표시한다 */
+  demoError?: boolean
 }
 
 export type DemoSnapshot = {
