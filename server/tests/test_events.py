@@ -38,7 +38,7 @@ def test_to_screen_drops_internal_records_and_run_id() -> None:
     assert to_screen(event(3, "run_error", {"code": "X"})) is None
     assert to_screen(event(4, "step", {"run_id": 1, "label": "검출 중"})) == (
         "step",
-        {"label": "검출 중"},
+        {"label": "검출 중", "createdAt": "2026-11-17T00:00:00+00:00"},
     )
 
 
@@ -72,7 +72,10 @@ def test_running_stream_replays_then_waits_for_new_events() -> None:
     assert out[2] == (
         'event: replay_complete\ndata: {"lastEventId": 3, "pendingConsentId": 7}\n\n'
     )
-    assert out[3:] == ['id: 5\nevent: done\ndata: {"endReason": "stopped"}\n\n']
+    assert out[3:] == [
+        'id: 5\nevent: done\ndata: {"endReason": "stopped", '
+        '"createdAt": "2026-11-17T00:00:00+00:00"}\n\n'
+    ]
 
 
 def test_finished_stream_sends_only_after_id_without_replay_complete() -> None:

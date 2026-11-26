@@ -126,6 +126,7 @@ class FrontierQueryOut(ApiModel):
     request: str
     answer: str | None
     status: Literal["ok", "failed", "uncertain"]
+    created_at: str
 
 
 class ConsentOut(ApiModel):

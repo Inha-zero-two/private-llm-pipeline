@@ -443,7 +443,9 @@ class Main:
                 f"외부 모델에 묻는 중 ({frontier_calls + 1}회차)",
                 ErrorStage.FRONTIER,
             )
-            reply = await self._send_frontier(run_id, request_text, pd_table, plan.need)
+            reply = await self._send_frontier(
+                run_id, request_text, pd_table, plan.need, frontier_calls + 1
+            )
             if reply is None:
                 return EndReason.OFFLINE
             frontier_calls += 1
@@ -457,7 +459,12 @@ class Main:
             # 다시 2)로 돌아가 판단한다.
 
     async def _send_frontier(
-        self, run_id: int, request_text: str, pd_table: PDTable, need: list[str]
+        self,
+        run_id: int,
+        request_text: str,
+        pd_table: PDTable,
+        need: list[str],
+        round_: int,
     ) -> FrontierReply | None:
         """6) 전송 직전에 질의를 기록하고 보낸 뒤 결과를 기록한다. 연결 불가면 None.
 
@@ -471,6 +478,15 @@ class Main:
         )
         started = monotonic()
         try:
+            await self._emit(
+                "frontier_request",
+                {
+                    "run_id": run_id,
+                    "queryId": query_id,
+                    "round": round_,
+                    "request": request_text,
+                },
+            )
             # need가 직전 회차와 같을 때만 이전 프론티어 대화를 이어 보낸다.
             reply = await self._call(
                 self.frontier_client.send, run_id, request_text, pd_table, need
@@ -487,6 +503,16 @@ class Main:
                     status="failed",
                     elapsed_ms=(monotonic() - started) * 1000,
                 ),
+            )
+            await self._emit(
+                "frontier_result",
+                {
+                    "run_id": run_id,
+                    "queryId": query_id,
+                    "round": round_,
+                    "status": "failed",
+                    "answer": None,
+                },
             )
             if isinstance(error, asyncio.CancelledError):
                 raise
@@ -528,6 +554,16 @@ class Main:
                 cost=reply.cost,
                 elapsed_ms=reply.elapsed_ms,
             ),
+        )
+        await self._emit(
+            "frontier_result",
+            {
+                "run_id": run_id,
+                "queryId": query_id,
+                "round": round_,
+                "status": "ok",
+                "answer": reply.answer,
+            },
         )
         return reply
 
@@ -718,7 +754,7 @@ class Main:
     ) -> None:
         """화면의 '현재 동작' 문구를 바꾼다. (API-06 step 이벤트)"""
         self._runs[run_id].stage = stage
-        await self._emit("step", {"run_id": run_id, "label": label})
+        await self._emit("step", {"run_id": run_id, "label": label, "stage": stage})
 
     def _run_config(self) -> RunConfig:
         """start_turn()에 함께 저장할 이번 실행의 설정값."""

@@ -25,7 +25,16 @@ if TYPE_CHECKING:
 TERMINAL_EVENTS = ("done", "error")
 # 화면(API-06)으로 보내는 이벤트. run·run_error·llm_call 등 내부 기록은 보내지 않는다.
 SCREEN_EVENTS = frozenset(
-    {"step", "token", "frontier", "consent_request", "consent_result", *TERMINAL_EVENTS}
+    {
+        "step",
+        "token",
+        "frontier",
+        "frontier_request",
+        "frontier_result",
+        "consent_request",
+        "consent_result",
+        *TERMINAL_EVENTS,
+    }
 )
 # 새 이벤트가 없을 때 연결 유지용 주석을 보내는 간격(초)
 KEEPALIVE_SECONDS = 15.0
@@ -68,6 +77,7 @@ def to_screen(event: RunEvent) -> tuple[str, dict[str, Any]] | None:
     if event.type not in SCREEN_EVENTS or not isinstance(event.payload, dict):
         return None
     data = {key: value for key, value in event.payload.items() if key != "run_id"}
+    data["createdAt"] = event.created_at
     if event.type == "error":
         data["message"] = safe_message(str(data.get("code", "INTERNAL_ERROR")))
     return event.type, data
