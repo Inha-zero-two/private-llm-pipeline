@@ -655,7 +655,7 @@ def test_frontier_request_and_stream() -> None:
     assert json.loads(request.content) == {
         "model": "bedrock-test",
         "messages": build_messages([Turn(question=Q1, answer=A1)], Q2),
-        "max_tokens": 4096,
+        "max_completion_tokens": 4096,
         "stream": True,
         "stream_options": {"include_usage": True},
     }

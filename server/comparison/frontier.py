@@ -212,7 +212,7 @@ class FrontierStandalone:
             json={
                 "model": self._model,
                 "messages": messages,
-                "max_tokens": MAX_OUTPUT_TOKENS,
+                "max_completion_tokens": MAX_OUTPUT_TOKENS,
                 "stream": True,
                 "stream_options": {"include_usage": True},
             },
