@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { ReactNode } from 'react'
 import { Markdown } from '@/components/Markdown'
 import type { Turn } from '@/types'
 import styles from './ComparisonPanel.module.css'
@@ -6,6 +7,7 @@ import type { ComparisonItem, ComparisonKind, ComparisonState } from './types'
 import { formatSeconds, panelView, STATUS_LABEL, usedPairsLabel } from './view'
 
 type Props = {
+  resizeHandle?: ReactNode
   state: ComparisonState
   chatId: string | null
   /** 결과를 보여 줄 질문 */
@@ -18,7 +20,8 @@ type Props = {
 /** 오른쪽 위아래 비교 패널. 위는 로컬 단독, 아래는 프론티어 단독 */
 export function ComparisonPanel(props: Props) {
   return (
-    <aside className={styles.panel} aria-label="모델 비교 결과">
+    <aside id="model-comparison" className={styles.panel} aria-label="모델 비교 결과">
+      {props.resizeHandle}
       <Section {...props} kind="local" />
       <Section {...props} kind="frontier" />
     </aside>

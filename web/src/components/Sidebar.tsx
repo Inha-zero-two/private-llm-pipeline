@@ -34,7 +34,13 @@ export function Sidebar({
   return (
     <>
       <div className={styles.scrim} data-open={open} onClick={onToggle} />
-      <aside className={styles.sidebar} data-open={open} aria-label="채팅 목록" inert={!open}>
+      <aside
+        id="chat-sidebar"
+        className={styles.sidebar}
+        data-open={open}
+        aria-label="채팅 목록"
+        inert={!open}
+      >
         <div className={styles.header}>
           <span className={styles.brand}>
             <ShieldIcon size={20} />

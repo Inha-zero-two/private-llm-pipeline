@@ -75,7 +75,7 @@
   flex: 1;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(280px, 27vw, 360px);
+  grid-template-columns: minmax(0, 1fr) var(--comparison-w, clamp(280px, 27vw, 360px));
 }
 
 /* 입력창 위의 안내 (비교 진행 중, 보내지 못함) */

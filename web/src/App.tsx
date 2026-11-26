@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { ApiError, backend, type RunHandle } from '@/backend'
 import type { RunHandlers } from '@/backend/types'
 import { Composer } from '@/components/Composer'
@@ -9,6 +10,8 @@ import dialog from '@/components/Dialog.module.css'
 import { PlusIcon, ShieldIcon, SidebarIcon } from '@/components/icons'
 import { PrivacySettingsDialog } from '@/components/PrivacySettingsDialog'
 import { Sidebar } from '@/components/Sidebar'
+import { ResizeHandle } from '@/components/ResizeHandle'
+import { usePanelSizes } from '@/layout/usePanelSizes'
 import { openMonitor, publishDemo, publishTarget, readTarget } from '@/monitor/bridge'
 import { PrivacyStatus } from '@/components/PrivacyStatus'
 import { ComparisonPanel } from '@/comparison/ComparisonPanel'
@@ -40,6 +43,7 @@ export default function App() {
   /** 비교 패널에 보여 줄 질문. null이면 최근 질문 */
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
   const { state: comparison, tracker } = useComparison(backend.name === 'remote')
+  const panels = usePanelSizes(sidebarOpen, comparison.enabled)
   const runRef = useRef<RunHandle | null>(null)
   /** 질문을 보내는 중(실행 ID를 받기 전)에 다시 보내지 않도록 막는다 */
   const sendingRef = useRef(false)
@@ -268,7 +272,15 @@ export default function App() {
   )
 
   return (
-    <div className={styles.app}>
+    <div
+      className={styles.app}
+      style={
+        {
+          '--sidebar-w': `${panels.sidebar}px`,
+          '--comparison-w': `${panels.comparison}px`,
+        } as CSSProperties
+      }
+    >
       <Sidebar
         open={sidebarOpen}
         chats={chats}
@@ -280,7 +292,18 @@ export default function App() {
         onSelect={openChat}
         onDelete={setDeleteTarget}
         onOpenSettings={() => setSettingsOpen(true)}
-      />
+      >
+        <ResizeHandle
+          label="채팅 목록 너비 조절"
+          controls="chat-sidebar"
+          side="right"
+          width={panels.sidebar}
+          min={panels.sidebarMin}
+          max={panels.sidebarMax}
+          onResize={(width) => panels.resize('sidebar', width)}
+          onReset={() => panels.reset('sidebar')}
+        />
+      </Sidebar>
 
       <div className={styles.workspace} data-comparison={comparison.enabled}>
         <main className={styles.main}>
@@ -346,6 +369,18 @@ export default function App() {
         </main>
         {comparison.enabled && (
           <ComparisonPanel
+            resizeHandle={
+              <ResizeHandle
+                label="모델 비교 패널 너비 조절"
+                controls="model-comparison"
+                side="left"
+                width={panels.comparison}
+                min={panels.comparisonMin}
+                max={panels.comparisonMax}
+                onResize={(width) => panels.resize('comparison', width)}
+                onReset={() => panels.reset('comparison')}
+              />
+            }
             state={comparison}
             chatId={currentChatId}
             turn={shownTurn}
