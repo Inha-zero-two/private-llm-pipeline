@@ -9,7 +9,7 @@ import dialog from '@/components/Dialog.module.css'
 import { PlusIcon, ShieldIcon, SidebarIcon } from '@/components/icons'
 import { PrivacySettingsDialog } from '@/components/PrivacySettingsDialog'
 import { Sidebar } from '@/components/Sidebar'
-import { RunLogPanel } from '@/components/RunLogPanel'
+import { openMonitor, publishDemo, publishTarget, readTarget } from '@/monitor/bridge'
 import { PrivacyStatus } from '@/components/PrivacyStatus'
 import { ComparisonPanel } from '@/comparison/ComparisonPanel'
 import { useComparison } from '@/comparison/useComparison'
@@ -45,6 +45,23 @@ export default function App() {
   const sendingRef = useRef(false)
   /** 서버에서 질문·답변 기록을 불러온 채팅 */
   const loadedRef = useRef(new Set<string>())
+  const demoMonitorRef = useRef<{ chatId: string; turnId: string; startedAt: string } | null>(null)
+  const [monitorBlocked, setMonitorBlocked] = useState(false)
+
+  useEffect(() => {
+    const active = demoMonitorRef.current
+    if (backend.name !== 'demo' || !active) return
+    const chat = chats.find((c) => c.id === active.chatId)
+    const turn = chat?.turns.find((t) => t.id === active.turnId)
+    if (chat && turn)
+      publishDemo({
+        target: { kind: 'demo', chatId: chat.id, id: active.turnId },
+        chatTitle: chat.title,
+        turn,
+        consent,
+        startedAt: active.startedAt,
+      })
+  }, [chats, consent])
 
   const current = chats.find((c) => c.id === currentChatId) ?? null
 
@@ -96,6 +113,7 @@ export default function App() {
         if (running && !runRef.current) {
           setRunningChatId(chatId)
           runRef.current = backend.attachRun(running.runId!, handlersFor(chatId, running.id))
+          publishTarget({ kind: 'remote', chatId, runId: running.runId! })
         }
       })
       .catch((err) => {
@@ -136,6 +154,10 @@ export default function App() {
       errorStage: null,
     }
     const id = chatId
+    if (backend.name === 'demo') {
+      demoMonitorRef.current = { chatId: id, turnId: turn.id, startedAt: new Date().toISOString() }
+      publishTarget({ kind: 'demo', chatId: id, id: turn.id })
+    }
     // 첫 질문을 보낼 때 채팅 제목을 정하고, 질문한 채팅을 목록 맨 위로 올린다
     setChats((cs) => {
       const chat = cs.find((c) => c.id === id) ?? { id, title: '', turns: [] }
@@ -150,7 +172,10 @@ export default function App() {
     try {
       const run = await backend.startRun(id, text, setting, handlers)
       runRef.current = run
-      if (run.runId !== undefined) tracker.started(id, run.runId)
+      if (run.runId !== undefined) {
+        tracker.started(id, run.runId)
+        publishTarget({ kind: 'remote', chatId: id, runId: run.runId })
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         // 다른 출력이 끝나지 않았다. 질문을 지우지 않고 입력창에 되돌린다
@@ -184,6 +209,7 @@ export default function App() {
     setChats((cs) => cs.filter((c) => c.id !== target.id))
     loadedRef.current.delete(target.id)
     tracker.forget(target.id)
+    if (readTarget()?.chatId === target.id) publishTarget(null)
     if (target.id === currentChatId) openChat(null)
   }
 
@@ -243,13 +269,7 @@ export default function App() {
         onSelect={openChat}
         onDelete={setDeleteTarget}
         onOpenSettings={() => setSettingsOpen(true)}
-      >
-        <RunLogPanel
-          turns={current?.turns ?? []}
-          consent={running ? consent : null}
-          demo={backend.name === 'demo'}
-        />
-      </Sidebar>
+      />
 
       <div className={styles.workspace} data-comparison={comparison.enabled}>
         <main className={styles.main}>
@@ -273,7 +293,18 @@ export default function App() {
               </>
             )}
             <h1 className={styles.title}>{current?.title ?? ''}</h1>
+            <button
+              className={styles.monitorButton}
+              onClick={() => setMonitorBlocked(!openMonitor())}
+            >
+              모니터 창 열기
+            </button>
           </header>
+          {monitorBlocked && (
+            <p className={styles.waiting} role="status">
+              팝업이 차단되었습니다. 이 사이트의 팝업을 허용한 뒤 다시 열어 주세요.
+            </p>
+          )}
           <PrivacyStatus
             setting={setting}
             turn={current?.turns.at(-1)}

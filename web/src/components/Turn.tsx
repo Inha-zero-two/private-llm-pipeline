@@ -1,7 +1,6 @@
-import { useState } from 'react'
 import { elapsedLabel } from '@/backend/elapsed'
-import type { ConsentRecord, FrontierQuery, Turn as TurnData } from '@/types'
-import { ChevronIcon, GlobeIcon, InfoIcon, ShieldIcon } from './icons'
+import type { ConsentRecord, Turn as TurnData } from '@/types'
+import { InfoIcon, ShieldIcon } from './icons'
 import { Markdown } from './Markdown'
 import styles from './Turn.module.css'
 
@@ -36,8 +35,6 @@ export function Turn({ turn, selected, onSelect }: Props) {
         {turn.consents.map((c, i) => (
           <ConsentLine key={i} record={c} />
         ))}
-
-        {turn.frontier.length > 0 && <FrontierToggle queries={turn.frontier} />}
 
         {turn.running && turn.step && (
           <div className={styles.step} role="status">
@@ -108,39 +105,6 @@ function ConsentLine({ record }: { record: ConsentRecord }) {
           </li>
         ))}
       </ul>
-    </div>
-  )
-}
-
-function FrontierToggle({ queries }: { queries: FrontierQuery[] }) {
-  // 기본은 닫힘 (설계서 9장)
-  const [open, setOpen] = useState(false)
-
-  return (
-    <div className={styles.frontier}>
-      <button
-        className={styles.frontierHeader}
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-      >
-        <GlobeIcon size={15} />
-        외부 모델 질의 · 응답 {queries.length}건
-        <ChevronIcon size={14} className={styles.chevron} data-open={open} />
-      </button>
-
-      {open && (
-        <ol className={styles.frontierList}>
-          {queries.map((q) => (
-            <li key={q.round} className={styles.frontierItem}>
-              <div className={styles.frontierRound}>{q.round}회차</div>
-              <div className={styles.frontierLabel}>보낸 요청문</div>
-              <p className={styles.frontierText}>{q.request}</p>
-              <div className={styles.frontierLabel}>받은 응답</div>
-              <p className={styles.frontierText}>{q.answer}</p>
-            </li>
-          ))}
-        </ol>
-      )}
     </div>
   )
 }

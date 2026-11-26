@@ -45,6 +45,21 @@
   font-weight: 550;
 }
 
+.monitorButton {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.monitorButton:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 /* 첫 화면: 입력창을 가운데에 둔다 */
 .empty {
   flex: 1;
