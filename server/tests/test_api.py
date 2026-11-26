@@ -111,7 +111,9 @@ class Gateway:
             return httpx.Response(200, json={"data": []})
         body = json.loads(request.content)
         assert request.url.path.endswith("/responses")
-        self.requests.append(body["input"])
+        assert body["store"] is False
+        assert "previous_response_id" not in body
+        self.requests.append(body["input"][-1]["content"])
         return httpx.Response(
             200,
             json={

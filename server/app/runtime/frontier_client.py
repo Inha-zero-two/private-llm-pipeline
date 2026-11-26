@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty, Queue
@@ -149,8 +150,8 @@ class FrontierClient:
         self.last_request: FrontierQuery | None = None
         self.connection_failure: ErrorInfo | None = None
         self._lock = Lock()  # 실행별 상태 변경용 잠금
-        # 실행별 마지막 성공 응답 ID. 이전 대화는 OpenAI가 이어 붙인다.
-        self._response_ids: dict[int, str] = {}
+        # 실행별 성공한 요청·응답 이력. Responses 입력 항목을 백엔드가 직접 관리한다.
+        self._contexts: dict[int, list[dict[str, Any]]] = {}
         # 실행별 대화가 다룬 need. 기존 keep/reset 판단을 그대로 유지한다.
         self._context_needs: dict[int, frozenset[str]] = {}
         self._rounds: dict[int, int] = {}  # 실행 ID별 질의 횟수
@@ -239,7 +240,7 @@ class FrontierClient:
         if not need:
             return "reset"
         with self._lock:
-            has_history = bool(self._response_ids.get(run_id))
+            has_history = bool(self._contexts.get(run_id))
             previous = self._context_needs.get(run_id)
         return "keep" if has_history and previous == frozenset(need) else "reset"
 
@@ -288,20 +289,20 @@ class FrontierClient:
         context_mode = self.decide_context(run_id, need)
         with self._lock:
             if context_mode == "reset":
-                self._response_ids.pop(run_id, None)
+                self._contexts.pop(run_id, None)
                 self._context_needs.pop(run_id, None)
-            previous_response_id = self._response_ids.get(run_id)
+            history = deepcopy(self._contexts.get(run_id, []))
             self._rounds[run_id] = self._rounds.get(run_id, 0) + 1
             round_ = self._rounds[run_id]
+        user_input = {"role": "user", "content": request_text}
         payload: dict[str, Any] = {
             "model": self.model,
             "instructions": self._system_prompt(),
-            "input": request_text,
+            "input": [*history, user_input],
             "max_output_tokens": self._max_tokens,
-            "store": True,
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
         }
-        if previous_response_id:
-            payload["previous_response_id"] = previous_response_id
         if self._web_search:
             payload.update(tools=[{"type": "web_search"}], tool_choice="auto")
         items = [(i.pd_id, i.allowed, i.allowed_by) for i in pd_table or []]
@@ -310,9 +311,7 @@ class FrontierClient:
         # 모든 시도(빈 답변 포함)의 사용량 합계. 실패·취소여도 쓴 만큼 기록
         usage = _Usage()
         try:
-            answer, response_id = self._post_with_retry(
-                run_id, payload, stop_event, usage
-            )
+            answer, output = self._post_with_retry(run_id, payload, stop_event, usage)
             status = "ok"
         except FrontierCancelledError:
             status = "cancelled"
@@ -343,7 +342,9 @@ class FrontierClient:
             # 성공한 질의만 다음 판단에 쓸 대화로 저장. 중지된 실행은 clear()가 먼저
             # 지웠을 수 있으므로 다시 만들지 않음
             if not stop_event.is_set():
-                self._response_ids[run_id] = response_id
+                # 검색·추론 항목과 원본 출처를 포함한 output을 그대로 이어 보낸다.
+                # 화면용 Markdown 답변으로 대체하면 도구·추론 맥락을 잃는다.
+                self._contexts[run_id] = [*history, user_input, *deepcopy(output)]
                 if need:
                     self._context_needs[run_id] = frozenset(need)
         return FrontierReply(
@@ -368,7 +369,7 @@ class FrontierClient:
         payload: dict[str, Any],
         stop_event: Event,
         usage: _Usage,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, list[dict[str, Any]]]:
         """일시 오류만 재시도하며 전송하고 답변 반환.
 
         usage: 응답마다 토큰 수·비용을 더해 넣을 객체. 빈 답변도 과금될 수 있으므로
@@ -412,9 +413,6 @@ class FrontierClient:
                 data = response.json()
                 self._add_usage(usage, data)
                 answer = self._answer(data)
-                response_id = data["id"]
-                if not isinstance(response_id, str) or not response_id:
-                    raise TypeError("Response ID must be non-empty text")
             except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
                 raise FrontierError(
                     f"응답 형식 오류: {exc}", ErrorCode.FRONTIER_RESPONSE_INVALID
@@ -425,7 +423,7 @@ class FrontierClient:
                     "완료되지 않았거나 빈 답변", ErrorCode.FRONTIER_RESPONSE_INVALID
                 )
                 continue
-            return answer, response_id
+            return answer, data["output"]
         raise FrontierError(
             f"전송 {MAX_ATTEMPTS}회 실패: {last_error}",
             last_error.code
@@ -594,16 +592,11 @@ class FrontierClient:
     def clear(self, run_id: int) -> None:
         """실행이 끝나면 그 실행의 프론티어 대화와 질의 횟수 삭제."""
         with self._lock:
-            self._response_ids.pop(run_id, None)
+            self._contexts.pop(run_id, None)
             self._context_needs.pop(run_id, None)
             self._rounds.pop(run_id, None)
             self._stopped.discard(run_id)
 
     def _log_query(self, query: FrontierQuery) -> None:
-        """질의 기록 저장. DB 저장은 ChatManager 구현 후 연결.
-
-        저장 대상: frontier_queries 한 건과 전송 당시 허용 상태(query_items).
-        저장 제외: API 키, 시스템 프롬프트.
-        """
+        """최근 질의 진단용 기록. DB 저장은 Main._send_frontier가 담당한다."""
         self.last_request = query
-        # self.chat_manager.save_frontier_query(query)
