@@ -2,7 +2,13 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { elapsedLabel, pipelineElapsed } from '../src/backend/elapsed.ts'
 import { createTracker } from '../src/comparison/tracker.ts'
-import { panelView, sendState, turnToShow, usedPairsLabel } from '../src/comparison/view.ts'
+import {
+  panelView,
+  sendsRawQuestion,
+  sendState,
+  turnToShow,
+  usedPairsLabel,
+} from '../src/comparison/view.ts'
 
 const item = (patch = {}) => ({
   runId: 1,
@@ -322,4 +328,48 @@ test('failed loading is reported and cleared by the next success', async (t) => 
   assert.deepEqual(tracker.get().failedChats, {})
   tracker.forget('7')
   assert.deepEqual(tracker.get().chats, {})
+})
+
+test('the privacy hint follows whether the question also goes to comparison models', () => {
+  assert.equal(sendsRawQuestion(state({ enabled: false }), null), false)
+  assert.equal(sendsRawQuestion(state({ enabled: false }), '7'), false)
+  const enabled = (chats = {}) => state({ enabled: true, chats })
+  assert.equal(sendsRawQuestion(enabled(), null), true)
+  assert.equal(sendsRawQuestion(enabled(), '7'), true)
+  assert.equal(sendsRawQuestion(enabled({ 7: { registered: true, items: [] } }), '7'), true)
+  assert.equal(sendsRawQuestion(enabled({ 7: { registered: false, items: [] } }), '7'), false)
+})
+
+test('an older list response arriving late is ignored', async (t) => {
+  const replies = []
+  const { tracker } = setup(t, {
+    [STATUS]: on,
+    [CHAT]: () => new Promise((resolve) => replies.push(resolve)),
+  })
+  await tracker.sync()
+  const first = tracker.load('7')
+  const second = tracker.load('7')
+  replies[1]({ registered: true, items: [item({ status: 'ok', answer: '새 답' })] })
+  await second
+  replies[0]({ registered: true, items: [] })
+  await first
+  assert.deepEqual(
+    tracker.get().chats[7].items.map((i) => i.answer),
+    ['새 답'],
+  )
+})
+
+test('a chat opened before the feature turned on is loaded once it does', async (t) => {
+  const routes = { [STATUS]: { enabled: false, running: null } }
+  const { tracker, calls } = setup(t, routes)
+  tracker.open('7')
+  assert.equal(calls.length, 0)
+  routes[STATUS] = on
+  routes[CHAT] = { registered: true, items: [item({ status: 'ok' })] }
+  await tracker.sync()
+  await flush()
+  assert.equal(tracker.get().chats[7].items.length, 1)
+  await tracker.sync()
+  await flush()
+  assert.equal(calls.filter((c) => c === `GET /api/chats/7/comparisons`).length, 1)
 })

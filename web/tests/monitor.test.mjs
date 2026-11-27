@@ -128,6 +128,36 @@ test('demo errors retain their source status without inventing a server error co
   assert.equal(value.run.notice, '데모 오류')
 })
 
+test('a cancelled demo consent is logged as cancelled', () => {
+  const snapshot = (consents) => ({
+    target: { kind: 'demo', chatId: 'demo-1', id: 'run' },
+    chatTitle: 'demo',
+    startedAt: '2026-11-26T00:00:00Z',
+    consent: null,
+    turn: {
+      id: 't1',
+      question: 'q',
+      running: true,
+      step: null,
+      frontier: [],
+      consents,
+      answer: '',
+      endReason: null,
+      errorCode: null,
+      errorStage: null,
+      notice: null,
+    },
+  })
+  const cancelled = { kind: 'cancelled', items: [{ id: 'p1', label: '이름', text: '홍' }] }
+  const answered = { kind: 'answered', answer: '네', decisions: [] }
+  let value = demoState(emptyMonitor(), snapshot([cancelled]))
+  value = demoState(value, snapshot([cancelled, answered]))
+  assert.deepEqual(
+    value.events.filter((e) => e.type === 'consent_result').map((e) => e.text),
+    ['공개 동의 요청 취소', '공개 동의 응답 기록'],
+  )
+})
+
 class FakeSource {
   static CLOSED = 2
   static latest

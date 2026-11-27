@@ -95,3 +95,21 @@ export function sendState(
   }
   return { running, comparing: comparisonHere && pipelineChatId === null, blockedReason }
 }
+
+// 개인정보 안내. 비교 대상 채팅에서는 질문 원문이 동의 확인 전에 비교 모델 서버로도 간다
+
+export const PIPELINE_HINT =
+  '질문 원문과 개인정보는 이 PC의 로컬 모델만 봅니다. 외부 모델에는 검사를 통과한 요청문만 보냅니다.'
+export const COMPARISON_HINT =
+  '모델 비교가 켜져 있어 질문 원문이 동의 확인 없이 비교용 모델 서버(로컬 단독·프론티어 단독)로도 전송됩니다.'
+export const PIPELINE_HERO = '개인정보는 이 PC 안에서 지키고, 필요한 도움만 외부 모델에 물어봅니다.'
+export const COMPARISON_HERO =
+  '모델 비교가 켜져 있습니다. 새 채팅의 질문 원문은 동의 확인 없이 비교용 모델 서버로도 전송됩니다.'
+
+/** 이 채팅에 보낼 질문 원문이 비교 모델에도 가는지. 아직 모르면 간다고 안내한다 */
+export function sendsRawQuestion(state: ComparisonState, chatId: string | null): boolean {
+  if (!state.enabled) return false
+  // 켜진 상태에서 새로 만드는 채팅은 비교 대상이 된다
+  if (chatId === null) return true
+  return state.chats[chatId]?.registered ?? true
+}

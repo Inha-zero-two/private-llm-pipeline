@@ -80,6 +80,8 @@ class _Output:
     turns: list[Turn] = field(default_factory=list)
     text: list[str] = field(default_factory=list)
     running: bool = False
+    # 답은 정해졌고 저장만 남았다. 중지해도 결과가 바뀌지 않는다
+    saving: bool = False
     stopped: bool = False
     cancellation: Cancellation = field(default_factory=Cancellation)
     wake: asyncio.Event = field(default_factory=asyncio.Event)
@@ -191,9 +193,10 @@ class ComparisonManager:
             await self._load(job, KINDS)
             self._launch(job)
             launched = True
-        except Exception:
+        except BaseException:
+            # 요청이 취소되어도(CancelledError) running으로 남은 줄을 정리한다
             if begun:
-                await self._abandon(run_id)
+                await asyncio.shield(self._abandon(run_id))
             raise
         finally:
             if not launched:
@@ -217,10 +220,10 @@ class ComparisonManager:
         if not job.ready.is_set():
             job.stop_requested = True  # 준비가 끝나는 대로 모델을 부르지 않고 끝낸다
             return True
-        running = [o for o in job.outputs.values() if o.running]
-        for output in running:
+        stoppable = [o for o in job.outputs.values() if o.running and not o.saving]
+        for output in stoppable:
             output.stop()
-        return bool(running)
+        return bool(stoppable)
 
     async def retry(self, run_id: int, kind: Kind) -> None:
         """실패·잘림·중지로 끝난 모델 하나를 같은 줄에서 다시 실행한다."""
@@ -242,9 +245,9 @@ class ComparisonManager:
             await self._load(job, (kind,))
             self._launch(job)
             launched = True
-        except Exception:
+        except BaseException:
             if restarted:
-                await self._abandon(run_id)
+                await asyncio.shield(self._abandon(run_id))
             raise
         finally:
             if not launched:
@@ -416,6 +419,7 @@ class ComparisonManager:
             # 시간 초과·오류로 끝났을 때 남은 연결을 닫는다. 정상 종료면 닫을 것이 없다.
             output.cancellation.cancel()
         result.elapsed_ms = round((monotonic() - started) * 1000, 1)
+        output.saving = True
         ended_at = await self._save(output.record, result)
         output.record = output.record.model_copy(
             update={**dict(result), "ended_at": ended_at}

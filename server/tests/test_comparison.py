@@ -1104,6 +1104,70 @@ def test_stop_during_preparation_never_calls_models(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_stop_is_not_accepted_when_only_saving_is_left(tmp_path: Path) -> None:
+    """답이 정해지고 저장만 남았으면 중지해도 결과가 바뀌지 않으므로 받지 않는다."""
+
+    async def scenario() -> None:
+        bench = Bench(tmp_path)
+        await bench.manager.on_chat_created(bench.chat_id)
+        store = bench.manager._store
+        entered, proceed = threading.Event(), threading.Event()
+        saving: list[Any] = []
+        original = store.finish
+
+        def slow_finish(*args: Any) -> str:
+            saving.append(args)
+            if len(saving) == 2:  # 두 모델 모두 답을 정하고 저장 중이다
+                entered.set()
+            assert proceed.wait(5)
+            return original(*args)
+
+        store.finish = slow_finish  # type: ignore[method-assign]
+        run = await bench.start()
+        await asyncio.to_thread(entered.wait, 5)
+        assert bench.manager.stop(run) is False
+        proceed.set()
+        async for _ in bench.manager.events(run):
+            pass
+        assert {r.status.value for r in store.list_run(run)} == {"ok"}
+        await bench.close()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_start_does_not_leave_running_rows(tmp_path: Path) -> None:
+    """줄을 추가한 뒤 요청이 취소되어도 running으로 남기지 않는다."""
+
+    async def scenario() -> None:
+        bench = Bench(tmp_path)
+        await bench.manager.on_chat_created(bench.chat_id)
+        store = bench.manager._store
+        entered = threading.Event()
+        original = store.list_run
+
+        def slow_list_run(run_id: int) -> Any:
+            entered.set()
+            time.sleep(0.2)
+            return original(run_id)
+
+        store.list_run = slow_list_run  # type: ignore[method-assign]
+        task = asyncio.create_task(bench.start())
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        store.list_run = original  # type: ignore[method-assign]
+        records = store.list_run(bench.run_id)
+        assert {(r.status.value, r.error_code) for r in records} == {
+            ("failed", ErrorCode.INTERNAL)
+        }
+        assert bench.manager.busy() is None and bench.manager.try_reserve()
+        bench.manager.release()
+        await bench.close()
+
+    asyncio.run(scenario())
+
+
 def test_keepalive_when_nothing_happens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

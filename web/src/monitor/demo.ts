@@ -45,8 +45,9 @@ export function demoState(previous: MonitorState, snapshot: DemoSnapshot): Monit
   for (const q of queries)
     if (!previous.run?.frontierQueries.some((p) => p.round === q.round))
       append('frontier_result', '외부 응답 수신', q.round)
-  if (turn.consents.length > (previous.run?.consents.filter((c) => c.result).length ?? 0))
-    append('consent_result', '공개 동의 응답 기록')
+  const recorded = previous.run?.consents.filter((c) => c.result).length ?? 0
+  for (const c of turn.consents.slice(recorded))
+    append('consent_result', c.kind === 'cancelled' ? '공개 동의 요청 취소' : '공개 동의 응답 기록')
   if (!turn.running && previous.run?.status !== 'finished')
     append(turn.notice?.kind === 'error' ? 'error' : 'done', turn.notice?.text ?? '실행 종료')
   return {

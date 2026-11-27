@@ -312,7 +312,7 @@ data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답�
 
 ### 응답 필드와 JSON 예시
 
-성공: `200 OK`. 본문과 JSON 필드가 없다. 성공은 중지 접수를 뜻하며 실제 종료는 API-06의 `done.endReason: 'stopped'`로 확인한다. 동의 대기 중이면 해당 요청의 `consent_result: cancelled`가 먼저 온다. 부분 답변이 있으면 저장하고 `done.answerMessageId`에 반환한다.
+성공: `200 OK`. 본문과 JSON 필드가 없다. 성공은 중지 접수를 뜻한다. 파이프라인을 중지했으면 실제 종료는 API-06의 `done.endReason: 'stopped'`로 확인한다. 파이프라인이 이미 끝나 비교만 중지했으면 API-06의 `endReason`은 바뀌지 않으므로, 비교 진행 상황 스트림(`GET /api/runs/{runId}/comparisons/events`)의 `result`나 비교 결과 조회(`GET /api/chats/{chatId}/comparisons`)에서 해당 모델의 `status: 'stopped'`로 확인한다. 답이 정해지고 저장만 남은 비교 모델은 중지하지 않는다. 동의 대기 중이면 해당 요청의 `consent_result: cancelled`가 먼저 온다. 부분 답변이 있으면 저장하고 `done.answerMessageId`에 반환한다.
 
 ### 오류 코드와 화면 처리
 

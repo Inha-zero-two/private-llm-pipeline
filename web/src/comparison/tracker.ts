@@ -56,14 +56,23 @@ export function createTracker(recoverMs = RECOVER_MS) {
     received = false
   }
 
+  /** 채팅별 최신 조회 번호. 뒤늦게 도착한 옛 조회 응답을 버리는 데 쓴다 */
+  const loadSeq = new Map<string, number>()
+  /** 화면에 열려 있는 채팅. 기능이 늦게 켜졌을 때 이 채팅을 불러온다 */
+  let viewing: string | null = null
+
   const load = async (chatId: string) => {
+    const seq = (loadSeq.get(chatId) ?? 0) + 1
+    loadSeq.set(chatId, seq)
+    const stale = () => loadSeq.get(chatId) !== seq
     let data: ChatComparisons
     try {
       data = await comparisonApi.chat(chatId)
     } catch {
-      set({ failedChats: { ...state.failedChats, [chatId]: true } })
+      if (!stale()) set({ failedChats: { ...state.failedChats, [chatId]: true } })
       return
     }
+    if (stale()) return
     let items = data.items
     if (following?.chatId === chatId && received) {
       // 조회하는 동안 실시간으로 받은 글을 옛 값으로 덮지 않는다
@@ -134,7 +143,11 @@ export function createTracker(recoverMs = RECOVER_MS) {
   /** 서버의 상태를 확인하고, 진행 중인 비교가 있으면 받는다 */
   const sync = async () => {
     const { enabled, running } = await comparisonApi.status()
+    const turnedOn = enabled && !state.enabled
     set({ enabled })
+    // 꺼진 줄 알고 열었던 채팅은 불러오지 않았다. 진행 중인 비교가 있으면 아래에서 불러온다
+    const runningChat = running ? String(running.chatId) : null
+    if (turnedOn && viewing !== null && viewing !== runningChat) void load(viewing)
     if (!running || following?.runId === running.runId) return
     const target = { chatId: String(running.chatId), runId: running.runId }
     follow(target)
@@ -151,8 +164,14 @@ export function createTracker(recoverMs = RECOVER_MS) {
     },
     sync,
     load,
+    /** 화면에서 채팅을 열 때 부른다. 기능이 켜져 있으면 결과를 불러온다 */
+    open: (chatId: string | null) => {
+      viewing = chatId
+      if (chatId !== null && state.enabled) void load(chatId)
+    },
     /** 질문을 보내 실행 번호를 받은 뒤 부른다 */
     started: (chatId: string, runId: number) => {
+      viewing = chatId
       if (!state.enabled) {
         // 처음 확인에 실패했을 수 있다. 꺼져 있으면 아무 일도 하지 않는다
         sync().catch(() => {})

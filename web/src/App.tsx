@@ -16,7 +16,15 @@ import { openMonitor, publishDemo, publishTarget, readTarget } from '@/monitor/b
 import { PrivacyStatus } from '@/components/PrivacyStatus'
 import { ComparisonPanel } from '@/comparison/ComparisonPanel'
 import { useComparison } from '@/comparison/useComparison'
-import { sendState, turnToShow } from '@/comparison/view'
+import {
+  COMPARISON_HERO,
+  COMPARISON_HINT,
+  PIPELINE_HERO,
+  PIPELINE_HINT,
+  sendsRawQuestion,
+  sendState,
+  turnToShow,
+} from '@/comparison/view'
 import type { Chat, ConsentRequest, PrivacySetting, Turn } from '@/types'
 import styles from './App.module.css'
 
@@ -38,8 +46,12 @@ export default function App() {
   const [deleteTarget, setDeleteTarget] = useState<Chat | null>(null)
   /** 서버에 연결하지 못했을 때의 안내 */
   const [loadError, setLoadError] = useState<string | null>(null)
-  /** 다른 출력이 끝나지 않아 보내지 못한 질문. 입력창에 되돌린다 */
-  const [rejected, setRejected] = useState<{ text: string; error: ApiError } | null>(null)
+  /** 다른 출력이 끝나지 않아 보내지 못한 질문. 보낸 채팅의 입력창에만 되돌린다 */
+  const [rejected, setRejected] = useState<{
+    chatId: string
+    text: string
+    error: ApiError
+  } | null>(null)
   /** 비교 패널에 보여 줄 질문. null이면 최근 질문 */
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
   const { state: comparison, tracker } = useComparison(backend.name === 'remote')
@@ -108,7 +120,7 @@ export default function App() {
     setCurrentChatId(chatId)
     setSelectedRunId(null)
     setRejected(null)
-    if (chatId !== null && comparison.enabled) void tracker.load(chatId)
+    tracker.open(chatId)
     if (window.innerWidth <= 768) setSidebarOpen(false)
     if (chatId === null || loadedRef.current.has(chatId)) return
     loadedRef.current.add(chatId)
@@ -195,7 +207,7 @@ export default function App() {
       if (err instanceof ApiError && err.status === 409) {
         // 다른 출력이 끝나지 않았다. 질문을 지우지 않고 입력창에 되돌린다
         updateChat(id, (c) => ({ ...c, turns: c.turns.filter((t) => t.id !== turn.id) }))
-        setRejected({ text, error: err })
+        setRejected({ chatId: id, text, error: err })
         handlers.onFinish()
         tracker.sync().catch(() => {})
         return
@@ -231,10 +243,13 @@ export default function App() {
   const running = runningChatId !== null && runningChatId === currentChatId
   const sending = sendState(currentChatId, runningChatId, comparison.running)
   const shownTurn = turnToShow(current?.turns ?? [], selectedRunId)
+  // 응답을 기다리는 사이 다른 채팅을 열었으면 그 채팅에는 되돌리지 않는다
+  const rejectedHere = rejected?.chatId === currentChatId ? rejected : null
   // 비교 때문에 막힌 안내는 그 비교가 끝나면 지운다
   const showRejected =
-    rejected !== null &&
-    (rejected.error.code !== 'COMPARISON_RUNNING' || comparison.running !== null)
+    rejectedHere !== null &&
+    (rejectedHere.error.code !== 'COMPARISON_RUNNING' || comparison.running !== null)
+  const rawToComparison = sendsRawQuestion(comparison, currentChatId)
   const composer = (
     <Composer
       // 채팅을 바꾸면 입력 중인 글을 비운다
@@ -245,12 +260,13 @@ export default function App() {
       // 같은 중지 API가 파이프라인과 비교를 함께 멈춘다. 파이프라인이 끝났으면 비교만 남았다
       onStop={() => (runRef.current ? runRef.current.stop() : tracker.stop())}
       autoFocus={!current}
-      restore={rejected}
+      restore={rejectedHere}
+      hint={rawToComparison ? COMPARISON_HINT : PIPELINE_HINT}
       above={
         <>
           {showRejected && (
             <p className={styles.waiting} role="alert">
-              {rejected.error.message}
+              {rejectedHere.error.message}
             </p>
           )}
           {sending.comparing && (
@@ -360,7 +376,7 @@ export default function App() {
               <div className={styles.hero}>
                 <ShieldIcon size={36} />
                 <h2>무엇을 도와드릴까요?</h2>
-                <p>개인정보는 이 PC 안에서 지키고, 필요한 도움만 외부 모델에 물어봅니다.</p>
+                <p>{rawToComparison ? COMPARISON_HERO : PIPELINE_HERO}</p>
                 {loadError && <p role="alert">{loadError}</p>}
               </div>
               {composer}
