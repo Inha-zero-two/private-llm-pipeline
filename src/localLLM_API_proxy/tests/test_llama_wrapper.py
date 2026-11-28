@@ -8,7 +8,7 @@ from dataclasses import FrozenInstanceError, asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -40,8 +40,8 @@ def test_existing_call_signatures() -> None:
 def test_remote_defaults_verify_new_domain_and_keep_transport_settings(
     monkeypatch: pytest.MonkeyPatch, pretrained: bool
 ) -> None:
-    http_client = Mock()
-    monkeypatch.setattr(wrapper.httpx, "Client", http_client)
+    http_client = Mock(return_value=Mock(aclose=AsyncMock()))
+    monkeypatch.setattr(wrapper.httpx, "AsyncClient", http_client)
 
     client = (
         wrapper.Llama.from_pretrained(

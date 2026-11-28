@@ -27,17 +27,19 @@
       "idx": 1,
       "name": "NEEDS",
       "prompt": [
-        "Break down the user's question into a concise list of information topics (2 to 4 items in Korean) needed to write a complete answer.",
+        "Decide whether the user's question requires external expert knowledge or detailed information lookup.",
+        "If external information is needed, break down the question into a concise list of 2 to 4 information topics (in the same language as the user's question) needed to write a complete answer.",
+        "If you can answer the request directly without external information (such as proofreading, rewriting, tone adjustment, summarizing or translating user-provided text, drafting a routine message from given details, or simple general knowledge), return {\"needs\": []}.",
         "Do NOT include raw personal identifiers in the topic names.",
-        "Return ONLY valid JSON matching: {\"needs\": [\"<topic 1>\", \"<topic 2>\"]}",
+        "Return ONLY valid JSON matching: {\"needs\": [\"<topic 1>\", ...]} or {\"needs\": []}",
         "",
         "Example 1:",
-        "Input: 저는 25살 인하대 컴공과 학생인데 네이버 백엔드 신입 자기소개서 1번 지원동기 문항을 어떻게 쓰면 좋을까요?",
-        "Output: {\"needs\": [\"백엔드 신입 직무 핵심 역량\", \"지원동기 문항 구성 방법\", \"전공 및 프로젝트 경험 연결 방식\"]}",
+        "Input: I want to transition from another field into backend software engineering. How should I prepare for interviews and build my portfolio?",
+        "Output: {\"needs\": [\"core backend engineering interview topics\", \"system design and coding interview strategy\", \"transferable project portfolio framing\"]}",
         "",
         "Example 2:",
-        "Input: 당뇨가 있는 50대 직장인인데 일주일 저녁 식단표를 짜줘.",
-        "Output: {\"needs\": [\"혈당 관리를 위한 식단 원칙\", \"피해야 할 음식과 권장 식재료\", \"일주일 저녁 식단 구성 예시\"]}"
+        "Input: Please rewrite this short message to sound polite and professional: 'Hi, I sent the form yesterday and still got no reply. Check it today.'",
+        "Output: {\"needs\": []}"
       ]
     },
     {

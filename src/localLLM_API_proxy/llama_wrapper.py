@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import __main__
+import asyncio
 import ctypes
 import fnmatch
 import importlib
@@ -21,8 +22,11 @@ import time
 import uuid
 import warnings
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue
+from threading import Event, Lock, Thread, local
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Iterator, NoReturn
 from urllib.parse import urlsplit, urlunsplit
@@ -320,6 +324,9 @@ def choose_backend(backend: str = "auto", main_gpu: int | None = None) -> Routin
 
 # 원본 직접 생성 또는 원격 HTTP 호출
 DEFAULT_SERVER_URL = "https://satisshin.top:4000"
+# 실험에서는 공유 원격 클라이언트로 여러 요청을 전송할 수 있음을 Runner에 알린다.
+# False이면 Runner는 기존처럼 한 요청씩 처리한다. 네이티브 모델은 항상 직렬화한다.
+EXPERIMENTAL_BUILD = True
 
 _COMPLETION_DEFAULTS = {
     "suffix": None,
@@ -493,6 +500,240 @@ def _reject_callbacks(params: dict[str, Any]) -> None:
         params.pop(name, None)
 
 
+class _RemoteRequest:
+    """한 요청의 전체 시간 제한과 전송 취소를 관리한다."""
+
+    def __init__(self, timeout: float) -> None:
+        self.deadline = time.monotonic() + timeout
+        self.cancelled = Event()
+        self._lock = Lock()
+        self._exchange: _RemoteExchange | None = None
+
+    def timeout(self) -> httpx.Timeout:
+        remaining = self.deadline - time.monotonic()
+        if self.cancelled.is_set() or remaining <= 0:
+            raise TimeoutError("Remote LLM request exceeded its time limit")
+        return httpx.Timeout(remaining, connect=min(5.0, remaining))
+
+    def attach(self, exchange: _RemoteExchange) -> None:
+        with self._lock:
+            self._exchange = exchange
+            cancelled = self.cancelled.is_set()
+        if cancelled:
+            exchange.cancel()
+
+    def detach(self) -> None:
+        with self._lock:
+            self._exchange = None
+
+    def cancel(self) -> None:
+        with self._lock:
+            self.cancelled.set()
+            exchange = self._exchange
+        if exchange is not None:
+            exchange.cancel()
+
+
+class _RemoteStream(httpx.SyncByteStream):
+    """비동기 전송의 원시 본문을 기존 동기 HTTPX 응답에 연결한다."""
+
+    def __init__(self, exchange: _RemoteExchange) -> None:
+        self._exchange = exchange
+
+    def __iter__(self) -> Iterator[bytes]:
+        while True:
+            event = self._exchange.events.get()
+            if event is None:
+                return
+            if isinstance(event, Exception):
+                raise event
+            assert isinstance(event, bytes)
+            self._exchange.release_chunk()
+            yield event
+
+    def close(self) -> None:
+        self._exchange.cancel()
+        self._exchange.wait()
+
+
+class _RemoteExchange:
+    """헤더 수신 전부터 취소할 수 있는 HTTP 전송 하나. 연결 풀은 공유한다."""
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        request: _RemoteRequest | None,
+        kwargs: dict[str, Any],
+    ) -> None:
+        self.events: Queue[httpx.Response | bytes | Exception | None] = Queue()
+        self._loop = loop
+        self._client = client
+        self._method = method
+        self._path = path
+        self._request = request
+        self._kwargs = kwargs
+        self._lock = Lock()
+        self._cancelled = False
+        self._task: asyncio.Task[None] | None = None
+        self._chunk_credit: asyncio.Semaphore | None = None
+
+    def start(self) -> None:
+        self._future = asyncio.run_coroutine_threadsafe(self._serve(), self._loop)
+
+    async def _serve(self) -> None:
+        with self._lock:
+            self._task = asyncio.current_task()
+            cancelled = self._cancelled
+        try:
+            if cancelled:
+                raise asyncio.CancelledError
+            self._chunk_credit = asyncio.Semaphore(1)
+            if self._request is None:
+                await self._receive()
+            else:
+                remaining = self._request.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Remote LLM request exceeded its time limit")
+                await asyncio.wait_for(self._receive(), timeout=remaining)
+        except asyncio.CancelledError:
+            self.events.put(TimeoutError("Remote LLM request was cancelled"))
+        except asyncio.TimeoutError:
+            self.events.put(TimeoutError("Remote LLM request exceeded its time limit"))
+        except Exception as exc:
+            self.events.put(exc)
+        finally:
+            self.events.put(None)
+
+    async def _receive(self) -> None:
+        async with self._client.stream(
+            self._method, self._path, **self._kwargs
+        ) as response:
+            if response.is_stream_consumed:
+                # 메모리 전송 대역 등은 이미 디코딩된 본문을 반환할 수 있다.
+                headers = response.headers.copy()
+                headers.pop("content-encoding", None)
+                headers.pop("content-length", None)
+                self.events.put(
+                    httpx.Response(
+                        response.status_code,
+                        headers=headers,
+                        content=response.content,
+                        request=response.request,
+                        extensions=response.extensions,
+                    )
+                )
+                return
+            self.events.put(
+                httpx.Response(
+                    response.status_code,
+                    headers=response.headers,
+                    stream=_RemoteStream(self),
+                    request=response.request,
+                    extensions=response.extensions,
+                )
+            )
+            async for chunk in response.aiter_raw():
+                assert self._chunk_credit is not None
+                # 느린 동기 소비자가 있어도 본문 전체를 메모리에 쌓지 않는다.
+                await self._chunk_credit.acquire()
+                self.events.put(chunk)
+
+    def release_chunk(self) -> None:
+        assert self._chunk_credit is not None
+        with self._lock:
+            if not self._cancelled and not self._future.done():
+                self._loop.call_soon_threadsafe(self._chunk_credit.release)
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            task = self._task
+            if task is not None and not task.done():
+                self._loop.call_soon_threadsafe(task.cancel)
+
+    def wait(self) -> None:
+        # Future.cancel()은 정리 전에 완료 표시하므로 사용하지 않는다.
+        # 코루틴이 응답/소켓 정리를 마친 뒤에만 수신 슬롯을 반환한다.
+        self._future.result()
+
+
+class _RemoteClient:
+    """공유 AsyncClient를 전용 루프에서 실행하고 동기 stream API를 제공한다."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._client = httpx.AsyncClient(**kwargs)
+        self._loop = asyncio.new_event_loop()
+        self._lock = Lock()
+        self._closed = False
+        self._exchanges: set[_RemoteExchange] = set()
+        self._thread = Thread(
+            target=self._loop.run_forever, name="llama-http", daemon=True
+        )
+        self._thread.start()
+
+    @contextmanager
+    def stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        request: _RemoteRequest | None = None,
+        **kwargs: Any,
+    ) -> Iterator[httpx.Response]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Remote HTTP client is closed")
+            exchange = _RemoteExchange(
+                self._loop, self._client, method, path, request, kwargs
+            )
+            if request is not None:
+                request.attach(exchange)
+            self._exchanges.add(exchange)
+            exchange.start()
+        response = None
+        try:
+            event = exchange.events.get()
+            if isinstance(event, Exception):
+                raise event
+            assert isinstance(event, httpx.Response)
+            response = event
+            yield response
+        finally:
+            if response is not None:
+                response.close()
+            exchange.cancel()
+            exchange.wait()
+            if request is not None:
+                request.detach()
+            with self._lock:
+                self._exchanges.discard(exchange)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            exchanges = list(self._exchanges)
+        try:
+            for exchange in exchanges:
+                exchange.cancel()
+            for exchange in exchanges:
+                exchange.wait()
+            asyncio.run_coroutine_threadsafe(self._client.aclose(), self._loop).result()
+            asyncio.run_coroutine_threadsafe(
+                self._loop.shutdown_asyncgens(), self._loop
+            ).result()
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join()
+            self._loop.close()
+
+
 class AdaptiveLlama:
     def __new__(
         cls,
@@ -503,7 +744,7 @@ class AdaptiveLlama:
         server_token_file: str | Path | None = None,
         backend: str = "auto",
         timeout: float | httpx.Timeout = 300.0,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         cache_prompt: bool = True,
         cache_capacity_bytes: int = 1024**3,
         remote_model: str | None = None,
@@ -536,7 +777,7 @@ class AdaptiveLlama:
         server_token_file: str | Path | None = None,
         backend: str = "auto",
         timeout: float | httpx.Timeout = 300.0,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         cache_prompt: bool = True,
         cache_capacity_bytes: int = 1024**3,
         remote_model: str | None = None,
@@ -548,7 +789,7 @@ class AdaptiveLlama:
         )
         # 원격 model_path는 기록만 하며 파일 검사·다운로드·요청 모델 선택에 사용하지 않는다.
         self.model_path = str(model_path) if model_path is not None else None
-        self._http: httpx.Client | None = None
+        self._http: _RemoteClient | None = None
         self._closed = False
         self._props_cache: dict | None = None
         self._model_info_cache: dict | None = None
@@ -560,6 +801,8 @@ class AdaptiveLlama:
         self.routing_info = self._routing_decision
         del self._routing_decision
         self.backend = self.routing_info.backend
+        self.experimental_build = EXPERIMENTAL_BUILD
+        self._request_local = local()
         unsupported_init = {
             key: value
             for key, value in llama_kwargs.items()
@@ -595,7 +838,7 @@ class AdaptiveLlama:
                 UserWarning,
                 stacklevel=2,
             )
-        self._http = httpx.Client(
+        self._http = _RemoteClient(
             base_url=self.server_url + "/",
             headers={"Authorization": "Bearer " + server_token},
             timeout=timeout,
@@ -630,7 +873,7 @@ class AdaptiveLlama:
         server_token_file: str | Path | None = None,
         backend: str = "auto",
         timeout: float | httpx.Timeout = 300.0,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         cache_prompt: bool = True,
         cache_capacity_bytes: int = 1024**3,
         remote_model: str | None = None,
@@ -670,7 +913,7 @@ class AdaptiveLlama:
         instance.routing_info = decision
         return instance
 
-    def _client(self) -> httpx.Client:
+    def _client(self) -> _RemoteClient:
         self._ensure_open()
         if self._http is None:
             raise RuntimeError("This operation requires the remote backend")
@@ -699,15 +942,16 @@ class AdaptiveLlama:
             )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        response = self._client().request(method, path.lstrip("/"), **kwargs)
-        self._check_response(response)
-        result = response.json()
+        with self._response(method, path, **kwargs) as response:
+            response.read()
+            self._check_response(response)
+            result = response.json()
         if isinstance(result, dict) and "error" in result:
             raise RemoteServerError(str(result["error"]))
         return result
 
     def _sse(self, path: str, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        with self._client().stream("POST", path.lstrip("/"), json=payload) as response:
+        with self._response("POST", path, json=payload) as response:
             if response.is_error or response.is_redirect:
                 response.read()
                 self._check_response(response)
@@ -734,6 +978,27 @@ class AdaptiveLlama:
                     if "error" in event:
                         raise RemoteServerError(str(event["error"]))
                     yield event
+
+    @contextmanager
+    def _request_context(self, request: _RemoteRequest) -> Iterator[None]:
+        previous = getattr(self._request_local, "current", None)
+        self._request_local.current = request
+        try:
+            yield
+        finally:
+            self._request_local.current = previous
+
+    @contextmanager
+    def _response(
+        self, method: str, path: str, **kwargs: Any
+    ) -> Iterator[httpx.Response]:
+        request = getattr(self._request_local, "current", None)
+        if request is not None:
+            kwargs.setdefault("timeout", request.timeout())
+        with self._client().stream(
+            method, path.lstrip("/"), request=request, **kwargs
+        ) as response:
+            yield response
 
     def _sampling_params(
         self, values: dict[str, Any], *, chat: bool = False
@@ -1138,6 +1403,7 @@ __all__ = [
     "Llama",
     "AdaptiveLlama",
     "DEFAULT_SERVER_URL",
+    "EXPERIMENTAL_BUILD",
     "resolve_server_token",
     "find_token_file",
     "execution_directory",

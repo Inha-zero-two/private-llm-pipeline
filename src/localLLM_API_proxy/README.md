@@ -5,6 +5,20 @@
 macOS, CUDA GPU가 없는 환경, GPU VRAM이 7GiB보다 작은 환경은 원격으로 실행됩니다.
 원격 접속은 HTTPS만 허용하며 공인 CA 인증서와 도메인을 검증합니다.
 
+`llama_wrapper.py`의 `EXPERIMENTAL_BUILD = True`는 원격 클라이언트가 병렬 요청을 지원함을
+`LocalLLMRunner`에 알립니다. Runner는 기본 4개까지 독립 요청을 동시에 전송하며,
+`LocalLLMRunner(max_concurrent_requests=8)`처럼 상한을 바꿀 수 있습니다.
+플래그를 `False`로 바꾼 뒤 새 Runner를 만들면 요청을 하나씩 처리합니다. 네이티브 모델은 항상 직렬화합니다.
+직접 wrapper를 사용할 때도 같은 원격 인스턴스를 여러 스레드에서 호출할 수 있습니다.
+한 동기 호출 자체가 여러 요청을 생성하지는 않으므로, 사례별 병렬 호출은 [Runner 가이드](../../docs/local-llm-runner.md#병렬-실험)를 참고하세요.
+
+원격 전송은 전용 이벤트 루프의 공유 `httpx.AsyncClient`로 실행하며, wrapper의 공개 호출은 동기 방식 그대로입니다.
+Runner의 타임아웃·중지는 헤더 대기와 본문 수신을 포함한 해당 전송만 취소하며 공유 클라이언트를 종료하지 않습니다.
+일시적 연결 오류 뒤에도 같은 인스턴스를 다시 사용할 수 있습니다. `request()`는 기존처럼 최대 3회 재시도하고,
+`manual_request()`와 `regen()`의 연결 오류는 호출자에게 전달합니다.
+`close()`는 진행 중인 전송을 취소하고 소켓·클라이언트·이벤트 루프를 순서대로 정리합니다.
+테스트용 `transport=`에는 `httpx.AsyncBaseTransport` 또는 비동기 핸들러를 지원하는 `httpx.MockTransport`를 전달합니다.
+
 ## 설치
 
 이 README가 있는 폴더에서 진행하세요. 저장소 루트라면 먼저 `cd src/localLLM_API_proxy`를 실행합니다.

@@ -32,12 +32,34 @@ flowchart TD
 - 요청마다 `_log_call()`로 DB에 새 입력·출력·시도 결과를 저장한다. 이전 대화 전체 대신 chat_id/context_key/through_seq/compaction_id/history_tokens 참조를 남긴다.
 - 일반 응답 생성 중 중지하면 중지 전까지 받은 답변 반환. 모델 요청 오류도 로그 함수 호출 후 재시도하고, 최대 횟수 도달 시 실패값 반환
 - `manual_request()`와 `regen()`은 `_generate()`로 응답을 요청하고 결과 파싱과 이전 대화 저장은 생략
-- Runner는 파싱·재생성·대화 저장을 포함해 한 번에 요청 하나 처리한다. 설정 해석과 실행 요청이 겹치면 도착 순서대로 대기한다. Main은 별도 스레드로 호출하므로 모델 대기가 이벤트 루프를 막지 않는다.
+- 원격 wrapper의 `EXPERIMENTAL_BUILD = True`이면 Runner는 기본 4개 요청을 동시에 처리한다. 생성자의 `max_concurrent_requests`로 상한을 지정한다. 같은 `run_id`는 파싱·재생성·대화 저장까지 순서를 보존하며, `run_id=None`인 호출들은 독립 요청으로 처리한다. 네이티브 모델 또는 실험 플래그가 꺼진 wrapper는 한 번에 하나씩 처리한다.
+- `ContextManager` 초기화의 원격 토큰화는 내부 작업은 실행별로, DB 복원용 캐시는 채팅별로 동기화한다. 한 실행·채팅의 초기화가 지연돼도 다른 실행·채팅의 컨텍스트 조회나 초기화를 막지 않는다. 같은 키의 객체는 초기화 완료 후 한 번만 등록하며, 실패 시 다음 조회에서 다시 시도한다. 채팅 캐시는 최대 8개의 LRU 정책을 유지한다.
 - 요청 대기 상한은 생성자의 `timeout`초이며 개별 생성의 응답 제한과 별도로 계산한다. Runner 종료 또는 대기 시간 초과는 `RunnerUnavailableError`로 전달한다. `ConnectionError`의 하위 종류이므로 설정 API는 `503 LOCAL_LLM_UNAVAILABLE`로 처리할 수 있다. 다른 내부 `RuntimeError`를 일괄 변환하지 않는다.
 - 대기 중인 요청도 `stop(run_id)`로 취소할 수 있으며 모델을 호출하지 않고 `stopped`를 반환한다. 중지는 같은 ID의 진행·대기 요청에만 적용하고 이후 새 요청에는 남기지 않는다. `close()`는 대기 요청을 깨워 종료 오류를 전달한다.
 - 대화 압축의 중첩 요청은 같은 스레드·실행의 `interruptible=False` 호출만 허용한다. 기존 중지 신호를 공유하고 대기열에 다시 들어가지 않으므로 압축과 상위 요청 사이의 교착을 피한다.
 - 재시도 대상은 출력 형식 오류, 연결·수신 오류, 타임아웃, 무응답, 응답 도중 연결 종료, length 종료 및 생성 실패. 같은 입력으로 최초 요청 포함 최대 3회 시도하며 중지는 제외
-- 타임아웃 후에는 이전 수신이 정리된 뒤 다음 요청을 진행한다. 정리 대기도 `timeout`초로 제한하고 초과하면 `RunnerUnavailableError`를 전달한다. 정리 대기 중에도 stop(run_id)로 중지 가능하다. 수신 스레드가 남아 있으면 다음 요청도 그 정리가 끝날 때까지 모델을 사용하지 않는다.
+- 원격 생성 한 번의 `timeout`에는 해당 생성의 토큰화, 서버 큐 대기와 생성·수신이 포함된다. `use_context=True`의 입력 준비 및 `ContextManager`가 직접 호출하는 토큰화에도 호출별 전체 시간 제한을 적용한다. 본문 청크가 계속 들어와도 이 제한은 연장되지 않는다. 입력 준비 토큰화는 실행별 중지 신호도 처리한다.
+- 타임아웃·중지 시 헤더 대기 또는 본문 수신 중인 해당 HTTP 전송을 취소하고, 실제 소켓 정리가 끝나면 수신 슬롯을 반환한다. 공유 HTTP 클라이언트와 다른 요청은 유지하므로 같은 Runner로 다시 요청할 수 있다. 대화 저장·압축은 기존처럼 완료 후 중지한다. 네이티브 모델은 이전 수신이 끝날 때까지 다음 생성을 시작하지 않는다.
+
+### 병렬 실험
+
+독립 사례를 별도 스레드에서 호출한다. 서버 큐 대기가 길면 `timeout`도 충분히 늘린다.
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+from app.runtime.local_llm_runner import LocalLLMRunner
+
+questions = ["첫 번째 질문", "두 번째 질문", "세 번째 질문"]
+with LocalLLMRunner(max_concurrent_requests=4, timeout=300) as runner:
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(runner.manual_request, question, "Answer briefly.", run_id=i)
+            for i, question in enumerate(questions)
+        ]
+        results = [future.result() for future in futures]
+```
+
+이 설정은 Runner 요청의 병렬 처리에 적용된다. 웹 API의 `Pipeline.start()`는 여전히 실행 하나만 허용한다. 웹 API로 여러 전체 파이프라인을 동시에 실행하려면 공유 `MemoManager` 등의 실행별 상태 분리가 먼저 필요하다.
 
 ## 사용법과 입출력
 

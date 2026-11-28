@@ -147,6 +147,7 @@ class World:
         )
         app = create_app(
             db_path=self.db_path,
+            prompt_chooser_factory=lambda *_: None,
             frontier_factory=lambda prompts: FrontierClient(
                 prompts,
                 api_key=SECRET,
