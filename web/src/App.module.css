@@ -45,6 +45,21 @@
   font-weight: 550;
 }
 
+.monitorButton {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.monitorButton:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 /* 첫 화면: 입력창을 가운데에 둔다 */
 .empty {
   flex: 1;
@@ -60,7 +75,19 @@
   flex: 1;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(280px, 27vw, 360px);
+  grid-template-columns: minmax(0, 1fr) var(--comparison-w, clamp(280px, 27vw, 360px));
+}
+
+/* 입력창 위의 안내 (비교 진행 중, 보내지 못함) */
+.waiting {
+  margin: 0 0 8px;
+  padding: 0 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.waiting[role='alert'] {
+  color: var(--deny);
 }
 
 @media (max-width: 1100px) {
@@ -76,6 +103,12 @@
   .hero {
     margin-bottom: 12px;
   }
+}
+
+/* 비교 기능이 꺼져 있으면 패널 자리를 두지 않는다 */
+.workspace[data-comparison='false'] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .hero {

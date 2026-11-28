@@ -11,11 +11,24 @@ type Props = {
   autoFocus?: boolean
   /** 입력창 바로 위에 붙는 내용 (동의 요청) */
   above?: ReactNode
+  /** 보내지 못해 입력창에 되돌릴 글. 그사이 새로 쓴 글이 있으면 덮지 않는다 */
+  restore?: { text: string } | null
+  /** 입력창 아래의 개인정보 안내. 질문 원문이 어디로 가는지 알린다 */
+  hint: string
 }
 
 const MAX_HEIGHT = 220
 
-export function Composer({ running, blockedReason, onSend, onStop, autoFocus, above }: Props) {
+export function Composer({
+  running,
+  blockedReason,
+  onSend,
+  onStop,
+  autoFocus,
+  above,
+  restore = null,
+  hint,
+}: Props) {
   const [text, setText] = useState('')
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -26,6 +39,13 @@ export function Composer({ running, blockedReason, onSend, onStop, autoFocus, ab
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`
   }, [text])
+
+  // 되돌릴 글이 새로 오면 한 번만 넣는다
+  const [restored, setRestored] = useState<Props['restore']>(null)
+  if (restore !== restored) {
+    setRestored(restore)
+    if (restore && !text) setText(restore.text)
+  }
 
   const canSend = text.trim().length > 0 && !running && !blockedReason
 
@@ -72,10 +92,7 @@ export function Composer({ running, blockedReason, onSend, onStop, autoFocus, ab
           </button>
         )}
       </form>
-      <p className={styles.hint}>
-        질문 원문과 개인정보는 이 PC의 로컬 모델만 봅니다. 외부 모델에는 검사를 통과한 요청문만
-        보냅니다.
-      </p>
+      <p className={styles.hint}>{hint}</p>
     </div>
   )
 }

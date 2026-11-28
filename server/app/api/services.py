@@ -95,6 +95,13 @@ class Pipeline:
             raise RuntimeError("서버가 아직 준비되지 않았습니다.")
         return self._services
 
+    @property
+    def is_busy(self) -> bool:
+        """실행이 시작 중(실행 ID를 받기 전)이거나 진행 중인지."""
+        if self._starting is not None:
+            return True
+        return self._services is not None and bool(self._services.main.running_ids())
+
     async def startup(self) -> None:
         """모듈을 만들고 Main.init()으로 기록 복구·모델·프롬프트·설정을 준비한다.
 
@@ -204,7 +211,7 @@ class Pipeline:
         실행 기록을 만들기 전에 실패하면(없는 채팅 등) 그 예외를 그대로 올린다.
         """
         main = self.services.main
-        if self._starting is not None or main.running_ids():
+        if self.is_busy:
             raise BusyError
         started: asyncio.Future[int] = asyncio.get_running_loop().create_future()
         self._starting = started

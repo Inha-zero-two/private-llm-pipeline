@@ -26,6 +26,7 @@ def reply(content: str, prompt_tokens: int, completion_tokens: int) -> httpx.Res
             "output": [
                 {
                     "type": "message",
+                    "role": "assistant",
                     "content": [{"type": "output_text", "text": content}],
                 }
             ],
@@ -118,9 +119,16 @@ def test_keep_context_only_when_need_matches(
 
     assert result.context_mode == expected
     payload = json.loads(posts[1].content)
-    assert payload["input"] == "두 번째 질문"
-    assert (payload.get("previous_response_id") == "resp_답1") == (expected == "keep")
-    assert "messages" not in payload  # 이전 대화 전체를 다시 전송하지 않음
+    history = [
+        {"role": "user", "content": "첫 질문"},
+        *reply("답1", 1, 1).json()["output"],
+    ]
+    assert payload["input"] == [
+        *(history if expected == "keep" else []),
+        {"role": "user", "content": "두 번째 질문"},
+    ]
+    assert "previous_response_id" not in payload
+    assert payload["store"] is False
 
 
 def test_context_is_not_shared_between_runs() -> None:
@@ -128,6 +136,80 @@ def test_context_is_not_shared_between_runs() -> None:
     client.send(1, "질문", need=["경력"])
 
     assert client.send(2, "질문", need=["경력"]).context_mode == "reset"
+
+
+def test_backend_replays_full_outputs_and_discards_history_on_reset() -> None:
+    posts: list[dict] = []
+    data = reply("검색 결과 [1]", 10, 20).json()
+    # 응답 ID는 필요 없음. 검색·추론·출처 원본은 백엔드가 보관해 다시 전송한다.
+    del data["id"]
+    data["output"].insert(
+        0,
+        {
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [],
+            "encrypted_content": "encrypted-reasoning",
+        },
+    )
+    data["output"].insert(
+        1,
+        {"type": "web_search_call", "id": "ws_1", "action": {"type": "search"}},
+    )
+    data["output"][2]["content"][0]["annotations"] = [
+        {
+            "type": "url_citation",
+            "start_index": 6,
+            "end_index": 9,
+            "url": "https://example.com/news",
+            "title": "검색 출처",
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(json.loads(request.content))
+        return httpx.Response(200, json=data)
+
+    client = make_client(handler)
+    first = client.send(1, "첫 질문", need=["경력"])
+    assert "[출처](https://example.com/news)" in first.answer
+    client.send(1, "두 번째 질문", need=["경력"])
+    client.send(1, "세 번째 질문", need=["경력"])
+    client.send(1, "새 주제", need=["직무"])
+    client.send(1, "후속 질문", need=["직무"])
+
+    assert posts[2]["input"] == [
+        {"role": "user", "content": "첫 질문"},
+        *data["output"],
+        {"role": "user", "content": "두 번째 질문"},
+        *data["output"],
+        {"role": "user", "content": "세 번째 질문"},
+    ]
+    assert posts[3]["input"] == [{"role": "user", "content": "새 주제"}]
+    assert posts[4]["input"] == [
+        {"role": "user", "content": "새 주제"},
+        *data["output"],
+        {"role": "user", "content": "후속 질문"},
+    ]
+    assert all("previous_response_id" not in payload for payload in posts)
+    assert all(payload["store"] is False for payload in posts)
+
+
+def test_failed_reset_does_not_revive_old_history() -> None:
+    posts: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts.append(json.loads(request.content))
+        if len(posts) == 2:
+            return httpx.Response(400)
+        return reply("답", 1, 1)
+
+    client = make_client(handler)
+    client.send(1, "첫 질문", need=["경력"])
+    with pytest.raises(FrontierError):
+        client.send(1, "새 주제", need=["직무"])
+    assert client.send(1, "다시 질문", need=["경력"]).context_mode == "reset"
+    assert posts[-1]["input"] == [{"role": "user", "content": "다시 질문"}]
 
 
 def test_clear_forgets_need() -> None:
@@ -242,12 +324,13 @@ def test_env_file_and_environment_keep_existing_precedence(
     assert payload["model"] == "gpt-6-luna"
     assert payload["tools"] == [{"type": "web_search"}]
     assert payload["tool_choice"] == "auto"
-    assert payload["store"] is True
+    assert payload["store"] is False
+    assert payload["include"] == ["reasoning.encrypted_content"]
     assert payload["max_output_tokens"] == fc.MAX_OUTPUT_TOKENS
     assert "max_tokens" not in payload
 
 
-def test_instructions_are_sent_on_every_chained_request() -> None:
+def test_instructions_are_sent_on_every_request() -> None:
     from app.data.prompt_manager import PromptManager
 
     posts: list[httpx.Request] = []
@@ -356,22 +439,32 @@ def test_incomplete_answer_does_not_advance_context() -> None:
         client.send(1, "다음 질문", need=["역량"])
     assert client.last_request.output_tokens == 20 * fc.MAX_ATTEMPTS
     assert client.last_request.status == "failed"
-    assert client._response_ids[1] == "resp_첫 답"
+    expected_input = [
+        {"role": "user", "content": "첫 질문"},
+        *reply("첫 답", 10, 20).json()["output"],
+        {"role": "user", "content": "다음 질문"},
+    ]
     assert all(
-        json.loads(request.content)["previous_response_id"] == "resp_첫 답"
-        for request in posts[1:]
+        json.loads(request.content)["input"] == expected_input for request in posts[1:]
     )
+    assert client._contexts[1] == expected_input[:-1]
 
 
-def test_parallel_runs_keep_response_ids_separate() -> None:
+def test_parallel_runs_keep_histories_separate() -> None:
     barrier = Barrier(2)
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         barrier.wait(timeout=5)
-        if "previous_response_id" in payload:
-            assert payload["previous_response_id"] == f"resp_{payload['input']}"
-        return reply(payload["input"], 1, 1)
+        question = payload["input"][-1]["content"]
+        assert all(
+            item["content"] == question
+            for item in payload["input"]
+            if item["role"] == "user"
+        )
+        if len(payload["input"]) > 1:
+            assert payload["input"][1] == reply(question, 1, 1).json()["output"][0]
+        return reply(question, 1, 1)
 
     client = make_client(handler)
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -400,6 +493,6 @@ def test_stop_during_request_does_not_restore_cleared_context() -> None:
             client.clear(1)
             with pytest.raises(FrontierCancelledError):
                 future.result(timeout=5)
-            assert 1 not in client._response_ids
+            assert 1 not in client._contexts
     finally:
         release.set()

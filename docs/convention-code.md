@@ -25,13 +25,16 @@ private-llm-pipeline/
 └── web/         화면 (React · Vite · TypeScript)
 ```
 
+웹의 실행 모니터는 `web/src/monitor/`로 분리합니다. `App.tsx`에는 창 열기와 실행 ID 전달만 연결하며,
+모니터의 조회·SSE 해제는 실행 중지와 구분합니다. 데이터 흐름과 화면 동작은 [실행 모니터](monitor.md)에 있습니다.
+
 ### 서버
 
 모듈은 역할별로 폴더를 나눕니다.
 
 ```
 server/
-└── app/
+├── app/
 │   ├── main.py                 컨트롤러 (단계 순서 · 종료 조건)
 │   ├── api/                    화면 ↔ 서버 API · SSE
 │   ├── pipeline/               파이프라인 핵심 모듈
@@ -53,6 +56,15 @@ server/
 │       ├── prompt_manager.py
 │       ├── memo_manager.py
 │       └── chat_manager.py
+└── comparison/                 비교 기능 (파이프라인 모듈이 아님)
+```
+
+`comparison/`은 질문 원문을 모델에 그대로 보내 비교하는 기능입니다. 검사를 통과한 요청문을 보내는 코드와 섞이지 않도록 다음 방향만 허용하고, 테스트로 검사합니다. 자세한 내용은 [비교 기능](comparison.md)에 있습니다.
+
+```
+app/api/app.py    ──▶ comparison
+comparison        ──✕──▶ app
+app의 나머지 모듈  ──✕──▶ comparison
 ```
 
 - 모듈 하나는 파일 하나입니다. 파일 이름은 모듈 이름을 snake_case로 씁니다. (`LeakGuard` → `leak_guard.py`)

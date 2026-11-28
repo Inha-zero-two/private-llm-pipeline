@@ -111,7 +111,9 @@ class Gateway:
             return httpx.Response(200, json={"data": []})
         body = json.loads(request.content)
         assert request.url.path.endswith("/responses")
-        self.requests.append(body["input"])
+        assert body["store"] is False
+        assert "previous_response_id" not in body
+        self.requests.append(body["input"][-1]["content"])
         return httpx.Response(
             200,
             json={
@@ -311,17 +313,38 @@ def test_run_streams_steps_frontier_tokens_and_done(make_client: Any) -> None:
     # 저장된 이벤트 ID로 보내고, 내부 기록(run·llm_call)은 화면에 보내지 않는다
     ids = [e["id"] for e in events]
     assert None not in ids and ids == sorted(ids)
-    assert set(names) <= {"step", "frontier", "token", "done"}
+    assert set(names) <= {
+        "step",
+        "frontier",
+        "frontier_request",
+        "frontier_result",
+        "token",
+        "done",
+    }
+    assert all(e["data"]["createdAt"] for e in events)
 
     frontier = [e["data"] for e in events if e["event"] == "frontier"]
-    assert frontier == [{"request": REQUEST, "answer": FRONTIER_ANSWER}]
+    assert [{k: v for k, v in e.items() if k != "createdAt"} for e in frontier] == [
+        {"request": REQUEST, "answer": FRONTIER_ANSWER}
+    ]
+    request = next(e["data"] for e in events if e["event"] == "frontier_request")
+    result = next(e["data"] for e in events if e["event"] == "frontier_result")
+    assert request["request"] == REQUEST
+    assert request["queryId"] == result["queryId"]
+    assert request["round"] == result["round"] == 1
+    assert result["status"] == "ok"
     assert gateway.requests == [REQUEST]  # 실제 FrontierClient가 보낸 요청문
     tokens = "".join(e["data"]["text"] for e in events if e["event"] == "token")
     assert tokens == ANSWER
     assert events[-1] == {
         "id": ids[-1],
         "event": "done",
-        "data": {"endReason": "info_enough", "limited": None, "answerMessageId": 2},
+        "data": {
+            "endReason": "info_enough",
+            "limited": None,
+            "answerMessageId": 2,
+            "createdAt": events[-1]["data"]["createdAt"],
+        },
     }
 
     detail = client.get(f"/api/runs/{run_id}").json()
@@ -461,9 +484,11 @@ def test_quick_deny_all_sends_only_generalized_request(make_client: Any) -> None
     assert [e["event"] for e in events].count("consent_request") == 1
     assert model.calls.count("REWRITE") == 1
     assert gateway.requests == [safe_request]
-    assert [e["data"] for e in events if e["event"] == "frontier"] == [
-        {"request": safe_request, "answer": FRONTIER_ANSWER}
-    ]
+    assert [
+        {k: v for k, v in e["data"].items() if k != "createdAt"}
+        for e in events
+        if e["event"] == "frontier"
+    ] == [{"request": safe_request, "answer": FRONTIER_ANSWER}]
     assert events[-1]["data"]["endReason"] == "info_enough"
 
 
@@ -501,6 +526,7 @@ def test_stop_while_waiting_consent(make_client: Any) -> None:
     assert events[-2]["data"] == {
         "consentId": consent["consentId"],
         "result": "cancelled",
+        "createdAt": events[-2]["data"]["createdAt"],
     }
     assert events[-1]["data"]["endReason"] == "stopped"
 

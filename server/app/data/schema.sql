@@ -1,6 +1,7 @@
 -- ChatManager가 빈 DB를 만들 때 실행하는 SQLite 스키마.
 -- 기존 DB는 삭제하지 않는다. ChatManager가 user_version별로 트랜잭션 갱신한다.
 -- 2→3 갱신은 아래 Context persistence 구조와 기존 메시지 연결을 함께 적용한다.
+-- 3→4 갱신은 맨 뒤의 비교 기능 구역만 적용한다. 구역 표시 주석은 한 번씩만 쓴다.
 -- 컬럼 설명은 docs/db-schema.md에 있으며, 둘이 다르면 이 파일이 기준이다.
 
 CREATE TABLE chats (
@@ -96,3 +97,23 @@ CREATE TABLE context_compactions (
 );
 CREATE INDEX compactions_chat ON context_compactions(chatId, contextKey, compactionId);
 PRAGMA user_version = 3;
+-- Comparison
+CREATE TABLE comparison_chats (
+    chatId INTEGER PRIMARY KEY REFERENCES chats ON DELETE CASCADE
+);
+CREATE TABLE comparisons (
+    comparisonId INTEGER PRIMARY KEY AUTOINCREMENT,
+    chatId INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
+    runId INTEGER NOT NULL REFERENCES runs ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('local', 'frontier')),
+    question TEXT NOT NULL, answer TEXT,
+    status TEXT NOT NULL
+        CHECK(status IN ('running', 'ok', 'truncated', 'failed', 'stopped')),
+    errorCode TEXT, modelName TEXT,
+    attempts INTEGER NOT NULL DEFAULT 1, droppedPairs INTEGER NOT NULL DEFAULT 0,
+    inputTokens INTEGER, outputTokens INTEGER, cost REAL, elapsedMs REAL,
+    createdAt TEXT NOT NULL, endedAt TEXT,
+    UNIQUE(runId, kind)
+);
+CREATE INDEX comparisons_history ON comparisons(chatId, kind, runId);
+PRAGMA user_version = 4;

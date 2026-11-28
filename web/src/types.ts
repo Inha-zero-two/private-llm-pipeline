@@ -44,6 +44,13 @@ export type FrontierQuery = {
 
 export type Notice = { kind: 'limited' | 'stopped' | 'error'; text: string }
 
+/** 파이프라인이 답하는 데 걸린 시간 */
+export type Elapsed = {
+  ms: number
+  /** 동의를 기다린 시간을 뺐는지 */
+  consentExcluded: boolean
+}
+
 /** 질문 하나와 그에 대한 답변 */
 export type Turn = {
   id: string
@@ -61,6 +68,8 @@ export type Turn = {
   endReason: string | null
   errorCode: string | null
   errorStage: string | null
+  /** 실행이 끝난 뒤 채워진다. 시각이 없는 과거 기록과 데모에는 없다 */
+  elapsed?: Elapsed | null
 }
 
 export type Chat = {

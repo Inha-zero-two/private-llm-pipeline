@@ -91,3 +91,6 @@ CLAUDE.md
 
 # 개인정보 검출 평가 결과 (qa.pd_eval)
 server/qa/results/
+
+# 로컬 모니터 화면 목업
+/monitor-mockup.html

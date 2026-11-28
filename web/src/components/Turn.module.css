@@ -19,6 +19,25 @@
   overflow-wrap: anywhere;
 }
 
+/* 누르면 비교 패널에 이 질문의 답변을 보인다 */
+button.userBubble {
+  text-align: left;
+  user-select: text;
+}
+
+button.userBubble:hover {
+  background: var(--bg-hover);
+}
+
+.userBubble[aria-pressed='true'] {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--cat-2) 55%, transparent);
+}
+
+.elapsed {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .assistant {
   display: flex;
   flex-direction: column;

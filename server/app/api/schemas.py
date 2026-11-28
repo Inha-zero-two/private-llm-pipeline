@@ -126,6 +126,7 @@ class FrontierQueryOut(ApiModel):
     request: str
     answer: str | None
     status: Literal["ok", "failed", "uncertain"]
+    created_at: str
 
 
 class ConsentOut(ApiModel):
@@ -151,5 +152,7 @@ class RunDetail(ApiModel):
     notice: str | None
     error_code: str | None
     error_stage: str | None = None
+    started_at: str
+    ended_at: str | None
     frontier_queries: list[FrontierQueryOut]
     consents: list[ConsentOut]

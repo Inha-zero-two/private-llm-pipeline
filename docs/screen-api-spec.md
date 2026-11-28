@@ -67,7 +67,7 @@
 
 ## API-03 채팅 상세 조회
 
-- **기능:** 선택한 채팅의 전체 메시지와 실행 요약을 조회한다. 프론티어 질의·동의 내역은 사용자가 펼칠 때 API-11로 조회한다.
+- **기능:** 선택한 채팅의 전체 메시지와 실행 요약을 조회한다. 모니터는 전달받은 실행의 질문·채팅 이름을 확인할 때 사용하며, 프론티어 질의·동의 내역은 API-11로 조회한다.
 - **HTTP 메서드와 경로:** `GET /api/chats/{chatId}`
 
 ### 요청 필드
@@ -181,6 +181,8 @@
 | HTTP 상태 | 오류 코드 | 화면 처리 |
 | --- | --- | --- |
 | 404 | `NOT_FOUND` | 채팅 없음 안내, 입력 보존 후 목록 갱신 |
+| 409 | `RUN_IN_PROGRESS` | 다른 질문에 답하는 중 안내, 입력 보존 |
+| 409 | `COMPARISON_RUNNING` | 비교 답변을 만드는 중 안내, 입력 보존 |
 | 422 | `VALIDATION_ERROR` | 입력 유지, 질문 입력·수정 안내 |
 | 500 | `INTERNAL_ERROR` | 실패 안내, 입력 보존 |
 
@@ -208,7 +210,9 @@
 
 | 이벤트 | data 필드와 타입 | 화면 처리 |
 | --- | --- | --- |
-| `step` | `label: string` | 현재 동작 교체 |
+| `step` | `label: string`, `stage: string` | 현재 동작 교체, 처리 위치 구분 |
+| `frontier_request` | `queryId: integer`, `round: integer`, `request: string` | 질의 시작. 누출 검사 통과 후 저장된 요청을 외부 호출 직전에 표시 |
+| `frontier_result` | `queryId: integer`, `round: integer`, `status: 'ok' 또는 'failed'`, `answer: string 또는 null` | 해당 질의의 성공·실패 상태 갱신 |
 | `frontier` | `request: string`, `answer: string` | 실제 전송한 요청문과 답변 추가 |
 | `consent_request` | `consentId: integer`, `items: object[]`, `purpose: string`, `benefit: string`, `risk: string` | 자연어 동의 입력 표시. items의 항목은 `{ pdId: integer, label: string, text: string, category: 0 또는 1 또는 2 또는 3 }` |
 | `consent_result` | `consentId: integer`, `result: 'answered' 또는 'cancelled'`. answered이면 `text: string`, `decisions: { pdId: integer, allow: boolean }[]` 추가 | 해당 요청 입력 닫기, 항목별 결과 표시. cancelled에는 text·decisions 없음 |
@@ -216,6 +220,10 @@
 | `done` | `endReason: string`, `limited: string 또는 null`, `answerMessageId: integer 또는 null` | 실행 완료, 안내 표시, 전송 버튼 복귀 |
 | `error` | `code: string`, `stage: string 또는 null`, `message: string` | 코드·발생 단계·고정 안내 표시, 전송 버튼 복귀 |
 | `replay_complete` | `lastEventId: integer`, `pendingConsentId: integer 또는 null` | 재전송 복원 완료, 현재 대기 중인 동의 입력 활성화 |
+
+`replay_complete`를 제외한 모든 기록 이벤트의 `data`에 `createdAt: string`(시간대 포함 ISO 8601 저장 시각)이 포함된다.
+새 프론티어 이벤트는 `queryId`로 API-11의 질의와 연결한다. 기존 `frontier`는 성공 후에만 보내는 호환 이벤트로 유지하며,
+모니터는 새 두 이벤트를 사용해 요청·응답을 중복 표시하지 않는다. 과거 저장 이벤트의 `step`에는 `stage`가 없을 수 있다.
 
 `done.endReason`은 `info_enough`, `call_limit`, `regen_limit`, `budget_limit`, `offline`, `stopped` 중 하나다. 공개 거부는 실행 종료 조건이 아니다. 과거 consent_denied 기록은 호환 조회만 지원한다. `info_enough`의 limited는 null이며 stopped는 생성 중인 부분 답변만 보존한다. 나머지는 가능한 정보로 최종 답변을 생성한 후 완료한다.
 
@@ -231,30 +239,30 @@ offline / errorCode=null이고, 상세 실패는 내부 diagnostic에만 남긴�
 ```text
 id: 1
 event: step
-data: {"label":"개인정보 검출 중"}
+data: {"label":"개인정보 검출 중","createdAt":"2026-11-07T14:00:15+09:00","stage":"DETECT"}
 
 id: 2
 event: consent_request
-data: {"consentId":1,"items":[{"pdId":11,"label":"나이","text":"27살","category":2}],"purpose":"연령에 맞는 정보 확인","benefit":"구체적인 답변","risk":"외부 모델로 전송됨"}
+data: {"consentId":1,"items":[{"pdId":11,"label":"나이","text":"27살","category":2}],"purpose":"연령에 맞는 정보 확인","benefit":"구체적인 답변","risk":"외부 모델로 전송됨","createdAt":"2026-11-07T14:00:15+09:00"}
 
 event: replay_complete
 data: {"lastEventId":2,"pendingConsentId":1}
 
 id: 3
 event: consent_result
-data: {"consentId":1,"result":"answered","text":"나이는 공개해도 돼","decisions":[{"pdId":11,"allow":true}]}
+data: {"consentId":1,"result":"answered","text":"나이는 공개해도 돼","decisions":[{"pdId":11,"allow":true}],"createdAt":"2026-11-07T14:00:15+09:00"}
 
 id: 4
 event: frontier
-data: {"request":"27세의 진로 탐색 방법을 알려줘.","answer":"관심사와 직무 역량을 정리하세요."}
+data: {"request":"27세의 진로 탐색 방법을 알려줘.","answer":"관심사와 직무 역량을 정리하세요.","createdAt":"2026-11-07T14:00:15+09:00"}
 
 id: 5
 event: token
-data: {"text":"관심 직무부터 정리해 보세요."}
+data: {"text":"관심 직무부터 정리해 보세요.","createdAt":"2026-11-07T14:00:15+09:00"}
 
 id: 6
 event: done
-data: {"endReason":"info_enough","limited":null,"answerMessageId":2}
+data: {"endReason":"info_enough","limited":null,"answerMessageId":2,"createdAt":"2026-11-07T14:00:15+09:00"}
 
 ```
 
@@ -287,13 +295,13 @@ data: {"endReason":"info_enough","limited":null,"answerMessageId":2}
 ```text
 id: 5
 event: error
-data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답을 처리하지 못했습니다."}
+data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답을 처리하지 못했습니다.","createdAt":"2026-11-07T14:00:15+09:00"}
 
 ```
 
 ## API-07 실행 중지
 
-- **기능:** 진행·동의 대기·최종 답변 생성 중인 실행에 중지를 요청한다.
+- **기능:** 진행·동의 대기·최종 답변 생성 중인 실행에 중지를 요청한다. 같은 실행의 비교도 함께 중지한다. 파이프라인이 끝났으면 남은 비교만 중지하며, 모두 끝났을 때만 409다.
 - **HTTP 메서드와 경로:** `POST /api/runs/{runId}/stop`
 
 ### 요청 필드
@@ -304,7 +312,7 @@ data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답�
 
 ### 응답 필드와 JSON 예시
 
-성공: `200 OK`. 본문과 JSON 필드가 없다. 성공은 중지 접수를 뜻하며 실제 종료는 API-06의 `done.endReason: 'stopped'`로 확인한다. 동의 대기 중이면 해당 요청의 `consent_result: cancelled`가 먼저 온다. 부분 답변이 있으면 저장하고 `done.answerMessageId`에 반환한다.
+성공: `200 OK`. 본문과 JSON 필드가 없다. 성공은 중지 접수를 뜻한다. 파이프라인을 중지했으면 실제 종료는 API-06의 `done.endReason: 'stopped'`로 확인한다. 파이프라인이 이미 끝나 비교만 중지했으면 API-06의 `endReason`은 바뀌지 않으므로, 비교 진행 상황 스트림(`GET /api/runs/{runId}/comparisons/events`)의 `result`나 비교 결과 조회(`GET /api/chats/{chatId}/comparisons`)에서 해당 모델의 `status: 'stopped'`로 확인한다. 답이 정해지고 저장만 남은 비교 모델은 중지하지 않는다. 동의 대기 중이면 해당 요청의 `consent_result: cancelled`가 먼저 온다. 부분 답변이 있으면 저장하고 `done.answerMessageId`에 반환한다.
 
 ### 오류 코드와 화면 처리
 
@@ -468,7 +476,7 @@ data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답�
 
 ## API-11 실행 상세 조회
 
-- **기능:** 사용자가 실행 내역을 펼칠 때 해당 실행의 프론티어 질의·동의 기록을 조회한다. API-03의 실행 요약에 포함된 `runId`로 요청한다.
+- **기능:** 전달받은 실행 ID로 모니터의 프론티어 질의·동의 기록과 종료·오류 상태를 조회·복원한다. 기존 채팅 화면도 API-03의 실행 요약에 포함된 `runId`로 요청한다.
 - **HTTP 메서드와 경로:** `GET /api/runs/{runId}`
 
 ### 요청 필드
@@ -492,12 +500,15 @@ data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답�
 | `notice` | string 또는 null | API-03과 동일한 종료·오류 안내. 진행 중·정상 완료는 null |
 | `errorCode` | string 또는 null | 오류 종료 시 코드, 그 외 null |
 | `errorStage` | string 또는 null | 오류 발생 단계. 진행 중·정상 완료·과거 미제공 기록은 null |
+| `startedAt` | string | 시간대를 포함한 ISO 8601 실행 시작 시각 |
+| `endedAt` | string 또는 null | 시간대를 포함한 ISO 8601 실행 종료 시각. 진행 중이면 null |
 | `frontierQueries` | object[] | `round` 오름차순 프론티어 내역 |
 | `frontierQueries[].queryId` | integer | 질의 ID |
 | `frontierQueries[].round` | integer | 1부터 시작하는 질의 회차 |
 | `frontierQueries[].request` | string | 실제 전송한 요청문 |
 | `frontierQueries[].answer` | string 또는 null | 프론티어 답변. 수신하지 못하면 null |
 | `frontierQueries[].status` | string | `ok`, `failed`, `uncertain` |
+| `frontierQueries[].createdAt` | string | 시간대 포함 ISO 8601 질의 저장 시각 |
 | `consents` | object[] | 요청 시각 오름차순 동의 기록 |
 | `consents[].consentId` | integer | 동의 요청 ID |
 | `consents[].items` | object[] | 요청 항목. 각 항목은 `{ pdId: integer, label: string, text: string, category: integer }`. category는 0 식별·1 민감·2 속성·3 기타 |
@@ -525,7 +536,8 @@ data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답�
       "round": 1,
       "request": "27세의 진로 탐색 방법을 알려줘.",
       "answer": "관심사와 직무 역량을 정리하세요.",
-      "status": "ok"
+      "status": "ok",
+      "createdAt": "2026-11-07T14:00:12+09:00"
     }
   ],
   "consents": [
@@ -555,9 +567,16 @@ data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답�
     }
   ],
   "chatId": 1,
-  "notice": null
+  "notice": null,
+  "startedAt": "2026-11-07T14:00:00+09:00",
+  "endedAt": "2026-11-07T14:00:30+09:00"
 }
 ```
+
+화면은 `(endedAt − startedAt) − Σ(동의의 respondedAt − createdAt)`을 걸린 시간으로 표시한다. `respondedAt`은 응답을 해석한 뒤 기록되므로 해석 시간도 빠진다.
+
+모니터의 **실행 경과**는 동의 대기를 포함한 `현재 시각 또는 endedAt − startedAt`이며, 답변 비교용 걸린 시간과 구분한다.
+같은 앱의 `/monitor`는 알려진 실행 ID만 조회·구독하며 새 API나 현재 실행 탐색 기능을 추가하지 않는다. 창 간 전달·회차 선택·로그 스크롤은 [실행 모니터](monitor.md)를 따른다.
 
 ### 오류 코드와 화면 처리
 
@@ -570,6 +589,68 @@ data: {"code":"MODEL_RESPONSE_INVALID","stage":"JUDGE","message":"모델 응답�
 ```json
 {"code":"NOT_FOUND","message":"실행을 찾을 수 없습니다."}
 ```
+
+## 비교 기능 API
+
+비교 기능의 동작과 오류 코드는 [비교 기능](comparison.md)을 따른다.
+
+| 메서드와 경로 | 내용 |
+| --- | --- |
+| `GET /api/comparisons/status` | 켜져 있는지와 진행 중인 비교 |
+| `GET /api/chats/{chatId}/comparisons` | 채팅의 비교 결과 전체 |
+| `POST /api/runs/{runId}/comparisons/{kind}/retry` | 모델 하나를 다시 실행. `kind`는 `local`·`frontier` |
+| `GET /api/runs/{runId}/comparisons/events` | 진행 상황 스트림(SSE) |
+
+### 상태 조회
+
+진행 중인 비교가 없으면 `running`은 `null`이다. 꺼져 있거나 비교 기능이 없으면 `{"enabled":false,"running":null}`이다.
+
+```json
+{"enabled":true,"running":{"chatId":1,"runId":2}}
+```
+
+### 채팅의 비교 결과
+
+`registered`는 비교 대상 채팅인지를 나타낸다. `items`는 `runId`, `kind` 순서다. 비교 기록을 만들지 못한 질문은 `items`에 없다. 없는 채팅이면 `registered: false`와 빈 배열이다.
+
+| 이름 | 타입 | 설명 |
+| --- | --- | --- |
+| `runId` / `kind` | integer / string | 실행과 모델 |
+| `question` | string | 모델에 보낸 질문 원문 |
+| `answer` | string 또는 null | 답변. 생성 중이면 받은 데까지 |
+| `status` | string | `running`, `ok`, `truncated`, `failed`, `stopped` |
+| `errorCode` / `message` | string 또는 null | 실패 코드와 고정 문구 |
+| `modelName` | string 또는 null | 모델 이름 |
+| `attempts` | integer | 실행한 횟수 |
+| `usedPairs` | integer 또는 null | 보낸 앞 질문·답변 쌍의 수. 모델에 보내지 못했으면 null |
+| `droppedPairs` | integer | 길이 때문에 뺀 쌍의 수 |
+| `inputTokens` / `outputTokens` | integer 또는 null | 토큰 수 |
+| `cost` | number 또는 null | 비용(달러). 프론티어만 |
+| `elapsedMs` | number 또는 null | 걸린 시간 |
+| `createdAt` / `endedAt` | string / string 또는 null | ISO 8601 |
+| `retryable` | boolean | 다시 시도할 수 있는 조건인지. 진행 중인 출력이 있는지는 포함하지 않는다 |
+
+### 다시 시도
+
+성공: `200 OK`. 본문이 없다.
+
+| HTTP 상태 | 오류 코드 | 화면 처리 |
+| --- | --- | --- |
+| 404 | `NOT_FOUND` | 비교 기록 없음 안내 |
+| 409 | `NOT_RETRYABLE` | 다시 시도할 수 없음 안내 |
+| 409 | `COMPARISON_RUNNING` | 진행 중인 출력이 끝난 뒤 다시 시도하도록 안내 |
+| 422 | `VALIDATION_ERROR` | 실행 ID·모델 형식 확인 |
+
+### 진행 상황 스트림
+
+| 이벤트 | 데이터 |
+| --- | --- |
+| `snapshot` | `{"items":[...]}`. 연결 시점까지의 두 결과. 생성 중이면 `answer`에 받은 글까지 |
+| `token` | `{"kind":"local","text":"..."}` |
+| `result` | 한 모델의 최종 결과. `items`의 한 항목 |
+| `done` | `{}`. 보낸 뒤 연결을 닫는다 |
+
+이벤트 ID를 쓰지 않는다. 다시 연결하면 `snapshot`을 새로 보내고 화면은 덮어쓴다. 이미 끝났으면 `snapshot`과 `done`만 보낸다. 15초 동안 보낼 것이 없으면 주석을 보낸다.
 
 ## 채팅 대화 맥락과 실행 로그
 

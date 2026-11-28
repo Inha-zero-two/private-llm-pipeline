@@ -123,7 +123,7 @@ def test_existing_db_upgrade_preserves_errors_and_is_repeatable(
             assert run.notice == MESSAGES[ErrorCode.INTERNAL_ERROR]
             assert store.get_chat(1).messages[0].content == "question"
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (3,)
+        assert db.execute("PRAGMA user_version").fetchone() == (4,)
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

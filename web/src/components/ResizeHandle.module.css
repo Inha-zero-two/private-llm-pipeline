@@ -1,0 +1,59 @@
+.handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 5;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.handle[data-side='right'] {
+  right: -4px;
+}
+.handle[data-side='left'] {
+  left: -4px;
+}
+
+.handle::before {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: transparent;
+  transition: background 0.12s;
+}
+
+.handle > span {
+  width: 3px;
+  height: 28px;
+  border-radius: 3px;
+  background: var(--border-strong);
+}
+
+.handle:hover::before,
+.handle:focus-visible::before,
+.handle[data-dragging='true']::before {
+  background: var(--cat-2);
+}
+
+.handle:hover > span,
+.handle:focus-visible > span,
+.handle[data-dragging='true'] > span {
+  background: var(--cat-2);
+}
+
+/* 아래쪽으로 배치되는 비교 패널에는 좌우 조절 핸들을 두지 않는다. */
+@media (max-width: 1100px) {
+  .handle[data-side='left'] {
+    display: none;
+  }
+}
+@media (max-width: 768px) {
+  .handle[data-side='right'] {
+    display: none;
+  }
+}
