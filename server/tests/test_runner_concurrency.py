@@ -79,10 +79,20 @@ class ModelServer:
         self.active = 0
         self.peak = 0
         self.fail_next = False
+        self.block_context_initialization = False
 
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         if request.url.path == "/tokenize":
+            if self.block_context_initialization and body["content"].startswith(
+                "Summarize the conversation"
+            ):
+                return httpx.Response(
+                    200,
+                    stream=ControlledStream(
+                        self, "block-context-initialization", tokenize=True
+                    ),
+                )
             if body["content"].startswith("header-tokenize"):
                 await self.wait_for_headers(body["content"])
             if body["content"] in {"block-tokenize", "trickle-tokenize"}:
@@ -205,6 +215,110 @@ def test_nested_context_compaction_does_not_acquire_another_request_slot(
     )
     assert result[:2] == (["item"], True)
     assert "x" * 50 not in manager.get_context(context_id)
+
+
+def test_slow_context_initialization_does_not_block_existing_context_or_stop(
+    remote_runner: tuple[LocalLLMRunner, ModelServer],
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 5
+    existing = runner.get_context_manager(2)
+    server.block_context_initialization = True
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        initializing = pool.submit(runner.get_context_manager, 1)
+        initialization_stream = server.started.get(timeout=1)
+        other_stream = None
+        try:
+            # 생성 중인 실행과 무관한 기존 객체 조회는 즉시 끝나야 한다.
+            assert (
+                pool.submit(runner.get_context_manager, 2).result(timeout=1) is existing
+            )
+            request = pool.submit(
+                runner.request,
+                2,
+                "block-generation",
+                PromptIdx.NEEDS,
+                1,
+                use_context=True,
+                system_prompt="system",
+            )
+            other_stream = server.started.get(timeout=1)
+            runner.stop(2)
+            assert request.result(timeout=1)[4] == "stopped"
+            assert other_stream.closed.wait(1)
+            assert not initializing.done()
+            assert not initialization_stream.closed.is_set()
+        finally:
+            initialization_stream.released.set()
+            if other_stream is not None:
+                other_stream.released.set()
+        assert initializing.result(timeout=1) is runner.get_context_manager(1)
+
+
+def test_different_runs_can_initialize_contexts_concurrently(
+    remote_runner: tuple[LocalLLMRunner, ModelServer],
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 5
+    server.block_context_initialization = True
+    streams: list[ControlledStream] = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(runner.get_context_manager, 1)
+        streams.append(server.started.get(timeout=1))
+        second = pool.submit(runner.get_context_manager, 2)
+        try:
+            streams.append(server.started.get(timeout=1))
+            # 생성자가 끝나기 전의 객체는 외부에 등록하지 않는다.
+            assert 1 not in runner.context_managers
+            assert 2 not in runner.context_managers
+        finally:
+            server.block_context_initialization = False
+            for stream in streams:
+                stream.released.set()
+        assert first.result(timeout=1) is runner.get_context_manager(1)
+        assert second.result(timeout=1) is runner.get_context_manager(2)
+
+
+def test_same_run_context_is_initialized_once(
+    remote_runner: tuple[LocalLLMRunner, ModelServer],
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 5
+    server.block_context_initialization = True
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(runner.get_context_manager, 1)
+        stream = server.started.get(timeout=1)
+        second = pool.submit(runner.get_context_manager, 1)
+        try:
+            with pytest.raises(Empty):
+                server.started.get(timeout=0.1)
+            assert 1 not in runner.context_managers
+        finally:
+            server.block_context_initialization = False
+            stream.released.set()
+        assert first.result(timeout=1) is second.result(timeout=1)
+
+
+def test_failed_context_initialization_can_be_retried(
+    remote_runner: tuple[LocalLLMRunner, ModelServer],
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 0.1
+    server.block_context_initialization = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        initializing = pool.submit(runner.get_context_manager, 1)
+        stream = server.started.get(timeout=1)
+        try:
+            with pytest.raises(TimeoutError):
+                initializing.result(timeout=1)
+            assert stream.closed.wait(1)
+            assert 1 not in runner.context_managers
+        finally:
+            server.block_context_initialization = False
+            stream.released.set()
+    manager = runner.get_context_manager(1)
+    assert manager is runner.get_context_manager(1)
+    assert manager.run_id == 1
 
 
 @pytest.mark.parametrize("text", ["disconnect", "partial-disconnect"])

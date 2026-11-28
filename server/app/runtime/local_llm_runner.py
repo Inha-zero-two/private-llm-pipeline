@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from _thread import LockType
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager, nullcontext
@@ -70,7 +71,8 @@ class LocalLLMRunner:
         self._active_requests: dict[int, tuple[int | str | None, Event]] = {}
         self._receivers: dict[Thread, Any] = {}
         self._tokenizers: dict[int, tuple[Any, Event | None]] = {}
-        self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
+        self._context_lock = Lock()  # 대화 객체와 초기화 잠금의 사전 접근용
+        self._context_init_locks: dict[int, LockType] = {}
         self._closed = False
         self._llm: Any = None
         # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
@@ -147,14 +149,26 @@ class LocalLLMRunner:
         """실행 ID에 해당하는 ContextManager 조회 또는 생성.
 
         같은 실행 ID는 기존 객체 재사용. 새 객체도 이 Runner의 모델을 공유.
-        동시에 같은 실행 ID로 조회할 때 객체가 중복 생성되지 않도록 잠금 사용.
+        생성자의 원격 토큰화는 실행별 잠금 안에서 수행한다. 전역 잠금은
+        사전 조회·등록에만 사용해 다른 실행의 기존 객체 조회를 막지 않는다.
         """
         from .context_manager import ContextManager
 
         with self._context_lock:
-            if run_id not in self.context_managers:
-                self.context_managers[run_id] = ContextManager(self, run_id)
-            return self.context_managers[run_id]
+            if run_id in self.context_managers:
+                return self.context_managers[run_id]
+            init_lock = self._context_init_locks.setdefault(run_id, Lock())
+
+        with init_lock:
+            with self._context_lock:
+                # 앞선 같은 실행의 생성이 끝났다면 그 객체를 재사용한다.
+                if run_id in self.context_managers:
+                    return self.context_managers[run_id]
+            manager = ContextManager(self, run_id)
+            with self._context_lock:
+                self.context_managers[run_id] = manager
+                del self._context_init_locks[run_id]
+            return manager
 
     def model_load(self) -> bool:
         """모델을 준비하고 짧은 응답으로 연결 확인 후 True 반환.
