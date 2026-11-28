@@ -69,7 +69,7 @@ class LocalLLMRunner:
         self._pending_requests: deque[tuple[int | str | None, Event]] = deque()
         self._active_requests: dict[int, tuple[int | str | None, Event]] = {}
         self._receivers: dict[Thread, Any] = {}
-        self._tokenizers: dict[int, Any] = {}
+        self._tokenizers: dict[int, tuple[Any, Event | None]] = {}
         self._context_lock = Lock()  # 실행별 대화 객체 생성용 잠금
         self._closed = False
         self._llm: Any = None
@@ -491,9 +491,19 @@ class LocalLLMRunner:
             if use_context:
                 if chat_id is None:
                     raise ValueError("컨텍스트를 사용하는 작업에는 chat_id가 필요함")
-                input_limit = self.get_input_limit(system_prompt, max_tokens=max_tokens)
-                if len(self.tokenize(input_)) > input_limit:
-                    return None, False, 0, 0, "context_full"
+                try:
+                    input_limit = self.get_input_limit(
+                        system_prompt, max_tokens=max_tokens, stop_signal=stop_signal
+                    )
+                    if (
+                        len(self.tokenize(input_, stop_signal=stop_signal))
+                        > input_limit
+                    ):
+                        return None, False, 0, 0, "context_full"
+                except TimeoutError:
+                    if stop_signal.is_set():
+                        return None, False, 0, 0, "stopped"
+                    raise
                 manager = self.get_context_manager(run_id)
                 context_id = manager.get_id(chat_id, prompt_idx)
                 context = manager.get_context(context_id)
@@ -502,7 +512,15 @@ class LocalLLMRunner:
                         f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                     )
                     # 새 입력과 출력 공간까지 포함해 넘칠 경우 모델 요청 전에 기존 대화 압축
-                    if len(self.tokenize(model_input)) > input_limit:
+                    try:
+                        model_tokens = self.tokenize(
+                            model_input, stop_signal=stop_signal
+                        )
+                    except TimeoutError:
+                        if stop_signal.is_set():
+                            return None, False, 0, 0, "stopped"
+                        raise
+                    if len(model_tokens) > input_limit:
                         compacted = manager.compact_context(context_id)
                         if stop_signal.is_set():
                             return "", False, 0, 0, "stopped"
@@ -739,7 +757,11 @@ class LocalLLMRunner:
         # 저장 제외 항목: 이전 대화 전체, 시스템 프롬프트, 인증키
 
     def get_input_limit(
-        self, system_prompt: str, *, max_tokens: int = MAX_OUTPUT_TOKENS
+        self,
+        system_prompt: str,
+        *,
+        max_tokens: int = MAX_OUTPUT_TOKENS,
+        stop_signal: Event | None = None,
     ) -> int:
         """시스템 프롬프트, 채팅 형식 및 출력 공간을 제외한 최대 입력 토큰 수 반환.
 
@@ -747,13 +769,19 @@ class LocalLLMRunner:
         """
         if not 0 < max_tokens <= MAX_OUTPUT_TOKENS:
             raise ValueError("max_tokens must be between 1 and 5000")
-        return N_CTX - max_tokens - PROMPT_MARGIN - len(self.tokenize(system_prompt))
+        return (
+            N_CTX
+            - max_tokens
+            - PROMPT_MARGIN
+            - len(self.tokenize(system_prompt, stop_signal=stop_signal))
+        )
 
-    def tokenize(self, text: str) -> list[int]:
+    def tokenize(self, text: str, *, stop_signal: Event | None = None) -> list[int]:
         """응답 생성에 사용하는 모델로 문자열을 토큰 ID 목록으로 변환.
 
         ContextManager에서 반환된 목록의 길이로 저장된 대화의 토큰 수 계산.
-        네이티브 모델은 생성과 직렬화. 원격 토큰화에는 요청 시간 제한을 적용.
+        네이티브 모델은 생성과 직렬화. 원격 토큰화에는 전체 시간 제한을 적용.
+        입력 준비 단계는 stop_signal도 전달한다. 대화 저장·압축은 완료 후 중지한다.
         """
         with nullcontext() if self._remote else self._busy:
             if self._closed:
@@ -766,13 +794,18 @@ class LocalLLMRunner:
                 with self._request_condition:
                     if self._closed:
                         raise RuntimeError("Runner is closed")
-                    self._tokenizers[get_ident()] = request
+                    self._tokenizers[get_ident()] = (request, stop_signal)
+                if stop_signal is not None and stop_signal.is_set():
+                    request.cancel()
                 request_scope = self._llm._request_context(request)
             try:
                 with request_scope:
-                    return self._llm.tokenize(
+                    tokens = self._llm.tokenize(
                         text.encode("utf-8"), add_bos=False, special=True
                     )
+                    if stop_signal is not None and stop_signal.is_set():
+                        raise TimeoutError("Local LLM tokenization was stopped")
+                    return tokens
             finally:
                 if self._remote:
                     with self._request_condition:
@@ -787,13 +820,22 @@ class LocalLLMRunner:
         대화 압축 중에는 압축 완료 후 중지 처리. 원격 서버의 생성 작업 취소는 별도 기능.
         """
         with self._request_condition:
+            stopped_signals: set[Event] = set()
             for active_run_id, stop_signal in self._active_requests.values():
                 if active_run_id == run_id:
                     stop_signal.set()
+                    stopped_signals.add(stop_signal)
             for pending_run_id, stop_signal in self._pending_requests:
                 if pending_run_id == run_id:
                     stop_signal.set()
             self._request_condition.notify_all()
+            tokenizers = [
+                request
+                for request, stop_signal in self._tokenizers.values()
+                if stop_signal in stopped_signals
+            ]
+        for request in tokenizers:
+            request.cancel()
 
     def close(self) -> None:
         """Runner 사용을 종료하고 진행 중인 수신이 끝나면 모델 자원 해제.
@@ -808,7 +850,7 @@ class LocalLLMRunner:
             for _, stop_signal in self._active_requests.values():
                 stop_signal.set()
             receivers = list(self._receivers.items())
-            tokenizers = list(self._tokenizers.values())
+            tokenizers = [request for request, _ in self._tokenizers.values()]
             self._request_condition.notify_all()
         for request in tokenizers:
             request.cancel()

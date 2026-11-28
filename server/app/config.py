@@ -13,7 +13,7 @@ ENV_FILE = SERVER_DIR / ".env"
 # 채팅·실행 기록 DB의 기본 위치. 실행 위치와 상관없이 server/ 기준이다. (git 제외)
 DEFAULT_DB_PATH = SERVER_DIR / "data" / "chat.sqlite3"
 # 동적 퓨샷 프롬프트 선택용 다국어 CPU 임베딩 모델 (EmbeddingGemma 2 텍스트 전용 INT8 ONNX)
-DEFAULT_EMBEDDING_MODEL = "surus-ai/embeddinggemma-2-onnx"
+EMBEDDING_GEMMA2_REPO = "surus-ai/embeddinggemma-2-onnx"
 DEFAULT_DYNAMIC_TOP_N = 3
 
 
@@ -44,14 +44,6 @@ def db_path() -> Path:
     """CHAT_DB_PATH 설정값. 상대 경로는 server/ 기준으로 해석한다."""
     path = Path(setting("CHAT_DB_PATH", default=str(DEFAULT_DB_PATH)) or "")
     return path if path.is_absolute() else SERVER_DIR / path
-
-
-def embedding_model() -> str:
-    """EMBEDDING_MODEL 설정값. 비어 있으면 기본 다국어 CPU 임베딩 모델을 사용한다."""
-    return (
-        setting("EMBEDDING_MODEL", default=DEFAULT_EMBEDDING_MODEL)
-        or DEFAULT_EMBEDDING_MODEL
-    )
 
 
 def dynamic_prompt_enabled() -> bool:

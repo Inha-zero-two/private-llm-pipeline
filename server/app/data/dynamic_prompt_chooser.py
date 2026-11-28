@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from app.config import DEFAULT_EMBEDDING_MODEL
+from app.config import EMBEDDING_GEMMA2_REPO
 from app.models.enums import PromptIdx
 
 if TYPE_CHECKING:
@@ -49,7 +49,6 @@ class DynamicPromptChooser:
         prompt_manager: PromptManager,
         *,
         dynamic_prompt_file: Path | str = DEFAULT_DYNAMIC_PROMPT_FILE,
-        model_name: str = DEFAULT_EMBEDDING_MODEL,
         chat_manager: ChatManager | None = None,
         embedder: Embedder | None = None,
         preload: bool = False,
@@ -57,14 +56,13 @@ class DynamicPromptChooser:
         """후보 프롬프트 파일을 읽고, 필요 시 임베딩 모델과 후보 벡터를 사전 로드한다."""
         self._prompt_manager = prompt_manager
         self._dynamic_prompt_file = Path(dynamic_prompt_file)
-        self._model_name = model_name
         self._chat_manager = chat_manager
         self._embedder = embedder
         self._lock = Lock()
         self._version: str = ""
         self._candidates: dict[str, list[PromptCandidate]] = {}
         self._loaded = False
-        self._model: Any = None
+        self._model: _OnnxEmbeddingGemma2 | None = None
         self._closed = False
         self._vector_cache: dict[str, tuple[float, ...]] = {}
         self._last_target_vector: tuple[str, tuple[float, ...]] | None = None
@@ -283,19 +281,14 @@ class DynamicPromptChooser:
                 scores.append(round(_cosine_similarity(target_vec, cand_vec), 4))
             return scores
 
-    def _ensure_model_locked(self) -> Any:
-        """락 내부에서 호출. 임베딩 백엔드(ONNX EmbeddingGemma 2 또는 fastembed) 준비."""
+    def _ensure_model_locked(self) -> _OnnxEmbeddingGemma2 | None:
+        """락 내부에서 호출. CPU ONNX EmbeddingGemma 2 모델 준비."""
         if self._closed:
             raise RuntimeError("DynamicPromptChooser is closed")
         if self._embedder is not None:
             return None
         if self._model is None:
-            if _is_embedding_gemma2(self._model_name):
-                self._model = _OnnxEmbeddingGemma2(self._model_name)
-            else:
-                from fastembed import TextEmbedding
-
-                self._model = TextEmbedding(model_name=self._model_name)
+            self._model = _OnnxEmbeddingGemma2()
         return self._model
 
     def _embed_candidates_locked(
@@ -330,16 +323,8 @@ class DynamicPromptChooser:
             raw_vectors: Any = self._embedder(list(texts))
         else:
             model = self._ensure_model_locked()
-            if isinstance(model, _OnnxEmbeddingGemma2):
-                raw_vectors = model.embed(texts, is_query=is_query)
-            elif "e5" in self._model_name.lower():
-                raw_vectors = (
-                    model.query_embed(list(texts))
-                    if is_query
-                    else model.passage_embed(list(texts))
-                )
-            else:
-                raw_vectors = model.embed(list(texts))
+            assert model is not None
+            raw_vectors = model.embed(texts, is_query=is_query)
         vectors = [tuple(float(x) for x in vec) for vec in raw_vectors]
         if len(vectors) != len(texts):
             raise RuntimeError("임베딩 결과 개수가 입력 개수와 일치하지 않습니다")
@@ -385,13 +370,13 @@ class DynamicPromptChooser:
 class _OnnxEmbeddingGemma2:
     """EmbeddingGemma 2 텍스트 전용 INT8 ONNX CPU 실행 래퍼."""
 
-    def __init__(self, repo_id: str) -> None:
+    def __init__(self) -> None:
         import onnxruntime as ort
         from huggingface_hub import hf_hub_download
         from tokenizers import Tokenizer
 
-        model_path = hf_hub_download(repo_id, "model_q8.onnx")
-        tokenizer_path = hf_hub_download(repo_id, "tokenizer.json")
+        model_path = hf_hub_download(EMBEDDING_GEMMA2_REPO, "model_q8.onnx")
+        tokenizer_path = hf_hub_download(EMBEDDING_GEMMA2_REPO, "tokenizer.json")
 
         tokenizer = Tokenizer.from_file(tokenizer_path)
         tokenizer.enable_padding()
@@ -427,11 +412,6 @@ class _OnnxEmbeddingGemma2:
         norms = np.clip(np.linalg.norm(pooled, axis=1, keepdims=True), 1e-12, None)
         normalized = pooled / norms
         return [tuple(float(v) for v in row) for row in normalized]
-
-
-def _is_embedding_gemma2(model_name: str) -> bool:
-    """EmbeddingGemma 2 텍스트 전용 ONNX 로더 대상인지 확인한다."""
-    return "embeddinggemma-2" in model_name.lower()
 
 
 def _match_selected_indices(

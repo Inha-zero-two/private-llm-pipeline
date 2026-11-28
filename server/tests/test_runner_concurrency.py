@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from threading import Event, Lock
+from time import monotonic
 from unittest.mock import Mock
 
 import httpx
@@ -18,7 +20,7 @@ from app.runtime.local_llm_runner import LocalLLMRunner
 from src.localLLM_API_proxy import llama_wrapper as wrapper
 
 
-class ControlledStream(httpx.SyncByteStream):
+class ControlledStream(httpx.AsyncByteStream):
     def __init__(
         self, server: ModelServer, text: str, *, tokenize: bool = False
     ) -> None:
@@ -28,14 +30,22 @@ class ControlledStream(httpx.SyncByteStream):
         self.released = Event()
         self.closed = Event()
 
-    def __iter__(self) -> Iterator[bytes]:
+    async def __aiter__(self) -> AsyncIterator[bytes]:
         with self.server.lock:
             self.server.active += 1
             self.server.peak = max(self.server.peak, self.server.active)
         try:
+            if self.text == "trickle-tokenize":
+                self.server.started.put(self)
+                while not self.released.is_set():
+                    yield b" "
+                    await asyncio.sleep(0.01)
+                yield b'{"tokens": [1]}'
+                return
             if self.text.startswith("block"):
                 self.server.started.put(self)
-                assert self.released.wait(3), "Test stream was not released"
+                while not self.released.is_set():
+                    await asyncio.sleep(0.005)
                 if self.closed.is_set():
                     return
             if self.text == "disconnect":
@@ -57,7 +67,7 @@ class ControlledStream(httpx.SyncByteStream):
         body = {"choices": [{"delta": {"content": text}, "finish_reason": finish}]}
         return ("data: " + json.dumps(body) + "\n\n").encode()
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
         self.closed.set()
         self.released.set()
 
@@ -70,10 +80,12 @@ class ModelServer:
         self.peak = 0
         self.fail_next = False
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         if request.url.path == "/tokenize":
-            if body["content"] == "block-tokenize":
+            if body["content"].startswith("header-tokenize"):
+                await self.wait_for_headers(body["content"])
+            if body["content"] in {"block-tokenize", "trickle-tokenize"}:
                 return httpx.Response(
                     200, stream=ControlledStream(self, body["content"], tokenize=True)
                 )
@@ -85,7 +97,18 @@ class ModelServer:
             fail = self.fail_next
             self.fail_next = False
         text = "disconnect" if fail else body["messages"][-1]["content"]
+        if text.startswith("header-"):
+            await self.wait_for_headers(text)
         return httpx.Response(200, stream=ControlledStream(self, text))
+
+    async def wait_for_headers(self, text: str) -> None:
+        pending = ControlledStream(self, text)
+        self.started.put(pending)
+        try:
+            while not pending.released.is_set():
+                await asyncio.sleep(0.005)
+        finally:
+            pending.closed.set()
 
 
 @pytest.fixture
@@ -271,3 +294,189 @@ def test_flag_off_or_native_backend_preserves_serial_requests(
         next_stream.released.set()
         assert first.result(timeout=2)[1] and second.result(timeout=2)[1]
         assert server.peak == 1
+
+
+@pytest.mark.parametrize("text", ["header-generation", "header-tokenize"])
+def test_stop_before_headers_releases_slot_and_preserves_other_request(
+    remote_runner: tuple[LocalLLMRunner, ModelServer], text: str
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 5
+    runner._max_concurrent_requests = 2
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        other = pool.submit(runner.manual_request, "block-other", "system", run_id=2)
+        other_stream = server.started.get(timeout=1)
+        stopped = pool.submit(runner.manual_request, text, "system", run_id=1)
+        pending = server.started.get(timeout=1)
+        try:
+            runner.stop(1)
+            assert stopped.result(timeout=1)[4] == "stopped"
+            assert pending.closed.wait(1)
+            # 새 요청은 취소한 수신 슬롯을 재사용해야 한다.
+            assert runner.manual_request("normal", "system", run_id=3)[1]
+            assert not other_stream.closed.is_set()
+        finally:
+            pending.released.set()
+            other_stream.released.set()
+        assert other.result(timeout=1)[1]
+
+
+def test_all_header_waits_can_be_cancelled_without_exhausting_capacity(
+    remote_runner: tuple[LocalLLMRunner, ModelServer],
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 5
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        requests = [
+            pool.submit(runner.manual_request, f"header-{i}", "system", run_id=i)
+            for i in range(4)
+        ]
+        pending = [server.started.get(timeout=1) for _ in requests]
+        try:
+            for i in range(4):
+                runner.stop(i)
+            assert all(
+                request.result(timeout=1)[4] == "stopped" for request in requests
+            )
+            assert all(wait.closed.wait(1) for wait in pending)
+            assert runner.manual_request("normal", "system", run_id=5)[1]
+            with runner._state_lock:
+                assert not runner._receivers
+        finally:
+            for wait in pending:
+                wait.released.set()
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_header_timeout_releases_capacity(
+    remote_runner: tuple[LocalLLMRunner, ModelServer], direct: bool
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 0.1
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = (
+            pool.submit(runner.tokenize, "header-tokenize")
+            if direct
+            else pool.submit(runner.manual_request, "header-generation", "system")
+        )
+        pending = server.started.get(timeout=1)
+        try:
+            with pytest.raises(TimeoutError):
+                request.result(timeout=1)
+            assert pending.closed.wait(1)
+            assert runner.manual_request("normal", "system")[1]
+        finally:
+            pending.released.set()
+
+
+@pytest.mark.parametrize("text", ["header-tokenize", "block-tokenize"])
+@pytest.mark.parametrize("system_prompt", [False, True])
+def test_stop_interrupts_context_preparation_tokenization(
+    remote_runner: tuple[LocalLLMRunner, ModelServer], text: str, system_prompt: bool
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 5
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(
+            runner.request,
+            1,
+            "normal" if system_prompt else text,
+            PromptIdx.NEEDS,
+            1,
+            use_context=True,
+            system_prompt=text if system_prompt else "system",
+        )
+        pending = server.started.get(timeout=1)
+        try:
+            runner.stop(1)
+            assert request.result(timeout=1)[4] == "stopped"
+            assert pending.closed.wait(1)
+            assert not runner._tokenizers
+            assert runner.manual_request("normal", "system", run_id=1)[1]
+        finally:
+            pending.released.set()
+
+
+def test_direct_tokenization_has_total_deadline_despite_continuous_chunks(
+    remote_runner: tuple[LocalLLMRunner, ModelServer],
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 0.1
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        started = monotonic()
+        request = pool.submit(runner.tokenize, "trickle-tokenize")
+        stream = server.started.get(timeout=1)
+        try:
+            with pytest.raises(TimeoutError):
+                request.result(timeout=1)
+            assert monotonic() - started < 1
+            assert stream.closed.wait(1)
+            assert not runner._tokenizers
+            assert runner.tokenize("normal")
+        finally:
+            stream.released.set()
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_close_cancels_header_waits_and_stops_http_loop(
+    remote_runner: tuple[LocalLLMRunner, ModelServer], direct: bool
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 5
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        request = (
+            pool.submit(runner.tokenize, "header-tokenize")
+            if direct
+            else pool.submit(runner.manual_request, "header-generation", "system")
+        )
+        pending = server.started.get(timeout=1)
+        try:
+            closing = pool.submit(runner.close)
+            closing.result(timeout=1)
+            assert pending.closed.is_set()
+            assert not runner._llm._http._thread.is_alive()
+            if direct:
+                with pytest.raises(TimeoutError):
+                    request.result(timeout=1)
+            else:
+                assert request.result(timeout=1)[4] == "stopped"
+        finally:
+            pending.released.set()
+
+
+@pytest.mark.parametrize("before_generation", [False, True])
+def test_stop_defers_until_context_compaction_and_save_finish(
+    remote_runner: tuple[LocalLLMRunner, ModelServer],
+    monkeypatch: pytest.MonkeyPatch,
+    before_generation: bool,
+) -> None:
+    runner, server = remote_runner
+    runner._timeout = 5
+    manager = ContextManager(runner, 1, compaction_limit=80, compaction_target=10)
+    runner.context_managers[1] = manager
+    context_id = manager.get_id(1, PromptIdx.NEEDS)
+    assert manager.append(context_id, "block-" + "x" * 44)
+    if before_generation:
+        monkeypatch.setattr(runner, "get_input_limit", Mock(return_value=50))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(
+            runner.request,
+            1,
+            "normal",
+            PromptIdx.NEEDS,
+            1,
+            use_context=True,
+            system_prompt="system",
+        )
+        stream = server.started.get(timeout=1)
+        try:
+            runner.stop(1)
+            assert not request.done()
+            assert not stream.closed.is_set()
+        finally:
+            stream.released.set()
+        assert request.result(timeout=1)[4] == "stopped"
+        expected = '{"needs": ["item"]}'
+        if not before_generation:
+            expected += '\nUser: normal\nAssistant: {"needs": ["item"]}\n'
+        assert manager.get_context(context_id) == expected

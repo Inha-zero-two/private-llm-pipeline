@@ -39,8 +39,8 @@
 
 ## 임베딩 모델과 설정 (`server/.env`)
 
-- 기본 모델은 `EmbeddingGemma 2` 텍스트 전용 INT8 ONNX 모델인 `surus-ai/embeddinggemma-2-onnx` (CPU 실행, 768차원)이며, `fastembed` 내장 모델(`google/embeddinggemma-300m`, `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` 등)로도 설정으로 전환할 수 있다.
-- `EMBEDDING_MODEL`: 사용할 임베딩 모델명 지정
+- `EmbeddingGemma 2` 텍스트 전용 INT8 ONNX 모델인 `surus-ai/embeddinggemma-2-onnx` (CPU 실행, 768차원)만 사용한다. 모델 교체 설정은 제공하지 않는다.
+- 질문에는 `task: search result | query: `, 후보에는 `title: none | text: ` 접두사를 적용한다.
 - `DYNAMIC_PROMPT_ENABLED`: `false` / `0` / `no` / `off` 시 동적 프롬프트 비활성화 (기본 `true`)
 - `DYNAMIC_PROMPT_TOP_N`: `NEEDS` 단계에서 선택할 후보 개수 (기본 `3`)
 

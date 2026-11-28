@@ -73,7 +73,6 @@ def _default_prompt_chooser(
         return None
     chooser = DynamicPromptChooser(
         prompt_manager,
-        model_name=config.embedding_model(),
         chat_manager=chat_manager,
     )
     chooser.warmup()

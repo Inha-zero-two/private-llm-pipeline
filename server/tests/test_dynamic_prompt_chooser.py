@@ -331,7 +331,7 @@ def test_close_prevents_subsequent_calls(tmp_path: Path) -> None:
         chooser.build_prompt(PromptIdx.NEEDS, "T", 1)
 
 
-def test_onnx_embeddinggemma2_default_and_fastembed_dispatch(
+def test_onnx_embeddinggemma2_cpu_prefixes_and_pooling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dyn_file = _write_json(
@@ -425,12 +425,12 @@ def test_onnx_embeddinggemma2_default_and_fastembed_dispatch(
     prompt, _ = default_chooser.build_prompt(PromptIdx.NEEDS, "질문", 1)
     assert "P" in prompt
     assert downloads == [
-        (config.DEFAULT_EMBEDDING_MODEL, "model_q8.onnx"),
-        (config.DEFAULT_EMBEDDING_MODEL, "tokenizer.json"),
+        (config.EMBEDDING_GEMMA2_REPO, "model_q8.onnx"),
+        (config.EMBEDDING_GEMMA2_REPO, "tokenizer.json"),
     ]
     assert session_configs == [
         (
-            f"/fake/{config.DEFAULT_EMBEDDING_MODEL}/model_q8.onnx",
+            f"/fake/{config.EMBEDDING_GEMMA2_REPO}/model_q8.onnx",
             2,
             1,
             ["CPUExecutionProvider"],
@@ -444,57 +444,13 @@ def test_onnx_embeddinggemma2_default_and_fastembed_dispatch(
     assert math.isclose(cached_vec[0], 0.6, rel_tol=1e-5)
     assert math.isclose(cached_vec[1], 0.8, rel_tol=1e-5)
 
-    created: list[tuple[str, dict[str, list[str]]]] = []
 
-    class FakeTextEmbedding:
-        def __init__(self, model_name: str) -> None:
-            self.calls: dict[str, list[str]] = {}
-            created.append((model_name, self.calls))
-
-        def embed(self, docs: Sequence[str]) -> list[list[float]]:
-            self.calls.setdefault("embed", []).extend(docs)
-            return [[1.0, 0.0] for _ in docs]
-
-        def query_embed(self, docs: Sequence[str]) -> list[list[float]]:
-            self.calls.setdefault("query_embed", []).extend(docs)
-            return [[1.0, 0.0] for _ in docs]
-
-        def passage_embed(self, docs: Sequence[str]) -> list[list[float]]:
-            self.calls.setdefault("passage_embed", []).extend(docs)
-            return [[1.0, 0.0] for _ in docs]
-
-    monkeypatch.setitem(
-        sys.modules, "fastembed", SimpleNamespace(TextEmbedding=FakeTextEmbedding)
-    )
-
-    minilm_chooser = DynamicPromptChooser(
-        prompts,
-        dynamic_prompt_file=dyn_file,
-        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    )
-    minilm_chooser.build_prompt(PromptIdx.NEEDS, "질문", 1)
-    assert (
-        created[0][0] == "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    )
-    assert "embed" in created[0][1]
-    assert "query_embed" not in created[0][1]
-
-    e5_chooser = DynamicPromptChooser(
-        prompts,
-        dynamic_prompt_file=dyn_file,
-        model_name="intfloat/multilingual-e5-large",
-    )
-    e5_chooser.build_prompt(PromptIdx.NEEDS, "질문", 1)
-    assert created[1][0] == "intfloat/multilingual-e5-large"
-    assert created[1][1]["query_embed"] == ["질문"]
-    assert created[1][1]["passage_embed"] == ["Q"]
-
-
-def test_config_dynamic_prompt_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+def test_config_dynamic_prompt_helpers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / "missing.env")
     monkeypatch.delenv("DYNAMIC_PROMPT_ENABLED", raising=False)
     monkeypatch.delenv("DYNAMIC_PROMPT_TOP_N", raising=False)
-    assert config.embedding_model() == config.DEFAULT_EMBEDDING_MODEL
     assert config.dynamic_prompt_enabled() is True
     assert config.dynamic_prompt_top_n() == 3
 

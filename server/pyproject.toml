@@ -4,9 +4,12 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.162.2",
-    "fastembed>=0.9.1",
     "httpx==0.28.1",
+    "huggingface-hub>=0.36.0",
+    "numpy>=2.2.0",
+    "onnxruntime>=1.24.2",
     "pydantic==2.14.2",
+    "tokenizers>=0.21.0",
     "uvicorn==0.54.0",
 ]
 
