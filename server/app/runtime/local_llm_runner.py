@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from _thread import LockType
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -11,7 +12,15 @@ from threading import Condition, Event, Lock, Thread, current_thread, get_ident
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+from ..models.context import ContextBinding, ContextInput, ContextUse
 from ..models.enums import PromptIdx
+from ..models.errors import (
+    ErrorCode,
+    ErrorStage,
+    PipelineError,
+    describe_error,
+    model_failure,
+)
 from ..models.llm_results import ParsedRequestResult, RequestResult
 from .local_res_parser import OutputFormatError, parser
 
@@ -22,6 +31,7 @@ if TYPE_CHECKING:
 
 # 최초 요청을 포함한 최대 생성 시도 횟수
 MAX_ATTEMPTS = 3
+CONTEXT_CACHE_SIZE = 8
 # 모델의 전체 입력·출력 토큰 한도
 N_CTX = 32768
 # 연결 확인·일반 요청·요약 요청의 공통 출력 상한
@@ -34,6 +44,13 @@ class RunnerUnavailableError(ConnectionError):
     """Runner 종료 또는 요청 대기 시간 초과. 내부 구현 오류와 구분한다."""
 
 
+class ModelResponseError(PipelineError):
+    """모델 스트림이 비어 있거나 완료 정보 없이 종료됨."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage.PIPELINE, detail)
+
+
 class LocalLLMRunner:
     def __init__(
         self,
@@ -44,7 +61,7 @@ class LocalLLMRunner:
         prompt_manager: PromptManager | None = None,
         chat_manager: ChatManager | None = None,
     ) -> None:
-        """공유 모델과 실행별 대화 관리 객체 초기화.
+        """공유 모델과 채팅·실행별 대화 관리 객체 초기화.
 
         model_path: 모델 파일 경로. timeout: 한 번의 응답을 기다리는 최대 시간(초).
         max_concurrent_requests: 실험용 원격 wrapper의 동시 요청 상한(기본 4).
@@ -54,9 +71,17 @@ class LocalLLMRunner:
         초기화 시 짧은 요청으로 실제 응답 확인. 모델 준비나 응답 확인 실패 시 예외 전달.
         """
         if timeout <= 0:
-            raise ValueError("timeout must be positive")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.STARTUP,
+                "timeout must be positive",
+            )
         if max_concurrent_requests < 1:
-            raise ValueError("max_concurrent_requests must be positive")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.STARTUP,
+                "max_concurrent_requests must be positive",
+            )
         self._model_path = model_path
         self._timeout = timeout
         self.prompt_manager = prompt_manager
@@ -73,10 +98,13 @@ class LocalLLMRunner:
         self._tokenizers: dict[int, tuple[Any, Event | None]] = {}
         self._context_lock = Lock()  # 대화 객체와 초기화 잠금의 사전 접근용
         self._context_init_locks: dict[int, LockType] = {}
+        self._chat_context_init_locks: dict[int, LockType] = {}
         self._closed = False
         self._llm: Any = None
-        # 실행 ID별 대화 관리 객체. 모든 객체가 모델 하나를 공유
+        # 내부 작업은 실행별 임시 공간, 사용자 대화는 채팅별 DB 복원 캐시.
         self.context_managers: dict[int, ContextManager] = {}
+        self._chat_contexts: dict[int, ContextManager] = {}
+        self._chat_bindings: dict[int, ContextBinding] = {}
         self.model_load()
 
     @contextmanager
@@ -129,9 +157,7 @@ class LocalLLMRunner:
                             break
                         remaining = deadline - monotonic()
                         if remaining <= 0:
-                            raise RunnerUnavailableError(
-                                "Model request queue timed out"
-                            )
+                            raise TimeoutError("Model request queue timed out")
                         # 이전 수신 정리는 별도 스레드에서 끝날 수 있으므로 주기적으로 확인.
                         self._request_condition.wait(timeout=min(0.05, remaining))
                 finally:
@@ -169,6 +195,76 @@ class LocalLLMRunner:
                 self.context_managers[run_id] = manager
                 del self._context_init_locks[run_id]
             return manager
+
+    def get_chat_context_manager(self, chat_id: int) -> ContextManager:
+        """DB 복원 가능한 채팅별 LRU 캐시. 초기화 I/O는 다른 채팅을 막지 않는다."""
+        from .context_manager import ContextManager
+
+        while True:
+            with self._context_lock:
+                if chat_id in self._chat_contexts:
+                    manager = self._chat_contexts.pop(chat_id)
+                    self._chat_contexts[chat_id] = manager
+                    return manager
+                init_lock = self._chat_context_init_locks.setdefault(chat_id, Lock())
+
+            with init_lock:
+                with self._context_lock:
+                    if chat_id in self._chat_contexts:
+                        manager = self._chat_contexts.pop(chat_id)
+                        self._chat_contexts[chat_id] = manager
+                        return manager
+                    # 이전 초기화의 대기 중 LRU에서 퇴출됐다면 새 초기화에 합류한다.
+                    if self._chat_context_init_locks.get(chat_id) is not init_lock:
+                        continue
+                manager = ContextManager(self, chat_id)
+                with self._context_lock:
+                    if len(self._chat_contexts) >= CONTEXT_CACHE_SIZE:
+                        self._chat_contexts.pop(next(iter(self._chat_contexts)))
+                    self._chat_contexts[chat_id] = manager
+                    del self._chat_context_init_locks[chat_id]
+                return manager
+
+    def begin_turn_context(
+        self, run_id: int, chat_id: int, user_message_id: int
+    ) -> None:
+        if self.chat_manager is None:
+            return
+        boundary = self.chat_manager.context_boundary(chat_id, user_message_id)
+        with self._context_lock:
+            self._chat_bindings[run_id] = ContextBinding(
+                chat_id=chat_id, through_seq=boundary
+            )
+
+    def end_turn_context(self, run_id: int) -> None:
+        with self._context_lock:
+            self._chat_bindings.pop(run_id, None)
+            self.context_managers.pop(run_id, None)
+
+    def forget_chat(self, chat_id: int) -> None:
+        with self._context_lock:
+            self._chat_contexts.pop(chat_id, None)
+
+    def _chat_input(
+        self,
+        run_id: int | str | None,
+        input_: str,
+        system_prompt: str,
+        max_tokens: int,
+        *,
+        chat_id: int | str | None = None,
+    ) -> ContextInput:
+        with self._context_lock:
+            binding = self._chat_bindings.get(run_id)
+        if binding is None:
+            return ContextInput(text=input_)
+        if chat_id is not None and chat_id != binding.chat_id:
+            raise PipelineError(
+                ErrorCode.STATE_CONSISTENCY_ERROR, ErrorStage.COMPACTION
+            )
+        return self.get_chat_context_manager(binding.chat_id).prepare_input(
+            input_, system_prompt, binding.through_seq, run_id, max_tokens=max_tokens
+        )
 
     def model_load(self) -> bool:
         """모델을 준비하고 짧은 응답으로 연결 확인 후 True 반환.
@@ -212,6 +308,7 @@ class LocalLLMRunner:
         log_call: bool = True,
         on_token: Callable[[str], None] | None = None,
         interruptible: bool = True,
+        stage: ErrorStage = ErrorStage.PIPELINE,
     ) -> RequestResult:
         """직접 지정한 입력과 시스템 프롬프트로 응답 요청 후 답변 반환.
 
@@ -229,15 +326,23 @@ class LocalLLMRunner:
                 interruptible or active is None or active[1] is not stop_signal
             ):
                 return "", False, 0, 0, "stopped"
+            chat_input = (
+                self._chat_input(run_id, input_, system_prompt, max_tokens)
+                if stage == ErrorStage.ANSWER
+                else ContextInput(text=input_)
+            )
+            if interruptible and stop_signal.is_set():
+                return "", False, 0, 0, "stopped"
             input_tokens: int | None = 0
             output_tokens: int | None = 0
             last_output = ""
-            for _ in range(MAX_ATTEMPTS):
+            for attempt in range(1, MAX_ATTEMPTS + 1):
                 output: list[str] = []
+                attempt_failure: str | None = None
                 started = monotonic()
                 try:
                     result = self._generate(
-                        input_,
+                        chat_input.text,
                         system_prompt,
                         stop_signal=stop_signal,
                         output=output,
@@ -245,6 +350,28 @@ class LocalLLMRunner:
                         on_token=on_token,
                         interruptible=interruptible,
                     )
+                    if not result[1]:
+                        attempt_failure = result[4]
+                except Exception as error:
+                    info = describe_error(error, stage)
+                    logging.getLogger(__name__).warning(
+                        "Manual model attempt failed run_id=%s code=%s stage=%s attempt=%s",
+                        run_id,
+                        info.code,
+                        info.stage,
+                        attempt,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+                    attempt_failure = (
+                        "timeout"
+                        if isinstance(error, TimeoutError)
+                        else "parse_failed"
+                        if isinstance(error, ModelResponseError)
+                        else "unavailable"
+                        if isinstance(error, ConnectionError)
+                        else None
+                    )
+                    raise
                 finally:
                     if log_call:
                         self._log_call(
@@ -255,6 +382,10 @@ class LocalLLMRunner:
                             prompt_version=None,
                             elapsed_ms=(monotonic() - started) * 1000,
                             format_valid=None,
+                            failure_reason=attempt_failure,
+                            attempt=attempt,
+                            stage=stage,
+                            context_reference=chat_input.reference,
                         )
                 input_tokens = (
                     input_tokens + result[2]
@@ -305,7 +436,7 @@ class LocalLLMRunner:
             if interruptible and stop_signal.is_set():
                 return "", False, 0, 0, "stopped"
             if monotonic() >= deadline:
-                raise RunnerUnavailableError("Model cleanup wait timed out")
+                raise TimeoutError("Model cleanup wait timed out")
         with self._state_lock:
             if self._closed:
                 if not self._remote:
@@ -393,7 +524,7 @@ class LocalLLMRunner:
                     return "", False, 0, 0, "stopped"
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    raise RunnerUnavailableError("Model cleanup wait timed out")
+                    raise TimeoutError("Model cleanup wait timed out")
                 self._request_condition.wait(timeout=min(0.05, remaining))
             if self._closed:
                 if not self._remote:
@@ -435,9 +566,9 @@ class LocalLLMRunner:
                     answer = "".join(text)
                     if finish_reason is None:
                         if not answer.strip():
-                            error = RuntimeError("Local LLM returned no response")
+                            error = ModelResponseError("Local LLM returned no response")
                         else:
-                            error = RuntimeError(
+                            error = ModelResponseError(
                                 "Local LLM stream ended without a finish reason"
                             )
                         generation_errors.append(error)
@@ -535,7 +666,7 @@ class LocalLLMRunner:
                             return None, False, 0, 0, "stopped"
                         raise
                     if len(model_tokens) > input_limit:
-                        compacted = manager.compact_context(context_id)
+                        compacted = manager.compact_context(context_id, run_id=run_id)
                         if stop_signal.is_set():
                             return "", False, 0, 0, "stopped"
                         if not compacted:
@@ -544,17 +675,28 @@ class LocalLLMRunner:
                         model_input = (
                             f"Previous context:\n{context}\n\nCurrent input:\n{input_}"
                         )
+            chat_input = (
+                self._chat_input(
+                    run_id, model_input, system_prompt, max_tokens, chat_id=chat_id
+                )
+                if prompt_idx in {PromptIdx.NEEDS, PromptIdx.JUDGE, PromptIdx.WRITE}
+                else ContextInput(text=model_input)
+            )
+            model_input = chat_input.text
+            if stop_signal.is_set():
+                return None, False, 0, 0, "stopped"
             # 재생성에도 같은 입력 사용. 최종 응답까지 이전 대화 내용은 유지
             input_tokens: int | None = 0
             output_tokens: int | None = 0
             last_output = ""
             failure_reason = "parse_failed"
-            for _ in range(MAX_ATTEMPTS):
+            for attempt in range(1, MAX_ATTEMPTS + 1):
                 if stop_signal.is_set():
                     return last_output, False, input_tokens, output_tokens, "stopped"
                 output: list[str] = []
                 generation_errors: list[Exception] = []  # 모델 요청·수신 중 발생한 오류
                 format_valid = None
+                attempt_failure: str | None = None
                 started = monotonic()
                 try:
                     try:
@@ -572,7 +714,22 @@ class LocalLLMRunner:
                         if not generation_errors:
                             raise
                         input_tokens = output_tokens = None
-                        failure_reason = "unavailable"
+                        cause = generation_errors[-1]
+                        logging.getLogger(__name__).warning(
+                            "Local model attempt failed run_id=%s task=%s attempt=%s",
+                            run_id,
+                            prompt_idx,
+                            attempt,
+                            exc_info=(type(cause), cause, cause.__traceback__),
+                        )
+                        failure_reason = (
+                            "timeout"
+                            if isinstance(cause, TimeoutError)
+                            else "parse_failed"
+                            if isinstance(cause, ModelResponseError)
+                            else "unavailable"
+                        )
+                        attempt_failure = failure_reason
                         last_output = "".join(output) or last_output
                         if stop_signal.is_set():
                             return last_output, False, None, None, "stopped"
@@ -598,6 +755,7 @@ class LocalLLMRunner:
                             "stopped" if stop_signal.is_set() else result[4],
                         )
                     if not result[1]:
+                        attempt_failure = result[4]
                         last_output = result[0]
                         if result[4] == "context_full":
                             return (
@@ -614,9 +772,17 @@ class LocalLLMRunner:
                     # 출력 형식 오류만 재시도. 파서 내부 코드의 오류는 호출자에게 전달
                     try:
                         parsed = parser(result[0], prompt_idx)
-                    except OutputFormatError:
+                    except OutputFormatError as error:
+                        logging.getLogger(__name__).warning(
+                            "Model parse failed run_id=%s task=%s attempt=%s",
+                            run_id,
+                            prompt_idx,
+                            attempt,
+                            exc_info=(type(error), error, error.__traceback__),
+                        )
                         format_valid = False
                         failure_reason = "parse_failed"
+                        attempt_failure = failure_reason
                         last_output = result[0]
                         if stop_signal.is_set():
                             return (
@@ -638,16 +804,27 @@ class LocalLLMRunner:
                         prompt_version=prompt_version,
                         elapsed_ms=(monotonic() - started) * 1000,
                         format_valid=format_valid,
+                        failure_reason=attempt_failure,
+                        attempt=attempt,
+                        context_reference=chat_input.reference,
                     )
                 if stop_signal.is_set():
                     return result[0], False, input_tokens, output_tokens, "stopped"
                 if manager is not None and context_id is not None:
                     # 입력과 형식 검사를 통과한 최종 답변만 이전 대화에 한 번 추가
                     appended = manager.append(
-                        context_id, f"\nUser: {input_}\nAssistant: {result[0]}\n"
+                        context_id,
+                        f"\nUser: {input_}\nAssistant: {result[0]}\n",
+                        run_id=run_id,
                     )
                     if not appended and not stop_signal.is_set():
-                        return None, False, input_tokens, output_tokens, "length_failed"
+                        return (
+                            None,
+                            False,
+                            input_tokens,
+                            output_tokens,
+                            "compaction_failed",
+                        )
                 # 대화 압축 중 중지 신호를 받으면 요약 저장을 마친 뒤 요청 중지
                 if stop_signal.is_set():
                     return result[0], False, input_tokens, output_tokens, "stopped"
@@ -741,6 +918,10 @@ class LocalLLMRunner:
         prompt_version: str | None,
         elapsed_ms: float,
         format_valid: bool | None,
+        failure_reason: str | None = None,
+        attempt: int | None = None,
+        stage: ErrorStage = ErrorStage.PIPELINE,
+        context_reference: ContextUse | None = None,
     ) -> None:
         """요청 정보와 새 입력·답변의 로그 저장.
 
@@ -761,6 +942,21 @@ class LocalLLMRunner:
                         "format_valid": format_valid,
                         "input": new_input,
                         "output": output,
+                        "context": context_reference.model_dump(mode="json")
+                        if context_reference
+                        else None,
+                        "failure_reason": failure_reason,
+                        "attempt": attempt,
+                        "error": describe_error(
+                            model_failure(
+                                failure_reason,
+                                ErrorStage(prompt_idx)
+                                if prompt_idx in ErrorStage._value2member_map_
+                                else stage,
+                            )
+                        ).model_dump(mode="json")
+                        if failure_reason and failure_reason != "stopped"
+                        else None,
                     },
                 )
             except StorageError as error:
@@ -882,6 +1078,10 @@ class LocalLLMRunner:
         with self._busy:
             if self._llm is not None:
                 self._llm.close()
+        with self._context_lock:
+            self.context_managers.clear()
+            self._chat_contexts.clear()
+            self._chat_bindings.clear()
 
     def __enter__(self) -> LocalLLMRunner:
         """with 문에서 사용할 현재 객체 반환. 모델 준비는 생성자에서 처리."""

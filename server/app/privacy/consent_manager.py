@@ -17,6 +17,14 @@ from app.models.consent_results import (
     ConsentTarget,
 )
 from app.models.enums import PromptIdx
+from app.models.errors import (
+    ErrorCode,
+    ErrorStage,
+    ServiceError,
+    describe_error,
+    log_diagnostic,
+    model_failure,
+)
 from app.models.llm_results import ConsentText
 from app.privacy.pd_detector import CATEGORY_LABEL, PDTable
 
@@ -128,7 +136,7 @@ class ConsentManager:
             risk="허용한 개인정보가 외부 모델에 전송됩니다. 이번 실행에만 허용됩니다.",
         )
         try:
-            parsed, ok, *_ = self._runner.request(
+            parsed, ok, *_, reason = self._runner.request(
                 run_id,
                 json.dumps(
                     {
@@ -150,8 +158,21 @@ class ConsentManager:
                 )
             ):
                 text = parsed
-        except (ConnectionError, TimeoutError):
-            pass
+            elif reason != "stopped":
+                log_diagnostic(
+                    self._store,
+                    run_id,
+                    describe_error(model_failure(reason, ErrorStage.CONSENT)),
+                    recovered=True,
+                )
+        except (ConnectionError, TimeoutError) as error:
+            log_diagnostic(
+                self._store,
+                run_id,
+                describe_error(error, ErrorStage.CONSENT),
+                recovered=True,
+                error=error,
+            )
         return ConsentMessage(run_id=run_id, items=items, **text.model_dump())
 
     async def _io(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -326,10 +347,31 @@ class ConsentManager:
         )
         if reason == "unavailable":
             return None, True
+        if reason == "timeout":
+            raise ServiceError(
+                "동의 해석 시간 초과",
+                ErrorCode.LOCAL_LLM_TIMEOUT,
+                ErrorStage.INTERPRET_CONSENT,
+            )
         if not ok or not isinstance(parsed, list) or not parsed:
+            if reason != "stopped":
+                log_diagnostic(
+                    self._store,
+                    run_id,
+                    describe_error(model_failure(reason, ErrorStage.INTERPRET_CONSENT)),
+                    recovered=True,
+                )
             return None, False
         ids = [d.pd_id for d in parsed]
         if len(ids) != len(set(ids)) or not set(ids) <= {i.pd_id for i in items}:
+            log_diagnostic(
+                self._store,
+                run_id,
+                describe_error(
+                    model_failure("parse_failed", ErrorStage.INTERPRET_CONSENT)
+                ),
+                recovered=True,
+            )
             return None, False
         return {d.pd_id: d.allow for d in parsed}, False
 

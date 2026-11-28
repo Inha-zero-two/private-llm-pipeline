@@ -8,6 +8,7 @@ from threading import Thread
 from typing import TYPE_CHECKING
 
 from app.models.enums import EndReason, PromptIdx
+from app.models.errors import ErrorCode, ErrorStage, PipelineError, model_failure
 
 if TYPE_CHECKING:
     from app.data.prompt_manager import PromptManager
@@ -62,8 +63,8 @@ class AnswerGenerator:
 
         생성은 별도 스레드에서 바로 시작. 호출자는 next()로 토큰을 하나씩 꺼냄.
         중지(stop(run_id))되면 그때까지의 토큰만 내보내고 조용히 끝남.
-        생성 실패는 반복 도중 AnswerGenerationError로 전달.
-        chat_id는 Main 호출 규격을 다른 모듈과 맞추기 위한 자리(이전 대화 미사용).
+        생성 실패는 반복 도중 원인별 PipelineError 또는 원래 요청 예외로 전달.
+        이전 사용자 대화는 Runner가 run_id에 고정한 채팅 경계로 자동 주입한다.
         """
         # 1. 입력값 확인과 모델 입력 구성. 질문 원문은 로컬에서만 쓰므로 그대로 사용
         if not isinstance(question, str) or not question.strip():
@@ -71,7 +72,7 @@ class AnswerGenerator:
         if not isinstance(memo, str):
             raise TypeError("memo는 문자열이어야 합니다")
         if self._runner is None:
-            raise AnswerGenerationError("로컬 모델이 연결되지 않았습니다")
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.ANSWER)
         system_prompt = self._system_prompt()
         answer_input = f"[질문]\n{question.strip()}\n\n[메모]\n{memo.strip() or '없음'}"
 
@@ -87,15 +88,12 @@ class AnswerGenerator:
                     system_prompt,
                     run_id=run_id,
                     on_token=tokens.put,
+                    stage=ErrorStage.ANSWER,
                 )
                 if reason == "stopped":
                     return  # 중지는 Main이 처리. 부분 답변은 이미 내보낸 토큰으로 보존
                 if not ok or not text.strip():
-                    failure.append(
-                        AnswerGenerationError(
-                            f"최종 답변을 만들지 못했습니다 ({reason})"
-                        )
-                    )
+                    failure.append(model_failure(reason, ErrorStage.ANSWER))
             except BaseException as exc:  # 스레드 밖의 호출자에게 그대로 전달
                 failure.append(exc)
             finally:
@@ -128,5 +126,5 @@ class AnswerGenerator:
         """ANSWER 시스템 프롬프트 조회."""
         prompts = self._prompts or getattr(self._runner, "prompt_manager", None)
         if prompts is None:
-            raise AnswerGenerationError("PromptManager가 연결되지 않았습니다")
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.ANSWER)
         return prompts.get_prompt(PromptIdx.ANSWER)

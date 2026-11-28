@@ -2,33 +2,42 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel
 
 from ..config import ENV_FILE, read_env_file, setting
 from ..models.enums import PromptIdx
+from ..models.errors import (
+    ErrorCode,
+    ErrorInfo,
+    ErrorStage,
+    ServiceError,
+    describe_error,
+)
 from ..models.llm_results import ContextMode, FrontierReply
 
 if TYPE_CHECKING:
     from ..data.prompt_manager import PromptManager
     from ..privacy.pd_detector import PDItem
 
-# 학교 Bedrock 게이트웨이(OpenAI 호환) 기본 주소와 모델
-DEFAULT_BASE_URL = "https://bedrock.nxtcloud.kr/v1"
-DEFAULT_MODEL = "bedrock-gpt-6-luna"
-# 모델별 100만 토큰당 (입력, 출력) 표준 단가(달러). 긴 문맥·캐시 단가는 미반영
+# OpenAI Responses API. 기존 FRONTIER_* 설정 이름과 httpx 전송 계층을 유지한다.
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_MODEL = "gpt-6-luna"
+# 2026-11-26 기준 Standard·짧은 문맥의 100만 토큰당 (입력, 출력) 달러 단가.
+# gpt-6-luna의 캐시·긴 문맥 요율과 웹 검색 비용은 _cost()에서 반영한다.
 MODEL_PRICES: dict[str, tuple[float, float]] = {
-    "bedrock-gpt-6-luna": (0.11, 0.55),
-    "bedrock-haiku": (0.11, 0.55),
-    "bedrock-gpt-6.1-sol": (2.20, 11.00),
+    "gpt-6-luna": (0.10, 0.50),
 }
+WEB_SEARCH_PRICE = 0.01  # 검색 1건당 달러. 검색 콘텐츠 토큰은 usage 입력에 포함.
 # 최초 요청을 포함한 최대 전송 시도 횟수. 일시 오류(429·5xx·네트워크)만 재시도
 MAX_ATTEMPTS = 3
 # 재시도 전 대기 시간(초). 시도 순서대로 사용
@@ -46,8 +55,13 @@ FATAL_STATUS = {
 }
 
 
-class FrontierError(ConnectionError):
+class FrontierError(ServiceError):
     """프론티어 연결·전송 실패. Main은 ConnectionError로 받아 offline으로 종료."""
+
+    def __init__(
+        self, detail: str, code: ErrorCode = ErrorCode.FRONTIER_UNAVAILABLE
+    ) -> None:
+        super().__init__(detail, code, ErrorStage.FRONTIER)
 
 
 class FrontierCancelledError(RuntimeError):
@@ -72,13 +86,12 @@ class FrontierQuery(BaseModel):
     items: list[tuple[int | None, bool, str]]
 
 
-def _add_usage(total: dict[str, int], usage: Any) -> None:
-    """응답의 usage 중 정수 토큰 수를 total에 더함. usage가 없으면 무시."""
-    if not usage:
-        return
-    for key, value in usage.items():
-        if isinstance(value, int) and not isinstance(value, bool):
-            total[key] = total.get(key, 0) + value
+class _Usage(BaseModel):
+    """재시도별 요율을 적용한 뒤 합산하는 내부 사용량."""
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost: float = 0.0
 
 
 class FrontierClient:
@@ -91,6 +104,7 @@ class FrontierClient:
         model: str | None = None,
         timeout: float = 120.0,
         max_tokens: int = MAX_OUTPUT_TOKENS,
+        web_search: bool | None = None,
         env_file: Path | None = ENV_FILE,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -103,7 +117,9 @@ class FrontierClient:
         생성자에서는 네트워크 요청을 하지 않음. 연결 확인은 check_connection()으로.
         """
         if timeout <= 0:
-            raise ValueError("timeout must be positive")
+            raise FrontierError(
+                "timeout must be positive", ErrorCode.CONFIGURATION_ERROR
+            )
         file_values = read_env_file(env_file) if env_file is not None else {}
         self._api_key = api_key or setting("FRONTIER_API_KEY", file_values, None)
         self._base_url = (
@@ -111,7 +127,19 @@ class FrontierClient:
         ).rstrip("/")
         self.model = model or setting("FRONTIER_MODEL", file_values, DEFAULT_MODEL)
         if self.model not in MODEL_PRICES:
-            raise ValueError(f"단가가 등록되지 않은 모델: {self.model}")
+            raise FrontierError(
+                f"단가가 등록되지 않은 모델: {self.model}",
+                ErrorCode.CONFIGURATION_ERROR,
+            )
+        search_setting = setting("FRONTIER_WEB_SEARCH", file_values, "true")
+        if web_search is None and search_setting.lower() not in {"true", "false"}:
+            raise FrontierError(
+                "FRONTIER_WEB_SEARCH는 true 또는 false여야 함",
+                ErrorCode.CONFIGURATION_ERROR,
+            )
+        self._web_search = (
+            search_setting.lower() == "true" if web_search is None else web_search
+        )
         self._timeout = timeout
         self._max_tokens = max_tokens
         self._transport = transport
@@ -120,10 +148,11 @@ class FrontierClient:
         self.frontier_sys_prom_idx = PromptIdx.FRONTIER
         # 가장 최근 질의 기록
         self.last_request: FrontierQuery | None = None
+        self.connection_failure: ErrorInfo | None = None
         self._lock = Lock()  # 실행별 상태 변경용 잠금
-        # 실행 ID별 프론티어 대화 기록(user·assistant 메시지). 실행 사이 공유하지 않음
-        self._contexts: dict[int, list[dict[str, str]]] = {}
-        # 실행 ID별로 _contexts의 대화가 다룬 need. 다음 회차 need와 비교해 keep 판단
+        # 실행별 성공한 요청·응답 이력. Responses 입력 항목을 백엔드가 직접 관리한다.
+        self._contexts: dict[int, list[dict[str, Any]]] = {}
+        # 실행별 대화가 다룬 need. 기존 keep/reset 판단을 그대로 유지한다.
         self._context_needs: dict[int, frozenset[str]] = {}
         self._rounds: dict[int, int] = {}  # 실행 ID별 질의 횟수
         self._stop_events: dict[int, Event] = {}  # 진행 중인 전송의 중지 신호
@@ -135,11 +164,14 @@ class FrontierClient:
         return {"Authorization": f"Bearer {self._api_key}"}
 
     def check_connection(self) -> bool:
-        """API 키가 있고 게이트웨이 모델 목록을 받을 수 있으면 True.
+        """API 키가 있고 OpenAI 모델 목록을 받을 수 있으면 True.
 
         비용이 들지 않는 GET /models로 확인. 실패는 예외 없이 False 반환.
         """
         if not self._api_key:
+            self.connection_failure = describe_error(
+                FrontierError("API key missing", ErrorCode.CONFIGURATION_ERROR)
+            )
             return False
         try:
             with httpx.Client(
@@ -148,10 +180,53 @@ class FrontierClient:
                 response = client.get(
                     f"{self._base_url}/models", headers=self._headers()
                 )
-        except (httpx.HTTPError, httpx.InvalidURL):
+        except (httpx.HTTPError, httpx.InvalidURL) as error:
             # InvalidURL은 HTTPError 하위가 아님. 주소가 잘못돼도 offline으로 처리
+            code = (
+                ErrorCode.FRONTIER_TIMEOUT
+                if isinstance(error, httpx.TimeoutException)
+                else ErrorCode.CONFIGURATION_ERROR
+                if isinstance(error, httpx.InvalidURL)
+                else ErrorCode.FRONTIER_UNAVAILABLE
+            )
+            self.connection_failure = describe_error(FrontierError(str(error), code))
             return False
+        self.connection_failure = (
+            None
+            if response.status_code == 200
+            else describe_error(
+                FrontierError(
+                    f"HTTP {response.status_code}", self._status_code(response)
+                )
+            )
+        )
         return response.status_code == 200
+
+    @staticmethod
+    def _status_code(response: httpx.Response) -> ErrorCode:
+        try:
+            body = response.json()
+            detail = body.get("error", {}) if isinstance(body, dict) else {}
+            provider_code = detail.get("code") if isinstance(detail, dict) else None
+        except ValueError:
+            provider_code = None
+        if isinstance(provider_code, str) and provider_code in {
+            "insufficient_quota",
+            "quota_exceeded",
+            "budget_exceeded",
+            "credit_balance_exhausted",
+            "organization_usage_limit_exceeded",
+            "organization_spend_limit_exceeded",
+            "project_spend_limit_exceeded",
+        }:
+            return ErrorCode.FRONTIER_QUOTA_EXCEEDED
+        if response.status_code in {401, 403}:
+            return ErrorCode.FRONTIER_AUTH_ERROR
+        if response.status_code == 429:
+            return ErrorCode.FRONTIER_RATE_LIMITED
+        if response.status_code >= 500:
+            return ErrorCode.FRONTIER_UNAVAILABLE
+        return ErrorCode.FRONTIER_REQUEST_REJECTED
 
     def decide_context(self, run_id: int, need: list[str] | None) -> ContextMode:
         """이번 요청에 이전 프론티어 대화를 이어 붙일지(keep) 새로 시작할지(reset) 판단.
@@ -185,7 +260,9 @@ class FrontierClient:
         stop(run_id) 호출 시 즉시 FrontierCancelledError.
         """
         if not self._api_key:
-            raise FrontierError("FRONTIER_API_KEY가 설정되지 않음")
+            raise FrontierError(
+                "FRONTIER_API_KEY가 설정되지 않음", ErrorCode.CONFIGURATION_ERROR
+            )
         # 중지 신호는 전송 준비보다 먼저 등록해야 그동안의 stop()도 받음
         stop_event = Event()
         with self._lock:
@@ -212,29 +289,37 @@ class FrontierClient:
         context_mode = self.decide_context(run_id, need)
         with self._lock:
             if context_mode == "reset":
-                self._contexts[run_id] = []
+                self._contexts.pop(run_id, None)
                 self._context_needs.pop(run_id, None)
-            history = list(self._contexts.get(run_id, []))
+            history = deepcopy(self._contexts.get(run_id, []))
             self._rounds[run_id] = self._rounds.get(run_id, 0) + 1
             round_ = self._rounds[run_id]
-        messages = [{"role": "system", "content": self._system_prompt()}]
-        messages += history
-        messages.append({"role": "user", "content": request_text})
+        user_input = {"role": "user", "content": request_text}
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "instructions": self._system_prompt(),
+            "input": [*history, user_input],
+            "max_output_tokens": self._max_tokens,
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+        }
+        if self._web_search:
+            payload.update(tools=[{"type": "web_search"}], tool_choice="auto")
         items = [(i.pd_id, i.allowed, i.allowed_by) for i in pd_table or []]
         started = monotonic()
         status, answer = "failed", None
         # 모든 시도(빈 답변 포함)의 사용량 합계. 실패·취소여도 쓴 만큼 기록
-        usage: dict[str, int] = {}
+        usage = _Usage()
         try:
-            answer = self._post_with_retry(run_id, messages, stop_event, usage)
+            answer, output = self._post_with_retry(run_id, payload, stop_event, usage)
             status = "ok"
         except FrontierCancelledError:
             status = "cancelled"
             raise
         finally:
-            input_tokens = usage.get("prompt_tokens")
-            output_tokens = usage.get("completion_tokens")
-            cost = self._cost(input_tokens, output_tokens)
+            input_tokens = usage.input_tokens
+            output_tokens = usage.output_tokens
+            cost = usage.cost
             elapsed_ms = int((monotonic() - started) * 1000)
             self._log_query(
                 FrontierQuery(
@@ -257,12 +342,9 @@ class FrontierClient:
             # 성공한 질의만 다음 판단에 쓸 대화로 저장. 중지된 실행은 clear()가 먼저
             # 지웠을 수 있으므로 다시 만들지 않음
             if not stop_event.is_set():
-                self._contexts.setdefault(run_id, []).extend(
-                    [
-                        {"role": "user", "content": request_text},
-                        {"role": "assistant", "content": answer},
-                    ]
-                )
+                # 검색·추론 항목과 원본 출처를 포함한 output을 그대로 이어 보낸다.
+                # 화면용 Markdown 답변으로 대체하면 도구·추론 맥락을 잃는다.
+                self._contexts[run_id] = [*history, user_input, *deepcopy(output)]
                 if need:
                     self._context_needs[run_id] = frozenset(need)
         return FrontierReply(
@@ -284,13 +366,13 @@ class FrontierClient:
     def _post_with_retry(
         self,
         run_id: int,
-        messages: list[dict[str, str]],
+        payload: dict[str, Any],
         stop_event: Event,
-        usage: dict[str, int],
-    ) -> str:
+        usage: _Usage,
+    ) -> tuple[str, list[dict[str, Any]]]:
         """일시 오류만 재시도하며 전송하고 답변 반환.
 
-        usage: 받은 응답마다 사용량을 더해 넣을 dict. 빈 답변 시도도 과금될 수 있으므로
+        usage: 응답마다 토큰 수·비용을 더해 넣을 객체. 빈 답변도 과금될 수 있으므로
         성공·실패와 상관없이 호출한 쪽이 이 값으로 비용을 계산.
         """
         last_error: Exception | None = None
@@ -300,38 +382,59 @@ class FrontierClient:
                 if stop_event.wait(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS)) - 1]):
                     raise FrontierCancelledError(run_id)
             try:
-                response = self._post(run_id, messages, stop_event)
+                response = self._post(run_id, payload, stop_event)
             except (httpx.TransportError, TimeoutError) as exc:
-                last_error = exc
+                code = (
+                    ErrorCode.FRONTIER_TIMEOUT
+                    if isinstance(exc, (httpx.TimeoutException, TimeoutError))
+                    else ErrorCode.FRONTIER_UNAVAILABLE
+                )
+                last_error = FrontierError(str(exc), code)
                 continue
             except httpx.InvalidURL as exc:
                 # 주소 설정 오류는 다시 시도해도 같음
-                raise FrontierError(f"잘못된 FRONTIER_BASE_URL: {exc}") from exc
+                raise FrontierError(
+                    f"잘못된 FRONTIER_BASE_URL: {exc}", ErrorCode.CONFIGURATION_ERROR
+                ) from exc
             if response.status_code == 429 or response.status_code >= 500:
-                last_error = FrontierError(f"HTTP {response.status_code}")
+                last_error = FrontierError(
+                    f"HTTP {response.status_code}", self._status_code(response)
+                )
+                if last_error.code == ErrorCode.FRONTIER_QUOTA_EXCEEDED:
+                    raise last_error
                 continue
             if response.status_code != 200:
                 reason = FATAL_STATUS.get(response.status_code, "요청 실패")
                 raise FrontierError(
-                    f"HTTP {response.status_code}: {reason} ({response.text[:200]})"
+                    f"HTTP {response.status_code}: {reason}",
+                    self._status_code(response),
                 )
             try:
                 data = response.json()
-                _add_usage(usage, data.get("usage"))
-                answer = data["choices"][0]["message"]["content"] or ""
+                self._add_usage(usage, data)
+                answer = self._answer(data)
             except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
-                raise FrontierError(f"응답 형식 오류: {exc}") from exc
-            if not answer.strip():
+                raise FrontierError(
+                    f"응답 형식 오류: {exc}", ErrorCode.FRONTIER_RESPONSE_INVALID
+                ) from exc
+            if data.get("status") != "completed" or not answer.strip():
                 # 추론에 출력 토큰을 다 쓰면 빈 답변이 옴. 같은 입력으로 다시 시도
-                last_error = FrontierError("빈 답변")
+                last_error = FrontierError(
+                    "완료되지 않았거나 빈 답변", ErrorCode.FRONTIER_RESPONSE_INVALID
+                )
                 continue
-            return answer
-        raise FrontierError(f"전송 {MAX_ATTEMPTS}회 실패: {last_error}")
+            return answer, data["output"]
+        raise FrontierError(
+            f"전송 {MAX_ATTEMPTS}회 실패: {last_error}",
+            last_error.code
+            if isinstance(last_error, FrontierError)
+            else ErrorCode.FRONTIER_UNAVAILABLE,
+        ) from last_error
 
     def _post(
-        self, run_id: int, messages: list[dict[str, str]], stop_event: Event
+        self, run_id: int, payload: dict[str, Any], stop_event: Event
     ) -> httpx.Response:
-        """별도 스레드에서 POST /chat/completions 요청. 중지 신호를 받으면 연결을 닫음.
+        """별도 스레드에서 POST /responses 요청. 중지 신호를 받으면 연결을 닫음.
 
         Main은 send()를 스레드에서 부르므로 이 함수가 중지 신호를 직접 확인해야
         stop(run_id) 즉시 반환 가능.
@@ -353,13 +456,9 @@ class FrontierClient:
             try:
                 results.put(
                     client.post(
-                        f"{self._base_url}/chat/completions",
+                        f"{self._base_url}/responses",
                         headers=self._headers(),
-                        json={
-                            "model": self.model,
-                            "messages": messages,
-                            "max_tokens": self._max_tokens,
-                        },
+                        json=payload,
                     )
                 )
             except BaseException as exc:  # 스레드 예외를 호출 스레드로 전달
@@ -384,18 +483,100 @@ class FrontierClient:
                 self._clients.pop(run_id, None)
             client.close()
 
-    def _cost(self, input_tokens: int | None, output_tokens: int | None) -> float:
-        """사용량과 모델 단가로 비용(달러) 계산. 사용량을 모르면 0."""
+    @staticmethod
+    def _answer(data: dict[str, Any]) -> str:
+        """도구·추론 출력을 건너뛰고 답변 텍스트와 클릭 가능한 검색 출처를 반환."""
+        parts: list[str] = []
+        for item in data["output"]:
+            if item.get("type") != "message":
+                continue
+            for content in item["content"]:
+                if content.get("type") != "output_text":
+                    continue
+                text = content["text"]
+                if not isinstance(text, str):
+                    raise TypeError("External answer must be text")
+                citations = [
+                    a
+                    for a in content.get("annotations", [])
+                    if a.get("type") == "url_citation"
+                ]
+                for citation in sorted(
+                    citations, key=lambda a: a["start_index"], reverse=True
+                ):
+                    start, end, url = (
+                        citation["start_index"],
+                        citation["end_index"],
+                        citation["url"],
+                    )
+                    if 0 <= start <= end <= len(text) and url.startswith(
+                        ("https://", "http://")
+                    ):
+                        link = f"[출처]({quote(url, safe=':/?&=#%')})"
+                        text = text[:start] + link + text[end:]
+                parts.append(text)
+        return "\n".join(parts)
+
+    def _add_usage(self, total: _Usage, data: dict[str, Any]) -> None:
+        """실패·빈 답변도 포함해 응답별 토큰·캐시·검색 요율을 적용해 합산."""
+        usage = data.get("usage") or {}
+        for name in ("input_tokens", "output_tokens"):
+            value = usage.get(name)
+            if value is not None:
+                if type(value) is not int or value < 0:
+                    raise TypeError("Token usage must be a non-negative integer")
+                setattr(total, name, (getattr(total, name) or 0) + value)
+        details = usage.get("input_tokens_details") or {}
+        writes = details.get("cache_write_tokens_details") or {}
+        search = (data.get("tool_usage") or {}).get("web_search")
+        search_calls = (
+            search["num_requests"]
+            if search is not None
+            else sum(
+                1
+                for item in data.get("output", [])
+                if item.get("type") == "web_search_call"
+                and (item.get("action") or {}).get("type") == "search"
+            )
+        )
+        total.cost += self._cost(
+            usage.get("input_tokens"),
+            usage.get("output_tokens"),
+            cached_tokens=details.get("cached_tokens", 0),
+            cache_write_tokens=details.get("cache_write_tokens", 0),
+            cache_write_12h_tokens=writes.get("ttl_12h_tokens", 0),
+            search_calls=search_calls,
+        )
+
+    def _cost(
+        self,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        *,
+        cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        cache_write_12h_tokens: int = 0,
+        search_calls: int = 0,
+    ) -> float:
+        """gpt-6-luna Standard 요금 추정. 추론 토큰은 출력에 포함되어 중복 합산 안 함."""
         input_price, output_price = MODEL_PRICES[self.model]
+        if (input_tokens or 0) > 272_000:
+            input_price *= 2
+            output_price *= 1.5
+        uncached = max(0, (input_tokens or 0) - cached_tokens - cache_write_tokens)
         return (
-            (input_tokens or 0) * input_price + (output_tokens or 0) * output_price
-        ) / 1_000_000
+            uncached * input_price
+            + cached_tokens * input_price * 0.1
+            + (cache_write_tokens - cache_write_12h_tokens) * input_price * 1.25
+            + cache_write_12h_tokens * input_price * 2.5
+            + (output_tokens or 0) * output_price
+        ) / 1_000_000 + search_calls * WEB_SEARCH_PRICE
 
     def stop(self, run_id: int) -> None:
         """실행 ID의 진행 중인 전송을 취소하고 즉시 반환. 다른 스레드에서 호출 가능.
 
         진행 중인 HTTP 연결을 닫아 요청을 끊음. 이미 서버에 도착한 요청의 비용은
-        게이트웨이에서 차감될 수 있음. 진행 중인 전송이 없어도 기록해 두어, 이후
+        OpenAI에서 차감될 수 있음. 진행 중인 전송이 없어도 기록해 두어, 이후
         clear(run_id) 전까지 같은 실행의 send()는 보내지 않고 FrontierCancelledError.
         """
         with self._lock:
@@ -417,10 +598,5 @@ class FrontierClient:
             self._stopped.discard(run_id)
 
     def _log_query(self, query: FrontierQuery) -> None:
-        """질의 기록 저장. DB 저장은 ChatManager 구현 후 연결.
-
-        저장 대상: frontier_queries 한 건과 전송 당시 허용 상태(query_items).
-        저장 제외: API 키, 시스템 프롬프트.
-        """
+        """최근 질의 진단용 기록. DB 저장은 Main._send_frontier가 담당한다."""
         self.last_request = query
-        # self.chat_manager.save_frontier_query(query)

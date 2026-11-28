@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from app.models.enums import PromptIdx
+from app.models.errors import ErrorCode, ErrorStage, PipelineError, model_failure
 from app.models.llm_results import GuardResult
 from app.privacy.pd_detector import CATEGORY_LABEL, PDItem
 
@@ -53,14 +54,18 @@ class LeakGuard:
         guard_input = self.build_guard_input(request_text, target_items)
         hit_idx: Any = None
         ok = False
+        if self._runner is None:
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.GUARD)
         if self._runner is not None:
-            hit_idx, ok, *_ = self._runner.request(
+            hit_idx, ok, *_, reason = self._runner.request(
                 run_id, guard_input, PromptIdx.GUARD, chat_id
             )
+            if not ok:
+                raise model_failure(reason, ErrorStage.GUARD)
 
         # 4. 형식을 끝내 못 맞췄으면 실패. 고칠 항목을 모르므로 hits는 빈 목록
         if not ok or not isinstance(hit_idx, list):
-            result = GuardResult(passed=False, hits=[])
+            raise PipelineError(ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage.GUARD)
         else:
             result = self.to_guard_result(hit_idx, target_items)
 
@@ -91,6 +96,10 @@ class LeakGuard:
         누출 여부를 확신할 수 없으므로 통과시키지 않고 형식 실패와 같이 처리.
         """
         hits: list[int] = []
+        if any(
+            type(idx) is not int or not 0 <= idx < len(target_items) for idx in hit_idx
+        ):
+            raise PipelineError(ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage.GUARD)
         flagged = False  # 모델이 무언가 걸렸다고 답했는지
         for idx in hit_idx:
             if isinstance(idx, bool) or not isinstance(idx, int):
@@ -100,7 +109,9 @@ class LeakGuard:
                 pd_id = target_items[idx].pd_id
                 if pd_id is None:
                     # 걸린 항목을 ID로 가리킬 수 없으면 고칠 수 없으므로 실패
-                    return GuardResult(passed=False, hits=[])
+                    raise PipelineError(
+                        ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage.GUARD
+                    )
                 if pd_id not in hits:
                     hits.append(pd_id)
 
@@ -108,5 +119,5 @@ class LeakGuard:
             return GuardResult(passed=False, hits=hits)
         if flagged:
             # 번호는 돌려줬지만 쓸 수 있는 번호가 없음 → 통과시키지 않음
-            return GuardResult(passed=False, hits=[])
+            raise PipelineError(ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage.GUARD)
         return GuardResult(passed=True, hits=[])

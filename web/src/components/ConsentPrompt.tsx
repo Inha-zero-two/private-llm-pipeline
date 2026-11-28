@@ -49,7 +49,9 @@ export function ConsentPrompt({ request, onAnswer }: Props) {
             <span className={styles.category} data-category={item.category}>
               {CATEGORY_LABEL[item.category]}
             </span>
-            <span className={styles.label}>{item.label}</span>
+            {item.label !== CATEGORY_LABEL[item.category] && (
+              <span className={styles.label}>{item.label}</span>
+            )}
             {item.text}
           </li>
         ))}

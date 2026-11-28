@@ -32,4 +32,4 @@ select = ["E4", "E7", "E9", "F", "I", "N", "ANN"]
 ignore = ["ANN401"]  # 필드 구성이 고정되지 않은 프록시 JSON 응답을 위한 Any 허용
 
 [tool.ruff.lint.isort]
-known-first-party = ["app", "src"]
+known-first-party = ["app", "comparison", "src"]

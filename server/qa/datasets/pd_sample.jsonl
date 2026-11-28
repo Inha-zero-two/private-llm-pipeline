@@ -1,0 +1,18 @@
+{"id": "phone-1", "text": "제 전화번호 010-2345-6789로 스팸 문자가 계속 와요.", "pd": [{"text": "010-2345-6789", "category": 0}]}
+{"id": "rrn-1", "text": "주민등록번호 900101-1234567을 실수로 게시판에 올렸어요.", "pd": [{"text": "900101-1234567", "category": 0}]}
+{"id": "card-1", "text": "카드번호 4321-8765-1098-7654로 해외 결제가 됐어요.", "pd": [{"text": "4321-8765-1098-7654", "category": 0}]}
+{"id": "email-1", "text": "hong.gildong92@example.com 으로 이상한 메일이 왔어요.", "pd": [{"text": "hong.gildong92@example.com", "category": 0}]}
+{"id": "name-addr-1", "text": "저는 김하늘이고 서울시 마포구 월드컵로 25길 13에 살아요.", "pd": [{"text": "김하늘", "category": 0}, {"text": "서울시 마포구 월드컵로 25길 13", "category": 0}]}
+{"id": "child-1", "text": "아들 박서준이 한빛초등학교 3학년이에요.", "pd": [{"text": "박서준", "category": 0}, {"text": "한빛초등학교", "category": 2}, {"text": "3학년", "category": 2}]}
+{"id": "health-1", "text": "우울증으로 설트랄린을 6개월째 먹고 있어요.", "pd": [{"text": "우울증", "category": 1}, {"text": "설트랄린", "category": 1}]}
+{"id": "health-2", "text": "저는 34살이고 2형 당뇨가 있어요.", "pd": [{"text": "34살", "category": 2}, {"text": "2형 당뇨", "category": 1}]}
+{"id": "health-3", "text": "38살인데 공황장애 때문에 비행기 타기가 무서워요.", "pd": [{"text": "38살", "category": 2}, {"text": "공황장애", "category": 1}]}
+{"id": "job-1", "text": "29살 간호사인데 야간 근무가 너무 힘들어요.", "pd": [{"text": "29살", "category": 2}, {"text": "간호사", "category": 2}]}
+{"id": "company-1", "text": "삼성전자 다니는 27살인데 이직을 고민 중이에요.", "pd": [{"text": "삼성전자", "category": 2}, {"text": "27살", "category": 2}]}
+{"id": "religion-1", "text": "저는 천주교 신자라서 금요일엔 고기를 안 먹어요.", "pd": [{"text": "천주교", "category": 1}]}
+{"id": "account-1", "text": "국민은행 계좌 123456-01-234567로 잘못 송금했어요.", "pd": [{"text": "123456-01-234567", "category": 0}]}
+{"id": "plate-1", "text": "제 차 번호판 12가 3456인데 주차 위반 딱지가 붙었어요.", "pd": [{"text": "12가 3456", "category": 0}]}
+{"id": "none-1", "text": "파이썬에서 딕셔너리를 값 기준으로 정렬하는 방법 알려 줘.", "pd": []}
+{"id": "none-2", "text": "서울에서 부산까지 KTX로 얼마나 걸려요?", "pd": []}
+{"id": "none-3", "text": "이순신 장군이 활약한 해전을 알려 주세요.", "pd": []}
+{"id": "none-4", "text": "오늘 저녁 메뉴로 김치찌개 레시피 알려 줘.", "pd": []}

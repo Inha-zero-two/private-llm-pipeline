@@ -16,7 +16,7 @@ import pytest
 
 from app.models.enums import PromptIdx
 from app.runtime.context_manager import ContextManager
-from app.runtime.local_llm_runner import LocalLLMRunner
+from app.runtime.local_llm_runner import CONTEXT_CACHE_SIZE, LocalLLMRunner
 from src.localLLM_API_proxy import llama_wrapper as wrapper
 
 
@@ -217,22 +217,27 @@ def test_nested_context_compaction_does_not_acquire_another_request_slot(
     assert "x" * 50 not in manager.get_context(context_id)
 
 
+@pytest.mark.parametrize("persistent", [False, True])
 def test_slow_context_initialization_does_not_block_existing_context_or_stop(
     remote_runner: tuple[LocalLLMRunner, ModelServer],
+    persistent: bool,
 ) -> None:
     runner, server = remote_runner
+    get_manager = (
+        runner.get_chat_context_manager if persistent else runner.get_context_manager
+    )
     runner._timeout = 5
-    existing = runner.get_context_manager(2)
+    existing = get_manager(2)
+    if persistent:
+        runner.get_context_manager(2)
     server.block_context_initialization = True
     with ThreadPoolExecutor(max_workers=2) as pool:
-        initializing = pool.submit(runner.get_context_manager, 1)
+        initializing = pool.submit(get_manager, 1)
         initialization_stream = server.started.get(timeout=1)
         other_stream = None
         try:
             # 생성 중인 실행과 무관한 기존 객체 조회는 즉시 끝나야 한다.
-            assert (
-                pool.submit(runner.get_context_manager, 2).result(timeout=1) is existing
-            )
+            assert pool.submit(get_manager, 2).result(timeout=1) is existing
             request = pool.submit(
                 runner.request,
                 2,
@@ -252,73 +257,103 @@ def test_slow_context_initialization_does_not_block_existing_context_or_stop(
             initialization_stream.released.set()
             if other_stream is not None:
                 other_stream.released.set()
-        assert initializing.result(timeout=1) is runner.get_context_manager(1)
+        assert initializing.result(timeout=1) is get_manager(1)
 
 
+@pytest.mark.parametrize("persistent", [False, True])
 def test_different_runs_can_initialize_contexts_concurrently(
     remote_runner: tuple[LocalLLMRunner, ModelServer],
+    persistent: bool,
 ) -> None:
     runner, server = remote_runner
+    get_manager = (
+        runner.get_chat_context_manager if persistent else runner.get_context_manager
+    )
+    contexts = runner._chat_contexts if persistent else runner.context_managers
     runner._timeout = 5
     server.block_context_initialization = True
     streams: list[ControlledStream] = []
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(runner.get_context_manager, 1)
+        first = pool.submit(get_manager, 1)
         streams.append(server.started.get(timeout=1))
-        second = pool.submit(runner.get_context_manager, 2)
+        second = pool.submit(get_manager, 2)
         try:
             streams.append(server.started.get(timeout=1))
             # 생성자가 끝나기 전의 객체는 외부에 등록하지 않는다.
-            assert 1 not in runner.context_managers
-            assert 2 not in runner.context_managers
+            assert 1 not in contexts
+            assert 2 not in contexts
         finally:
             server.block_context_initialization = False
             for stream in streams:
                 stream.released.set()
-        assert first.result(timeout=1) is runner.get_context_manager(1)
-        assert second.result(timeout=1) is runner.get_context_manager(2)
+        assert first.result(timeout=1) is get_manager(1)
+        assert second.result(timeout=1) is get_manager(2)
 
 
+@pytest.mark.parametrize("persistent", [False, True])
 def test_same_run_context_is_initialized_once(
     remote_runner: tuple[LocalLLMRunner, ModelServer],
+    persistent: bool,
 ) -> None:
     runner, server = remote_runner
+    get_manager = (
+        runner.get_chat_context_manager if persistent else runner.get_context_manager
+    )
+    contexts = runner._chat_contexts if persistent else runner.context_managers
     runner._timeout = 5
     server.block_context_initialization = True
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(runner.get_context_manager, 1)
+        first = pool.submit(get_manager, 1)
         stream = server.started.get(timeout=1)
-        second = pool.submit(runner.get_context_manager, 1)
+        second = pool.submit(get_manager, 1)
         try:
             with pytest.raises(Empty):
                 server.started.get(timeout=0.1)
-            assert 1 not in runner.context_managers
+            assert 1 not in contexts
         finally:
             server.block_context_initialization = False
             stream.released.set()
         assert first.result(timeout=1) is second.result(timeout=1)
 
 
+@pytest.mark.parametrize("persistent", [False, True])
 def test_failed_context_initialization_can_be_retried(
     remote_runner: tuple[LocalLLMRunner, ModelServer],
+    persistent: bool,
 ) -> None:
     runner, server = remote_runner
+    get_manager = (
+        runner.get_chat_context_manager if persistent else runner.get_context_manager
+    )
+    contexts = runner._chat_contexts if persistent else runner.context_managers
     runner._timeout = 0.1
     server.block_context_initialization = True
     with ThreadPoolExecutor(max_workers=1) as pool:
-        initializing = pool.submit(runner.get_context_manager, 1)
+        initializing = pool.submit(get_manager, 1)
         stream = server.started.get(timeout=1)
         try:
             with pytest.raises(TimeoutError):
                 initializing.result(timeout=1)
             assert stream.closed.wait(1)
-            assert 1 not in runner.context_managers
+            assert 1 not in contexts
         finally:
             server.block_context_initialization = False
             stream.released.set()
-    manager = runner.get_context_manager(1)
-    assert manager is runner.get_context_manager(1)
-    assert manager.run_id == 1
+    manager = get_manager(1)
+    assert manager is get_manager(1)
+    assert manager.chat_id == 1
+
+
+def test_chat_context_cache_keeps_dev_lru_limit(
+    remote_runner: tuple[LocalLLMRunner, ModelServer],
+) -> None:
+    runner, _ = remote_runner
+    managers = [runner.get_chat_context_manager(i) for i in range(CONTEXT_CACHE_SIZE)]
+    assert runner.get_chat_context_manager(0) is managers[0]
+    runner.get_chat_context_manager(CONTEXT_CACHE_SIZE)
+    assert len(runner._chat_contexts) == CONTEXT_CACHE_SIZE
+    assert 1 not in runner._chat_contexts
+    assert runner.get_chat_context_manager(0) is managers[0]
 
 
 @pytest.mark.parametrize("text", ["disconnect", "partial-disconnect"])

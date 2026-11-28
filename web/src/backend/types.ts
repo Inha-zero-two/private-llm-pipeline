@@ -15,6 +15,8 @@ export type ConsentReply =
   { ok: true; decisions: ConsentDecision[] } | { ok: false; message: string }
 
 export type RunHandle = {
+  /** 서버의 실행 ID (데모에는 없음) */
+  runId?: number
   stop: () => void
   answerConsent: (answer: string) => Promise<ConsentReply>
 }

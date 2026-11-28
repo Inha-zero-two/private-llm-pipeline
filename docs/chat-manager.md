@@ -41,9 +41,7 @@ with ChatManager("chat.sqlite3") as chats:
   `RUN_INTERRUPTED`로 종료하고 미응답 동의를 취소한다. 이전 모델 작업을 재개하지 않는다.
   실행 작업을 받기 전에 한 번 호출한다. 다른 서버가 같은 DB로 실행 중일 때 호출하면 안 된다.
 - `close()`는 여러 번 호출할 수 있다.
-- 스키마 버전은 관리하지 않는다. 테이블이 없는 빈 DB에서만 스키마를 만들고, 이미 테이블이 있으면
-  그대로 사용한다. 스키마가 바뀌면 기존 DB 파일(`chat.sqlite3`와 `-wal`·`-shm` 보조 파일)을
-  수동으로 지운 뒤 다시 실행한다.
+- 빈 DB는 버전 3으로 초기화한다. 기존 버전 0은 항목 ID와 전송 기록을 보존하며 분류 3을 허용하는 버전 1로 갱신하고, 버전 1은 runs.errorStage를 추가해 버전 2로 갱신한다. 버전 2는 컨텍스트 테이블 생성과 기존 user/assistant 메시지의 순서 연결을 원자적으로 수행해 3으로 갱신한다. 실패한 갱신은 롤백하고 시작을 중단한다. 재기동은 완료 버전부터 재시도하며 기존 DB를 삭제하지 않는다.
 
 ## 저장 책임과 인터페이스
 
@@ -115,9 +113,9 @@ Main에 주입하는 전송 함수의 계약은 `async emit(event, data, event_i
 
 ## 종료와 삭제 정책
 
-`finish_run()`은 정상·상한·거부·중지·오류 모두 `status="finished"`로 바꾸고 종료 시각을 기록한다.
-오류 종료는 `end_reason=None`이며 기본 오류 코드는 `INTERNAL_ERROR`다. 오류 이벤트의 메시지는
-채팅 요약의 `notice`로 복원한다. 미응답 동의는 같은 트랜잭션에서 취소한다.
+`finish_run()`은 완료·상한·중지·오류를 finished로 바꾸고 종료 시각을 기록한다. 공개 거부 자체는 종료 조건이 아니다.
+오류 종료는 end_reason=None이며 최초 errorCode/errorStage를 유지한다. notice는 오류 코드별 고정
+안내문으로 복원하고 정리 중 오류나 제한 안내로 덮지 않는다. 미응답 동의는 같은 트랜잭션에서 취소한다.
 이미 끝난 실행에 대한 종료 호출은 기존 기록을 유지한다.
 `finish_run()`은 같은 트랜잭션에서 마지막 `done` 또는 `error` 이벤트까지 저장하고 그 `RunEvent`를
 반환한다. 재호출해도 같은 이벤트를 반환하며 중복 생성하지 않는다. Main은 반환된 이벤트를
@@ -155,3 +153,14 @@ python -m ruff format --check app
 # 저장소 루트와 server를 PYTHONPATH에 추가한 뒤 기존 테스트 실행
 python -m pytest tests -q
 ```
+
+## 채팅 컨텍스트 저장 계약
+
+save_message/start_turn의 user/assistant 저장은 context_entries 추가와 같은 트랜잭션이다. (chatId, contextKey)별 contextSeq와 원본 messageId 고유 제약으로 순서·중복을 관리한다. start_turn 실패 시 메시지·순번·채팅 제목·실행을 함께 롤백한다.
+
+- context_boundary(chat_id, message_id): 현재 사용자 질문 직전의 순번.
+- load_context(chat_id, through_seq): 경계 이내 최신 유효 compaction과 그 이후 반영 기록.
+- context_delta(chat_id, after_seq, through_seq): 반영 순번 기준 증분.
+- save_compaction(chat_id, run_id, covered_through_seq, summary, expected_compaction_id): 실행·채팅·범위·최신 요약 ID를 검증하고 채택된 요약과 compaction 이벤트를 한 트랜잭션으로 확정.
+
+실패·재시도 호출 로그는 컨텍스트 반영 기록이 아니다. 메시지 원문은 압축 후에도 보존한다. 종료된 실행의 늦은 요약은 거부하고 채팅 삭제 시 반영·압축 기록도 함께 제거한다. 상세 갱신 절차는 [DB 스키마](db-schema.md), 입력 구성은 [ContextManager](context-manager.md)를 참고한다.

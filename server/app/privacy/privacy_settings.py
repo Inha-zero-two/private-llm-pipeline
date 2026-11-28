@@ -7,6 +7,14 @@ from threading import Lock
 from typing import TYPE_CHECKING, Protocol
 
 from app.models.enums import PromptIdx
+from app.models.errors import (
+    ErrorCode,
+    ErrorStage,
+    ServiceError,
+    describe_error,
+    log_diagnostic,
+    model_failure,
+)
 from app.models.llm_results import Rule, RuleMatch
 from app.models.privacy_results import SaveResult
 from app.privacy.pd_detector import PDTable
@@ -91,7 +99,17 @@ class PrivacySettings:
             use_context=False,
         )
         if reason == "unavailable":
-            raise ConnectionError("로컬 LLM에 설정 해석을 요청하지 못했습니다.")
+            raise ServiceError(
+                "로컬 LLM에 설정 해석을 요청하지 못했습니다.",
+                ErrorCode.LOCAL_LLM_UNAVAILABLE,
+                ErrorStage.PARSE_RULES,
+            )
+        if reason == "timeout":
+            raise ServiceError(
+                "설정 해석 시간 초과",
+                ErrorCode.LOCAL_LLM_TIMEOUT,
+                ErrorStage.PARSE_RULES,
+            )
         if reason == "stopped":
             raise InterruptedError("설정 해석이 중지되었습니다.")
         # 내용이 있는 설정문에서 규칙을 하나도 찾지 못하면 해석 실패다.
@@ -104,6 +122,12 @@ class PrivacySettings:
                 isinstance(rule, Rule) and rule.target.strip() for rule in result
             )
         ):
+            log_diagnostic(
+                self._chat_manager,
+                None,
+                describe_error(model_failure(reason, ErrorStage.PARSE_RULES)),
+                recovered=True,
+            )
             raise RulesInterpretationError(UNCLEAR_MESSAGE)
         return [rule.model_copy(deep=True) for rule in result]
 
@@ -134,13 +158,16 @@ class PrivacySettings:
             return False
         return rules[index].action == "allow"
 
-    def apply_to_table(self, run_id: int, pd_table: PDTable) -> None:
+    def apply_to_table(
+        self, run_id: int, pd_table: PDTable, setting: PrivacySetting | None = None
+    ) -> None:
         """실행 시작 시 고정된 설정으로 전체 테이블을 평가하고 영구 상태를 저장한다."""
         # 이전 실행의 허용이나 임시 동의가 새 실행으로 넘어가지 않게 먼저 금지한다.
         for item in pd_table:
             item.allowed = False
             item.allowed_by = "none"
-        setting = self._chat_manager.load_run_setting(run_id)
+        if setting is None:
+            setting = self._chat_manager.load_run_setting(run_id)
         chat_id = self._chat_manager.get_run(run_id).chat_id
         decisions = [item.model_copy(deep=True) for item in pd_table]
         if setting.rules and pd_table:
@@ -155,14 +182,28 @@ class PrivacySettings:
                 ensure_ascii=False,
             )
             try:
-                result, ok, *_ = self._runner.request(
+                result, ok, *_, reason = self._runner.request(
                     run_id,
                     match_input,
                     PromptIdx.MATCH_RULES,
                     chat_id,
                     use_context=False,
                 )
-            except ConnectionError:
+                if not ok and reason != "stopped":
+                    log_diagnostic(
+                        self._chat_manager,
+                        run_id,
+                        describe_error(model_failure(reason, ErrorStage.MATCH_RULES)),
+                        recovered=True,
+                    )
+            except (ConnectionError, TimeoutError) as error:
+                log_diagnostic(
+                    self._chat_manager,
+                    run_id,
+                    describe_error(error, ErrorStage.MATCH_RULES),
+                    recovered=True,
+                    error=error,
+                )
                 # Runner 종료·대기 시간 초과도 항목 대응 실패로 기본 금지를 유지한다.
                 result, ok = None, False
             # 오류가 있는 항목만 금지한다. DB ID와 입력 목록의 인덱스는 다르다.

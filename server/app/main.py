@@ -16,12 +16,22 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from app.models.enums import EndReason
+from app.models.errors import (
+    MESSAGES,
+    ErrorCode,
+    ErrorInfo,
+    ErrorStage,
+    PipelineError,
+    describe_error,
+    log_diagnostic,
+)
 from app.models.schemas import FrontierQueryInput, RunConfig, RunEvent
 
 if TYPE_CHECKING:
@@ -67,6 +77,8 @@ class _RunState:
     finishing: bool = False
     # 정상 종료가 아닐 때 답변 아래에 보일 제한 안내 (done 이벤트의 limited)
     limited: str | None = None
+    stage: ErrorStage = ErrorStage.STORAGE
+    external_failures: list[tuple[ErrorInfo, int | None]] = field(default_factory=list)
 
 
 class Main:
@@ -140,12 +152,12 @@ class Main:
         """
         await self._call(self.chat_manager.recover_interrupted_runs)
         if not await self._call(self.local_llm_runner.model_load):
-            raise RuntimeError("로컬 LLM 모델을 GPU에 불러오지 못했습니다.")
+            raise PipelineError(ErrorCode.LOCAL_LLM_UNAVAILABLE, ErrorStage.STARTUP)
         # 연결이 안 돼도 앱은 뜬다. 실행마다 2)의 check_end()가 연결을 다시 확인하고,
         # 끊겨 있으면 offline으로 끝내 로컬 모델만으로 답한다.
         await self._call(self.frontier_client.check_connection)
         if not await self._call(self.prompt_manager.load_prompts):
-            raise RuntimeError("시스템 프롬프트 파일을 불러오지 못했습니다.")
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.STARTUP)
         await self._call(self.privacy_settings.load_rules)
 
     async def run_pipeline(self, chat_id: int, question: str) -> None:
@@ -190,11 +202,23 @@ class Main:
             assert task is not None  # run_pipeline은 항상 asyncio 작업 안에서 돈다
             self._runs[run_id] = _RunState(chat_id=chat_id, task=task)
             await self._emit("run", {"run_id": run_id})  # 화면이 중지 버튼에 쓸 ID
+            await self._call(
+                self.local_llm_runner.begin_turn_context,
+                run_id,
+                chat_id,
+                user_message_id,
+            )
 
             # 질문 속 개인정보를 찾아 이 채팅의 개인정보 테이블(PDTable)에 더한다.
-            await self._step(run_id, "개인정보 검출 중")
+            await self._step(run_id, "개인정보 검출 중", ErrorStage.DETECT)
+            setting = await self._call(self.chat_manager.load_run_setting, run_id)
             found_items = await self._call(
-                self.pd_detector.detect, run_id, chat_id, user_message_id, question
+                self.pd_detector.detect,
+                run_id,
+                chat_id,
+                user_message_id,
+                question,
+                setting,
             )
             await self._call(
                 self.chat_manager.set_pd_items, chat_id, user_message_id, found_items
@@ -202,11 +226,13 @@ class Main:
             pd_table = await self._call(self.chat_manager.get_pd_table, chat_id)
 
             # 사용자가 미리 정한 허용/금지 설정을 테이블의 각 항목에 적용한다.
-            await self._step(run_id, "허용 설정 적용 중")
-            await self._call(self.privacy_settings.apply_to_table, run_id, pd_table)
+            await self._step(run_id, "허용 설정 적용 중", ErrorStage.MATCH_RULES)
+            await self._call(
+                self.privacy_settings.apply_to_table, run_id, pd_table, setting
+            )
 
             # 임시 메모를 시작하고, 답하는 데 필요한 정보 목록을 적어 둔다.
-            await self._step(run_id, "필요한 정보 정리 중")
+            await self._step(run_id, "필요한 정보 정리 중", ErrorStage.NEEDS)
             memo_started = True
             await self._call(self.memo_manager.start, run_id, question)
             needs = await self._call(self.planner.list_needs, question, run_id, chat_id)
@@ -239,7 +265,25 @@ class Main:
             # 화면에 보낼 최종 error 이벤트는 finish_run이 종료 상태와 함께 확정한다.
             original = error
             end_reason = None
-            await self._emit("error", {"run_id": run_id, "message": str(error)})
+            stage = (
+                self._runs[run_id].stage if run_id in self._runs else ErrorStage.STORAGE
+            )
+            info = describe_error(error, stage)
+            logging.getLogger(__name__).exception(
+                "Pipeline failed run_id=%s code=%s stage=%s",
+                run_id,
+                info.code,
+                info.stage,
+            )
+            if run_id is not None:
+                try:
+                    await self._emit(
+                        "error", {"run_id": run_id, **info.model_dump(mode="json")}
+                    )
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "Failed to record pipeline error run_id=%s", run_id
+                    )
             raise
 
         finally:
@@ -333,6 +377,16 @@ class Main:
         while True:
             # 2) 왕복을 시작하기 전에 끝내야 하는지 먼저 확인한다.
             online = await self._call(self.frontier_client.check_connection)
+            if not online:
+                failure = getattr(self.frontier_client, "connection_failure", None)
+                if isinstance(failure, ErrorInfo):
+                    self._runs[run_id].external_failures.append((failure, None))
+                    await self._call(
+                        functools.partial(log_diagnostic, recovered=False),
+                        self.chat_manager,
+                        run_id,
+                        failure,
+                    )
             end_reason = self.check_end(
                 online, frontier_calls, self.call_limit, spent_cost, self.budget_limit
             )
@@ -340,7 +394,7 @@ class Main:
                 return end_reason
 
             # 지금까지 모은 메모로 답할 수 있는지 판단한다.
-            await self._step(run_id, "답변 가능 여부 판단 중")
+            await self._step(run_id, "답변 가능 여부 판단 중", ErrorStage.JUDGE)
             memo = await self._call(self.memo_manager.read_all)
             # needs를 넘겨 plan.need가 메모에 등록된 이름으로만 오게 한다 (add_answer 규격)
             plan = await self._call(
@@ -362,18 +416,17 @@ class Main:
                 )
                 if consent_req is not None:  # None이면 실제로 물어볼 항목이 없다
                     # 사용자가 응답할 때까지 기다린다. (중지되면 stop()이 이 대기를 끊는다)
-                    await self._step(run_id, "공개 동의를 기다리는 중")
+                    await self._step(
+                        run_id, "공개 동의를 기다리는 중", ErrorStage.CONSENT
+                    )
                     consent_result = await self.consent_manager.request(consent_req)
-                    if not any(d.allow for d in consent_result.decisions):
-                        return EndReason.CONSENT_DENIED
-                    # 허용한 항목은 이번 실행 동안만 허용으로 바뀐다.
                     await self._call(
                         self.consent_manager.apply,
                         consent_result,
                         consent_req,
                         pd_table,
                     )
-                    # 일부 거절된 정보를 전제로 만든 계획은 다시 판단한다.
+                    # 거절된 항목이 있으면 그 정보를 제외하고 다시 판단한다.
                     if not all(d.allow for d in consent_result.decisions):
                         continue
 
@@ -385,8 +438,14 @@ class Main:
                 return EndReason.REGEN_LIMIT
 
             # 6) 검사를 통과한 요청문만 프론티어로 보낸다.
-            await self._step(run_id, f"외부 모델에 묻는 중 ({frontier_calls + 1}회차)")
-            reply = await self._send_frontier(run_id, request_text, pd_table, plan.need)
+            await self._step(
+                run_id,
+                f"외부 모델에 묻는 중 ({frontier_calls + 1}회차)",
+                ErrorStage.FRONTIER,
+            )
+            reply = await self._send_frontier(
+                run_id, request_text, pd_table, plan.need, frontier_calls + 1
+            )
             if reply is None:
                 return EndReason.OFFLINE
             frontier_calls += 1
@@ -400,7 +459,12 @@ class Main:
             # 다시 2)로 돌아가 판단한다.
 
     async def _send_frontier(
-        self, run_id: int, request_text: str, pd_table: PDTable, need: list[str]
+        self,
+        run_id: int,
+        request_text: str,
+        pd_table: PDTable,
+        need: list[str],
+        round_: int,
     ) -> FrontierReply | None:
         """6) 전송 직전에 질의를 기록하고 보낸 뒤 결과를 기록한다. 연결 불가면 None.
 
@@ -414,6 +478,15 @@ class Main:
         )
         started = monotonic()
         try:
+            await self._emit(
+                "frontier_request",
+                {
+                    "run_id": run_id,
+                    "queryId": query_id,
+                    "round": round_,
+                    "request": request_text,
+                },
+            )
             # need가 직전 회차와 같을 때만 이전 프론티어 대화를 이어 보낸다.
             reply = await self._call(
                 self.frontier_client.send, run_id, request_text, pd_table, need
@@ -431,6 +504,16 @@ class Main:
                     elapsed_ms=(monotonic() - started) * 1000,
                 ),
             )
+            await self._emit(
+                "frontier_result",
+                {
+                    "run_id": run_id,
+                    "queryId": query_id,
+                    "round": round_,
+                    "status": "failed",
+                    "answer": None,
+                },
+            )
             if isinstance(error, asyncio.CancelledError):
                 raise
             state = self._runs.get(run_id)
@@ -439,6 +522,22 @@ class Main:
                 # stop()의 task.cancel()보다 먼저 올 수 있으므로 같은 취소로 처리한다.
                 raise asyncio.CancelledError from error
             if isinstance(error, ConnectionError):
+                info = describe_error(error, ErrorStage.FRONTIER)
+                if info.code == ErrorCode.LOCAL_LLM_UNAVAILABLE:
+                    info = ErrorInfo(
+                        code=ErrorCode.FRONTIER_UNAVAILABLE,
+                        stage=ErrorStage.FRONTIER,
+                        message=MESSAGES[ErrorCode.FRONTIER_UNAVAILABLE],
+                    )
+                self._runs[run_id].external_failures.append((info, query_id))
+                await self._call(
+                    functools.partial(
+                        log_diagnostic, recovered=False, error=error, query_id=query_id
+                    ),
+                    self.chat_manager,
+                    run_id,
+                    info,
+                )
                 return None
             raise
         await self._call(
@@ -456,6 +555,16 @@ class Main:
                 elapsed_ms=reply.elapsed_ms,
             ),
         )
+        await self._emit(
+            "frontier_result",
+            {
+                "run_id": run_id,
+                "queryId": query_id,
+                "round": round_,
+                "status": "ok",
+                "answer": reply.answer,
+            },
+        )
         return reply
 
     async def _write_safe_request(
@@ -471,7 +580,7 @@ class Main:
 
         통과한 요청문을 반환한다. regen_limit번 고쳐도 안 되면 None을 반환한다.
         """
-        await self._step(run_id, "도움 요청문 작성 중")
+        await self._step(run_id, "도움 요청문 작성 중", ErrorStage.WRITE)
         # 중지 버튼이 로컬 생성을 끊을 수 있도록 실행 ID와 채팅 ID를 함께 넘긴다.
         request_text = await self._call(
             self.request_writer.write, question, memo, pd_table, need, run_id, chat_id
@@ -482,7 +591,7 @@ class Main:
             hits: list[Any] = []  # 누출 검사에 걸린 개인정보 항목 ID
             # request_text가 None이면 생성 실패. 검사에 걸린 것과 같이 센다.
             if request_text is not None:
-                await self._step(run_id, "누출 검사 중")
+                await self._step(run_id, "누출 검사 중", ErrorStage.GUARD)
                 guard_result = await self._call(
                     self.leak_guard.detect, run_id, request_text, pd_table
                 )
@@ -491,7 +600,9 @@ class Main:
                 if not guard_result.hits:
                     # 검사 모델이 형식을 끝내 못 맞췄다. 무엇을 고칠지 모르므로
                     # 다시 쓰지 않고 실패로 처리한다. (설계서 3.3)
-                    return None
+                    raise PipelineError(
+                        ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage.GUARD
+                    )
                 hits = guard_result.hits
 
             if regen_count >= self.regen_limit:
@@ -525,7 +636,7 @@ class Main:
     ) -> int:
         """7) 모은 정보로 최종 답변을 만들어 화면에 흘려보내고 저장한다. 메시지 ID를 반환한다."""
         state = self._runs[run_id]
-        await self._step(run_id, "최종 답변 생성 중")
+        await self._step(run_id, "최종 답변 생성 중", ErrorStage.ANSWER)
         memo = await self._call(self.memo_manager.read_all)
         # 중지 버튼이 답변 생성을 끊을 수 있도록 실행 ID와 채팅 ID를 함께 넘긴다.
         tokens = await self._call(
@@ -546,9 +657,17 @@ class Main:
             )
 
         answer = "".join(state.answer_parts)
-        return await self._call(
+        answer_id = await self._call(
             self.chat_manager.save_message, chat_id, "assistant", answer
         )
+        for info, query_id in state.external_failures:
+            await self._call(
+                functools.partial(log_diagnostic, recovered=True, query_id=query_id),
+                self.chat_manager,
+                run_id,
+                info,
+            )
+        return answer_id
 
     async def _finish(
         self,
@@ -574,14 +693,27 @@ class Main:
                 await self._try(errors, self.memo_manager.clear)
             # 이번 실행의 프론티어 대화를 지워 다음 실행·채팅과 섞이지 않게 한다.
             await self._try(errors, self.frontier_client.clear, run_id)
+            await self._try(errors, self.local_llm_runner.end_turn_context, run_id)
             if errors:
                 await self._try(
                     errors,
                     self.chat_manager.log_event,
                     run_id,
                     "error",
-                    {"code": "CLEANUP_ERROR", "message": str(errors[0])},
+                    {
+                        "code": ErrorCode.CLEANUP_ERROR,
+                        "stage": ErrorStage.CLEANUP,
+                        "message": MESSAGES[ErrorCode.CLEANUP_ERROR],
+                    },
                 )
+                for error in list(errors):
+                    await self._try(
+                        errors,
+                        functools.partial(log_diagnostic, recovered=False, error=error),
+                        self.chat_manager,
+                        run_id,
+                        describe_error(error, ErrorStage.CLEANUP),
+                    )
                 end_reason = None
             # 종료 상태와 최종 done·error 이벤트를 함께 저장한다.
             # 오류 코드는 log_event("error")가 이미 남겼다. 제한 안내는 notice로 저장한다.
@@ -617,9 +749,12 @@ class Main:
             errors.append(error)
             return None
 
-    async def _step(self, run_id: int, label: str) -> None:
+    async def _step(
+        self, run_id: int, label: str, stage: ErrorStage = ErrorStage.PIPELINE
+    ) -> None:
         """화면의 '현재 동작' 문구를 바꾼다. (API-06 step 이벤트)"""
-        await self._emit("step", {"run_id": run_id, "label": label})
+        self._runs[run_id].stage = stage
+        await self._emit("step", {"run_id": run_id, "label": label, "stage": stage})
 
     def _run_config(self) -> RunConfig:
         """start_turn()에 함께 저장할 이번 실행의 설정값."""
@@ -630,6 +765,38 @@ class Main:
         )
 
     async def _call(self, func: Callable[..., T], *args: Any) -> T:
+        bound = func.func if isinstance(func, functools.partial) else func
+        owner = getattr(bound, "__self__", None)
+        name = getattr(bound, "__name__", "")
+        stages = [
+            (self.chat_manager, ErrorStage.STORAGE),
+            (self.pd_detector, ErrorStage.DETECT),
+            (
+                self.planner,
+                ErrorStage.NEEDS if name == "list_needs" else ErrorStage.JUDGE,
+            ),
+            (
+                self.request_writer,
+                ErrorStage.REWRITE if name == "rewrite" else ErrorStage.WRITE,
+            ),
+            (self.leak_guard, ErrorStage.GUARD),
+            (self.answer_generator, ErrorStage.ANSWER),
+            (self.memo_manager, ErrorStage.MEMO),
+            (self.privacy_settings, ErrorStage.MATCH_RULES),
+            (self.consent_manager, ErrorStage.CONSENT),
+            (self.frontier_client, ErrorStage.FRONTIER),
+        ]
+        try:
+            return await self._invoke(func, *args)
+        except Exception as error:
+            if not hasattr(error, "pipeline_stage"):
+                for target, stage in stages:
+                    if owner is target:
+                        error.pipeline_stage = stage
+                        break
+            raise
+
+    async def _invoke(self, func: Callable[..., T], *args: Any) -> T:
         """오래 걸리는 동기 함수(로컬 LLM · DB · API 호출)를 별도 스레드에서 실행한다.
 
         그동안 이벤트 루프가 막히지 않아야 중지(stop) 요청을 바로 받을 수 있다.
@@ -639,8 +806,12 @@ class Main:
             return await func(*args)
         task = asyncio.create_task(asyncio.to_thread(func, *args))
         bound = func.func if isinstance(func, functools.partial) else func
-        if getattr(bound, "__self__", None) is self.chat_manager:
-            # 취소돼도 시작한 DB 트랜잭션을 먼저 마쳐 종료 기록과 순서가 뒤집히지 않게 한다.
+        owner = getattr(bound, "__self__", None)
+        if owner is self.chat_manager or (
+            owner is self.local_llm_runner
+            and getattr(bound, "__name__", None) == "begin_turn_context"
+        ):
+            # 시작한 DB 저장·컨텍스트 연결을 먼저 마쳐 종료 정리가 앞서지 않게 한다.
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:

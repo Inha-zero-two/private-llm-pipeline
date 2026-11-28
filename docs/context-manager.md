@@ -1,67 +1,47 @@
 # ContextManager 사용과 처리 흐름
 
-**대상:** [context_manager.py](../server/app/runtime/context_manager.py)의 `ContextManager`. 설계 5.4의 이전 대화 저장, 토큰 수 계산 및 대화 압축 처리. 대화 압축은 기존 대화를 모델로 요약해 저장 내용을 줄이는 기능.
+[ContextManager](../server/app/runtime/context_manager.py)는 채팅의 이전 사용자 질문·실제 최종 답변을 복원하고 모델 입력 예산에 따라 압축한다. 내부 작업용 임시 대화는 별도로 관리한다.
 
-**객체 수:** 이전 대화를 사용하는 실행 ID(run_id)마다 1개를 생성해 재사용. 프로그램 전체에서 여러 객체를 사용할 수 있으며 모두 [LocalLLMRunner 1개](local-llm-runner.md)의 모델을 공유. 각 객체 안에서 채팅 ID(chat_id)와 작업 종류(prompt_idx)에 따라 대화 내용 분리.
+## 채팅 대화의 저장과 복원
 
-| 토큰 길이 한도 | 값 |
+- 저장 기준은 `(chat_id, context_key="conversation")`이다. 질문·답변을 저장할 때 메시지와 context_entries의 context_seq를 같은 트랜잭션에서 추가한다. 원본 messageId의 중복 반영은 고유 제약으로 막는다.
+- Main은 질문을 저장한 직후 `begin_turn_context(run_id, chat_id, user_message_id)`로 현재 질문 직전의 순번을 고정한다. 현재 질문은 각 모듈의 입력에 이미 있으므로 이전 대화에 중복 주입하지 않는다.
+- NEEDS·JUDGE·WRITE와 ANSWER의 실제 모델 입력에 이전 대화를 자동 주입한다. `use_context=False`에서도 사용자 대화는 사용한다. DETECT·GUARD·REWRITE·동의·설정 해석에는 자동 주입하지 않는다.
+- 최초 접근은 최신 유효 compaction과 `context_seq > covered_through_seq`인 증분 기록을 순서대로 읽는다. 요약이 없으면 모든 반영 기록부터 시작한다. 기존 DB는 갱신 중 저장된 user/assistant 메시지를 연결한다. 과거 context_compacted 메시지는 복원 기준으로 채택하지 않는다.
+- 실행 중에는 캐시 경계 이후만 추가한다. 다른 객체에서 새 압축이 채택되면 DB의 최신 요약으로 다시 복원한다. 실행 중과 재시작 후에 같은 포맷을 사용한다: `[대화 요약]`, `[user]`, `[assistant]` 뒤에 원문, 이후 `[현재 입력]`.
+- Runner는 채팅 캐시를 최대 8개 LRU로 유지한다. 퇴거·재시작 후에도 DB로 복원한다. 종료 시 실행 경계를 해제하고 채팅 삭제 시 캐시도 제거한다.
+- 실패·재시도 llm_call 로그는 재생하지 않는다. 중지된 최종 답변은 Main이 사용자에게 제공한 부분과 중지 표시를 메시지로 저장한 경우에만 이후 대화에 포함된다.
+
+## 압축 경계와 실패 처리
+
+전체 컨텍스트는 32,768토큰, 일반·요약 출력 상한은 각각 5,000토큰이다. 이력 자동 압축 기준은 21,744토큰이며 요약 프롬프트의 실제 입력 예산도 확인한다. 최종 요청은 시스템 프롬프트·현재 입력·역할 형식·출력 상한을 포함해 tokenizer로 다시 확인한다.
+
+일반 증분 추가는 기존 prefix만 요약하고 새 기록은 그대로 붙인다. 예를 들어 seq 20까지 요약하고 seq 21을 붙이면 covered_through_seq는 20이다. 압축 기록 자체에는 새 context_seq를 주지 않는다. 이후 모델 입력 예산이 부족하면 현재 경계 전체를 추가 압축할 수 있다.
+
+이전 메시지 한 개가 이력 예산에 들어가지 않거나 기존 이력의 요약을 붙일 공간이 부족하면 원문을 DB에 보존하고 문자 경계로 분할한다. 각 조각은 모델 tokenizer로 길이를 확인하고 직전 요약과 합쳐 순서대로 요약한다. 중간 조각 요약은 체크포인트로 저장하지 않는다. 메시지 전체를 처리하고 길이 검사를 통과한 요약만 해당 메시지의 context_seq까지 포함한 기록으로 확정한다.
+
+채택된 요약과 compaction 이벤트는 한 트랜잭션으로 저장하고 성공 후 캐시를 갱신한다. 저장 실패·빈 출력·모델 장애·length 재시도 소진·길이 미축소는 기존 유효 체크포인트를 유지한다. 최신 compaction ID 비교(CAS)가 충돌하면 캐시를 무효화하고 오류를 전달하며 다음 요청에서 DB를 다시 읽는다. 요약 범위를 과거 순번으로 되돌리는 저장도 거부한다.
+
+요약 호출에는 현재 run_id를 전달한다. 압축 도중 stop 신호가 와도 진행 중인 요약은 완료하고 상위 요청은 다음 일반 모델 생성 전에 중지한다. DB에서 이미 종료된 실행의 늦은 요약 저장은 거부한다. 입력 자체가 한도를 넘으면 INPUT_LIMIT_EXCEEDED, 유효한 요약으로 공간을 확보하지 못하면 COMPACTION_FAILED이며 단계는 COMPACTION이다.
+
+## 내부 작업용 API
+
+`runner.get_context_manager(run_id)`와 `request(..., use_context=True)`는 실행·채팅·작업별 임시 호출 이력이다. 이 이력은 사용자 질문·최종 답변의 영속 대화와 별개이며 실행 종료 시 제거한다. 다른 실행에는 재사용하지 않는다. `regen(..., run_id=..., use_context=True, context_id=...)`도 같은 실행의 이력을 조회만 한다.
+
+| 호출 | 동작 |
 | --- | --- |
-| 전체 컨텍스트(입력 + 출력) | 32,768토큰 |
-| 일반 답변 / 압축 답변의 출력 상한 | 각각 5,000토큰 |
-| 압축 목표 | 5,000토큰 |
-| 자동 압축 기준(기존 대화 + 새 내용) | 21,744토큰 |
+| get_chat_context_manager(chat_id) | 채팅의 DB 복원 가능한 캐시 조회 |
+| prepare_input(current, system_prompt, through_seq, run_id) | 고정 경계까지 복원·압축 후 ContextInput(text, reference) 반환 |
+| get_context_manager(run_id) | 내부 작업용 실행 객체 조회 |
+| get_id(chat_id, prompt_idx) / new_id() | 임시 작업 공간 발급 |
+| get_context(id) / get_context_length(id) | 임시 문자열과 모델 토큰 수 조회 |
+| append(id, text, run_id=...) | 기존 임시 문자열을 필요시 압축하고 새 내용 추가 |
+| compact_context(id, run_id=...) | 임시 문자열을 직접 압축 |
 
-## 처리 흐름
+임시 API는 성공 시 True, 실패 시 원인별 예외를 전달한다. 임시 작업 압축은 영속 사용자 대화의 체크포인트로 저장하지 않는다.
 
-```mermaid
-flowchart TD
-    A["append: 기존 대화에 새 내용 추가"] --> B{"21,744토큰 이상인가"}
-    B -->|아니오| C["합산 내용을 메모리에 반영"]
-    B -->|예| D["기존 대화만 5,000토큰 목표로 요약"]
-    D --> E["요약과 새 내용을 합쳐 21,744토큰 미만인지 확인"]
-    E --> F["메모리의 대화 교체 후 요약 로그 함수 호출"]
-```
+## 개인정보 경계와 검증
 
-- 요약 목표와 최대 응답은 모두 5,000토큰
-- 자동 압축 기준은 **21,744토큰**. `32,768 - 일반 답변 5,000 - 요약 답변 5,000 - 여유분 1,024`로 계산하고 새 내용을 포함한 길이로 판단
-- 압축은 일반 답변 수신을 마친 뒤 대화를 저장할 때, 또는 다음 요청의 입력 예산을 확인할 때 처리. 답변 수신 도중 압축은 생략
-- 일반 요청 전에 새 입력·시스템 프롬프트·최대 출력까지 더한 길이가 넘치면 Runner에서 먼저 압축 요청
-- 요약 요청에도 이 객체의 run_id 전달. `runner.stop(run_id)`로 중지 신호를 받아도 요약 완료까지 수신
-- 일반 요청 로그를 생략하고 저장된 요약으로 별도 로그 함수 호출. 실제 데이터베이스 저장 코드는 미구현
-- length 종료는 같은 입력으로 최초 포함 최대 3회 요청. 모두 잘리면 False 반환, 기존 대화 유지 및 요약 로그 생략. 요청 오류·나머지 생성 실패·빈 요약은 예외 전달
-- 새 입력·답변만으로 저장 한도에 도달하거나 요약 후에도 한도 이상이면 append에서 False 반환. 기존 대화 유지 및 요약 로그 생략. Runner는 기존 length_failed 실패 튜플로 전달
+과거 대화는 저장된 원문·순서 또는 채택된 요약·증분으로 복원하며 현재 보호 규칙으로 재검출하지 않는다. 현재 질문 검출, 기존 pd_items에 대한 현재 설정 적용, 외부 전송 전 LeakGuard, 실행별 일시적 동의 해제는 유지한다. 프론티어 이력은 실행별로 관리한다.
 
-## 사용법과 입출력
-
-```python
-manager = runner.get_context_manager(1)
-context_id = manager.get_id(1, "ANSWER")
-manager.append(context_id, "\nUser: 질문\nAssistant: 답변\n")
-count = manager.get_context_length(context_id)
-success = manager.compact_context(context_id)
-summary = manager.get_context(context_id)
-```
-
-`request(..., use_context=True)`는 형식 검사를 통과한 답변과 해당 입력을 자동으로 저장. 위 append는 직접 대화 내용을 관리할 때 사용. request로 저장한 대화를 append로 다시 추가하면 중복 저장되므로 한 가지 방식 선택.
-
-| 호출 | 반환과 사용 기준 |
-| --- | --- |
-| `get_id(chat_id, prompt_idx)` | 채팅·작업에 해당하는 대화 번호 조회 또는 생성. 반환값은 int |
-| `new_id()` | 채팅·작업에 연결하지 않은 새 대화 번호 발급 |
-| `get_context(context_id)` | 해당 대화 번호에 저장된 문자열 반환 |
-| `get_context_length(context_id)` | 저장된 대화를 응답 생성 모델 기준으로 토큰화해 토큰 수 반환 |
-| `append(context_id, text)` | 새 내용 추가 후 토큰 한도에 따라 기존 대화 요약. 성공 시 True, 새 내용의 길이 초과 또는 length로 3회 실패 시 False |
-| `compact_context(context_id)` | 저장된 대화를 바로 요약. 성공 또는 빈 대화는 True, length로 3회 실패 시 False. 결과는 get_context로 조회 |
-
-- `ContextManager(runner, run_id, ...)`로 객체를 직접 만들 경우 request 호출 전에 `runner.context_managers[run_id]`에 등록. 기본 설정으로 사용할 때는 get_context_manager로 조회
-- context_id는 해당 객체 안에서 사용하는 대화 번호. 서로 다른 실행의 대화 번호가 같아도 저장 내용은 별개
-- 대화 내용은 객체의 메모리에 저장. 다른 run_id로 요청하면 기존 실행의 대화는 자동으로 사용하지 않음
-
-## 설계서 대비 추가 및 변경
-
-- **객체 관리:** Runner의 `get_context_manager(run_id)`에서 실행별 객체 조회 또는 생성. 대화 번호와 문자열은 dict에 저장. 같은 스레드에서 다시 획득할 수 있는 RLock으로 메모리 접근 보호
-- **자동 요약 시점:** 설계 37쪽의 기존 대화 길이만 검사하는 방식에서 새 내용과 요약 출력 예산도 포함하는 방식으로 변경. 실제 요약 요청은 `_compact_text()`에서 처리
-- **요약 길이:** 목표와 최대 응답은 모두 5,000토큰. length로 잘린 요약은 저장하지 않고 최대 3회 요청
-- **중지 처리:** `runner.stop(manager.run_id)`로 해당 실행에 중지 요청. 요약이 정상 완료되면 메모리에 반영하고 이미 완성된 입력·답변 유지. 자동 요약은 이후 request에서 stopped 반환하며, 직접 호출한 compact_context는 처리 결과를 bool로 반환
-- **반환값:** 설계서의 반환값 없음에서 성공 여부를 bool로 반환하도록 변경. 새 내용의 길이 초과 또는 length 재시도 실패 시 False로 구분하고 요약 결과는 get_context로 조회
-- **데이터베이스 기록:** 최신 [테이블 구조](db-schema.md)에 따라 별도 컨텍스트 테이블은 사용하지 않음. 요약 반영 후 `messages.role="context_compacted"`, `content=요약`으로 한 번 저장할 코드를 주석 처리. 저장 시각은 ChatManager에서 createdAt에 기록할 예정. 요약 전 원문은 저장하지 않으며, new_id로 직접 발급한 대화 번호는 먼저 채팅과 연결 필요
+`server/tests/test_context_recovery.py`는 DB 갱신·원자성·복원·반복 압축·분할 요약·실패 및 CAS를 검증한다. `test_api.py`는 실제 모듈을 연결하고 모델 전송 대역에서 NEEDS/JUDGE/WRITE/ANSWER 입력을 캡처해 캐시·재시작·퇴거·압축 후 입력과 격리를 검증한다. 실제 모델의 후속 질문 답변 품질은 별도로 확인해야 한다.

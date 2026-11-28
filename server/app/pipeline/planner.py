@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import PromptIdx
+from app.models.errors import ErrorCode, ErrorStage, PipelineError, model_failure
 from app.models.llm_results import JudgeResult
 
 if TYPE_CHECKING:
@@ -60,12 +61,14 @@ class Planner:
             raise ValueError("질문이 비어 있습니다")
 
         # 2. 직접 전달한 결과가 없으면 공유 실행기로 필요 정보 분류 요청
+        if needs is None and ok and self._runner is None:
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.NEEDS)
         if needs is None and ok and self._runner is not None:
             if self._chooser is not None:
                 system_prompt, prompt_version = self._chooser.build_prompt(
                     PromptIdx.NEEDS, question, self._needs_top_n, run_id=run_id
                 )
-                needs, ok, *_ = self._runner.request(
+                needs, ok, *_, reason = self._runner.request(
                     run_id,
                     question,
                     PromptIdx.NEEDS,
@@ -74,15 +77,21 @@ class Planner:
                     prompt_version=prompt_version,
                 )
             else:
-                needs, ok, *_ = self._runner.request(
+                needs, ok, *_, reason = self._runner.request(
                     run_id, question, PromptIdx.NEEDS, chat_id
                 )
+            if not ok:
+                raise model_failure(reason, ErrorStage.NEEDS)
         if (
             not ok
             or not isinstance(needs, list)
             or not all(isinstance(item, str) and item.strip() for item in needs)
         ):
-            raise RuntimeError("필요 정보 분류에 실패했습니다")
+            raise PipelineError(
+                ErrorCode.MODEL_RESPONSE_INVALID,
+                ErrorStage.NEEDS,
+                "필요 정보 분류에 실패했습니다",
+            )
 
         result = list(needs)
         # 메모 저장은 호출자인 Main에서 담당
@@ -158,8 +167,10 @@ class Planner:
         retries = 0
         while not _need_idx_in_range(judged, len(need_list)):
             if not asks_model or retries >= NEED_RETRIES:
-                raise RuntimeError(
-                    "판단 결과의 필요 정보 번호가 목록 범위를 벗어났습니다"
+                raise PipelineError(
+                    ErrorCode.MODEL_RESPONSE_INVALID,
+                    ErrorStage.JUDGE,
+                    "판단 결과의 필요 정보 번호가 목록 범위를 벗어났습니다",
                 )
             retries += 1
             judged = self._request_judge(run_id, chat_id, judge_input, None, True)
@@ -207,18 +218,30 @@ class Planner:
         ok: bool,
     ) -> JudgeResult:
         """판단 결과를 모델에 요청(또는 직접 받은 값 사용)하고 JudgeResult 형식을 검사한다."""
+        if raw_plan is None and ok and self._runner is None:
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage.JUDGE)
         if raw_plan is None and ok and self._runner is not None:
-            raw_plan, ok, *_ = self._runner.request(
+            raw_plan, ok, *_, reason = self._runner.request(
                 run_id, judge_input, PromptIdx.JUDGE, chat_id
             )
+            if not ok:
+                raise model_failure(reason, ErrorStage.JUDGE)
         if not ok or raw_plan is None:
-            raise RuntimeError("답변 판단에 실패했습니다")
+            raise PipelineError(
+                ErrorCode.MODEL_RESPONSE_INVALID,
+                ErrorStage.JUDGE,
+                "답변 판단에 실패했습니다",
+            )
 
         # 모델 출력이 판단 필드·자료형에 맞는지 검사
         try:
             return JudgeResult.model_validate(raw_plan)
         except (ValueError, TypeError) as exc:
-            raise RuntimeError("판단 결과 형식이 맞지 않습니다") from exc
+            raise PipelineError(
+                ErrorCode.MODEL_RESPONSE_INVALID,
+                ErrorStage.JUDGE,
+                "판단 결과 형식이 맞지 않습니다",
+            ) from exc
 
 
 def _need_idx_in_range(judged: JudgeResult, count: int) -> bool:

@@ -17,6 +17,7 @@ web은 vite 프록시로 /api 요청을 이 서버(127.0.0.1:8000)에 보낸다.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path as FilePath
@@ -49,10 +50,20 @@ from app.api.services import (
     RunnerFactory,
 )
 from app.config import db_path as configured_db_path
+from app.config import setting
 from app.data.chat_manager import StorageError
+from app.models.errors import ErrorCode, ErrorStage, PipelineError, describe_error
 from app.privacy.consent_manager import NoPendingConsentError
+from app.runtime.frontier_client import DEFAULT_BASE_URL, DEFAULT_MODEL, MODEL_PRICES
+from comparison.api import BUSY_CODE, BUSY_MESSAGE, create_router
+from comparison.manager import ComparisonManager, create_manager
+from comparison.models import ComparisonSettings
 
 T = TypeVar("T")
+# 비교 기능을 만드는 함수. create_manager와 같은 인자를 받는다.
+ComparisonFactory = Callable[..., ComparisonManager]
+
+log = logging.getLogger(__name__)
 
 # ChatManager 오류 코드 → HTTP 상태
 STORAGE_STATUS = {"NOT_FOUND": 404}
@@ -85,32 +96,82 @@ def _local_llm_unavailable() -> ApiError:
     )
 
 
+def comparison_settings(db_path: FilePath) -> ComparisonSettings:
+    """비교 기능에 넘길 값. 프론티어 주소·모델·단가는 파이프라인과 같은 설정을 쓴다."""
+    enabled = (setting("COMPARISON_ENABLED", default="on") or "").strip().lower()
+    model = setting("FRONTIER_MODEL", default=DEFAULT_MODEL) or DEFAULT_MODEL
+    prices = MODEL_PRICES.get(model)
+    return ComparisonSettings(
+        enabled=enabled not in {"0", "false", "off", "no"},
+        db_path=db_path,
+        frontier_api_key=setting("FRONTIER_API_KEY"),
+        frontier_base_url=setting("FRONTIER_BASE_URL", default=DEFAULT_BASE_URL)
+        or DEFAULT_BASE_URL,
+        frontier_model=model,
+        input_price=prices[0] if prices else None,
+        output_price=prices[1] if prices else None,
+    )
+
+
 def create_app(
     *,
     db_path: FilePath | None = None,
     runner_factory: RunnerFactory | None = None,
     frontier_factory: FrontierFactory | None = None,
     prompt_chooser_factory: PromptChooserFactory | None = None,
+    comparison_factory: ComparisonFactory | None = None,
 ) -> FastAPI:
     """db_path: 채팅·실행 기록 DB. 생략하면 CHAT_DB_PATH 설정(기본 server/data/chat.sqlite3).
-    runner_factory · frontier_factory · prompt_chooser_factory: 테스트용 모듈 생성 함수.
+    runner_factory · frontier_factory · prompt_chooser_factory: 모듈 생성 함수.
     생략하면 실제 LocalLLMRunner·FrontierClient·DynamicPromptChooser를 만든다.
+    comparison_factory: 비교 기능을 만드는 함수. 생략하면 비교 기능이 없다.
     """
+    db_file = db_path or configured_db_path()
     pipeline = Pipeline(
-        db_path or configured_db_path(),
+        db_file,
         runner_factory=runner_factory,
         frontier_factory=frontier_factory,
         prompt_chooser_factory=prompt_chooser_factory,
     )
+    comparison: ComparisonManager | None = None
+
+    def latest_run_id(chat_id: int) -> int | None:
+        try:
+            runs = pipeline.services.chat_manager.get_chat(chat_id).runs
+        except StorageError:
+            return None
+        return max((run.run_id for run in runs), default=None)
+
+    def prepare_comparison() -> ComparisonManager | None:
+        """비교 기능을 준비한다. 실패해도 파이프라인은 비교 없이 시작한다."""
+        if comparison_factory is None:
+            return None
+        try:
+            return comparison_factory(
+                comparison_settings(db_file),
+                pipeline_busy=lambda: pipeline.is_busy,
+                latest_run_id=latest_run_id,
+            )
+        except Exception as error:
+            log.error("Comparison startup failed: %s", type(error).__name__)
+            return None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        nonlocal comparison
         await pipeline.startup()
+        comparison = await db(prepare_comparison)
         yield
+        if comparison is not None:
+            try:
+                await comparison.shutdown()
+            except Exception as error:
+                log.error("Comparison shutdown failed: %s", type(error).__name__)
         await pipeline.shutdown()  # 아직 도는 실행을 정리한다
 
     app = FastAPI(title="private-llm-pipeline API", lifespan=lifespan)
     app.state.pipeline = pipeline
+    app.include_router(create_router(lambda: comparison))
 
     # 오류 응답
 
@@ -139,16 +200,36 @@ def create_app(
             return _error(404, "NOT_FOUND", "없는 주소입니다.")
         return _error(exc.status_code, "HTTP_ERROR", str(exc.detail))
 
+    @app.exception_handler(PipelineError)
     @app.exception_handler(Exception)
-    async def on_unexpected(_: Request, __: Exception) -> JSONResponse:
-        return _error(500, "INTERNAL_ERROR", "서버에서 요청을 처리하지 못했습니다.")
+    async def on_unexpected(_: Request, error: Exception) -> JSONResponse:
+        info = describe_error(error)
+        logging.getLogger(__name__).error(
+            "API failure code=%s stage=%s",
+            info.code,
+            info.stage,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        status = (
+            503
+            if info.code
+            in {ErrorCode.LOCAL_LLM_UNAVAILABLE, ErrorCode.LOCAL_LLM_TIMEOUT}
+            else 500
+        )
+        return JSONResponse(status_code=status, content=info.model_dump(mode="json"))
 
     # API-01 ~ 04 채팅
 
     @app.post("/api/chats")
     async def create_chat() -> ChatCreated:
         chats = pipeline.services.chat_manager
-        return ChatCreated(chat_id=await db(chats.create_chat))
+        chat_id = await db(chats.create_chat)
+        if comparison is not None:
+            try:
+                await comparison.on_chat_created(chat_id)
+            except Exception as error:
+                log.error("Comparison register failed: %s", type(error).__name__)
+        return ChatCreated(chat_id=chat_id)
 
     @app.get("/api/chats")
     async def list_chats() -> list[ChatSummary]:
@@ -169,6 +250,9 @@ def create_app(
     async def delete_chat(chat_id: int = Path(ge=1)) -> Response:
         # 실행 중인 채팅이면 ChatManager가 CHAT_RUNNING(409)을 낸다
         await db(pipeline.services.chat_manager.delete_chat, chat_id)
+        if comparison is not None:
+            comparison.discard(chat_id)  # 비교 기록은 채팅과 함께 지워졌다
+        await db(pipeline.services.main.local_llm_runner.forget_chat, chat_id)
         return Response(status_code=200)
 
     # API-05 ~ 08, 11 실행
@@ -179,13 +263,28 @@ def create_app(
         text = body.text.strip()
         if not text:
             raise ApiError(422, "VALIDATION_ERROR", "질문을 입력해 주세요.")
+        # 명세서에 없는 경우: 로컬 모델이 하나라 실행을 동시에 돌리지 않는다
+        in_progress = ApiError(409, "RUN_IN_PROGRESS", "다른 질문에 답하는 중입니다.")
+        # 아래 두 확인과 pipeline.start() 사이에 await를 두지 않는다.
+        # 다른 질문이나 비교 재시도가 그 사이에 끼어들지 못하게 하기 위해서다.
+        if pipeline.is_busy:
+            raise in_progress
+        if comparison is not None and not comparison.try_reserve():
+            raise ApiError(409, BUSY_CODE, BUSY_MESSAGE)
         try:
             run_id = await pipeline.start(chat_id, text)
-        except BusyError:
-            # 명세서에 없는 경우: 로컬 모델이 하나라 실행을 동시에 돌리지 않는다
-            raise ApiError(
-                409, "RUN_IN_PROGRESS", "다른 질문에 답하는 중입니다."
-            ) from None
+        except BaseException as error:
+            if comparison is not None:
+                comparison.release()
+            if isinstance(error, BusyError):
+                raise in_progress from None
+            raise
+        if comparison is not None:
+            try:
+                await comparison.start(chat_id, run_id, text)
+            except Exception as error:
+                # 비교를 시작하지 못해도 파이프라인은 계속한다
+                log.error("Comparison start failed: %s", type(error).__name__)
         return RunStarted(run_id=run_id)
 
     @app.get("/api/runs/{run_id}/events")
@@ -215,7 +314,10 @@ def create_app(
     @app.post("/api/runs/{run_id}/stop")
     async def stop_run(run_id: int = Path(ge=1)) -> Response:
         run = await db(pipeline.services.chat_manager.get_run, run_id)
-        if run.status == "finished" or not await pipeline.stop(run_id):
+        # pipeline.stop()은 정리가 끝날 때까지 기다리므로 비교에 먼저 알린다
+        compared = comparison is not None and comparison.stop(run_id)
+        stopped = run.status != "finished" and await pipeline.stop(run_id)
+        if not (stopped or compared):
             raise ApiError(409, "RUN_FINISHED", "이미 종료된 실행입니다.")
         # 실제 종료는 스트림의 done(stopped)으로 알린다
         return Response(status_code=200)
@@ -239,8 +341,9 @@ def create_app(
             raise ApiError(
                 409, "NO_PENDING_CONSENT", "현재 응답할 수 있는 동의 요청이 아닙니다."
             ) from None
-        except ConnectionError:
-            raise _local_llm_unavailable() from None
+        except (ConnectionError, TimeoutError) as error:
+            info = describe_error(error, ErrorStage.INTERPRET_CONSENT)
+            raise PipelineError(info.code, info.stage) from error
         return ConsentReply.model_validate(reply.model_dump())
 
     @app.get("/api/runs/{run_id}")
@@ -260,11 +363,14 @@ def create_app(
         try:
             # 로컬 LLM이 설정문을 규칙으로 해석한다. 해석 실패면 기존 설정을 유지한다.
             result = await db(pipeline.services.privacy_settings.save, body.text)
-        except (ConnectionError, InterruptedError):
+        except (ConnectionError, TimeoutError) as error:
+            info = describe_error(error, ErrorStage.PARSE_RULES)
+            raise PipelineError(info.code, info.stage) from error
+        except InterruptedError:
             raise _local_llm_unavailable() from None
         return SettingSaved.model_validate(result.model_dump())
 
     return app
 
 
-app = create_app()
+app = create_app(comparison_factory=create_manager)

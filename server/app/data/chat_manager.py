@@ -13,6 +13,7 @@ from typing import Self
 
 from pydantic import BaseModel, JsonValue
 
+from app.models.context import CONVERSATION, Compaction, ContextRecord, ContextSnapshot
 from app.models.enums import EndReason
 from app.models.llm_results import Rule
 from app.models.schemas import (
@@ -35,6 +36,14 @@ from app.models.schemas import (
     StartedRun,
 )
 
+from ..models.errors import (
+    ErrorCode,
+    ErrorStage,
+    PipelineError,
+    StateConflictError,
+    safe_message,
+)
+
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 NOTICES: dict[EndReason, str] = {
@@ -47,7 +56,7 @@ NOTICES: dict[EndReason, str] = {
 }
 
 
-class StorageError(RuntimeError):
+class StorageError(StateConflictError):
     """API 계층이 code를 HTTP 오류로 변환할 수 있는 저장소 오류."""
 
     def __init__(self, code: str, message: str) -> None:
@@ -79,17 +88,97 @@ class ChatManager:
         try:
             self._db.execute("PRAGMA foreign_keys = ON")
             self._db.execute("PRAGMA journal_mode = WAL")
-            # 스키마 버전은 관리하지 않는다. 빈 DB에만 schema.sql로 스키마를 만들고,
-            # 스키마가 바뀌면 기존 DB 파일을 수동으로 지우고 다시 만든다.
             tables = self._db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
             if not tables:
                 schema = SCHEMA_PATH.read_text(encoding="utf-8")
                 self._db.executescript("BEGIN IMMEDIATE;\n" + schema + "\nCOMMIT;")
+            elif self._db.execute("PRAGMA user_version").fetchone()[0] == 0:
+                self._migrate_pd_categories()
+            if self._db.execute("PRAGMA user_version").fetchone()[0] == 1:
+                with self._transaction() as db:
+                    db.execute("ALTER TABLE runs ADD COLUMN errorStage TEXT")
+                    db.execute("PRAGMA user_version = 2")
+            if self._db.execute("PRAGMA user_version").fetchone()[0] == 2:
+                self._migrate_context()
+            if self._db.execute("PRAGMA user_version").fetchone()[0] == 3:
+                self._migrate_comparison()
+            if self._db.execute("PRAGMA user_version").fetchone()[0] != 4:
+                raise PipelineError(
+                    ErrorCode.CONFIGURATION_ERROR,
+                    ErrorStage.STARTUP,
+                    "Unsupported database version",
+                )
         except BaseException:
             self._db.close()
             raise
+
+    def _migrate_pd_categories(self) -> None:
+        """기존 pdId, 전송 기록 및 AUTOINCREMENT 순번을 보존하며 '기타'를 허용한다."""
+        # SQLite에서 CHECK 변경에는 테이블 재생성이 필요하다. DROP이 query_items로
+        # 연쇄 삭제되지 않게 트랜잭션 밖에서 FK 집행을 끄고, 커밋 직전에 참조를 확인한다.
+        self._db.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with self._transaction() as db:
+                if db.execute("PRAGMA user_version").fetchone()[0] != 0:
+                    return
+                db.execute("""
+                    CREATE TABLE pd_items_new (
+                        pdId INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chatId INTEGER NOT NULL REFERENCES chats ON DELETE CASCADE,
+                        messageId INTEGER NOT NULL REFERENCES messages ON DELETE CASCADE,
+                        text TEXT NOT NULL, category INTEGER NOT NULL CHECK(category BETWEEN 0 AND 3),
+                        allowed INTEGER NOT NULL DEFAULT 0 CHECK(allowed IN (0, 1)),
+                        allowedBy TEXT NOT NULL DEFAULT 'none', createdAt TEXT NOT NULL,
+                        UNIQUE(chatId, text, category)
+                    )
+                """)
+                db.execute("""
+                    INSERT INTO pd_items_new
+                    SELECT pdId, chatId, messageId, text, category, allowed, allowedBy, createdAt
+                    FROM pd_items
+                """)
+                db.execute("""
+                    UPDATE sqlite_sequence SET seq = MAX(seq, COALESCE(
+                        (SELECT seq FROM sqlite_sequence WHERE name='pd_items'), 0))
+                    WHERE name='pd_items_new'
+                """)
+                db.execute("DROP TABLE pd_items")
+                db.execute("ALTER TABLE pd_items_new RENAME TO pd_items")
+                if db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("분류 마이그레이션 중 외래키 오류")
+                db.execute("PRAGMA user_version = 1")
+        finally:
+            self._db.execute("PRAGMA foreign_keys = ON")
+
+    def _migrate_context(self) -> None:
+        """기존 메시지를 순서대로 연결하고 압축·반영 기록 저장 구조를 추가한다."""
+        schema = SCHEMA_PATH.read_text(encoding="utf-8").split(
+            "-- Context persistence", 1
+        )[1]
+        # 뒤에 붙은 비교 기능 구역은 3→4 갱신에서만 만든다.
+        schema = schema.split("-- Comparison", 1)[0]
+        with self._transaction() as db:
+            for statement in schema.split(";"):
+                if statement.strip():
+                    db.execute(statement)
+            db.execute(
+                """
+                INSERT INTO context_entries(chatId, contextKey, contextSeq, messageId)
+                SELECT chatId, ?, ROW_NUMBER() OVER (PARTITION BY chatId ORDER BY messageId), messageId
+                FROM messages WHERE role IN ('user', 'assistant')
+            """,
+                (CONVERSATION,),
+            )
+
+    def _migrate_comparison(self) -> None:
+        """비교 기능 테이블을 추가한다. 읽기·쓰기는 server/comparison이 맡는다."""
+        schema = SCHEMA_PATH.read_text(encoding="utf-8").split("-- Comparison", 1)[1]
+        with self._transaction() as db:
+            for statement in schema.split(";"):
+                if statement.strip():
+                    db.execute(statement)
 
     def __enter__(self) -> Self:
         return self
@@ -107,7 +196,9 @@ class ChatManager:
     def _transaction(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:
         with self._lock:
             if self._closed:
-                raise RuntimeError("저장소가 닫혔습니다.")
+                raise PipelineError(
+                    ErrorCode.STORAGE_ERROR, ErrorStage.STORAGE, "저장소가 닫혔습니다."
+                )
             self._db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
                 yield self._db
@@ -134,14 +225,14 @@ class ChatManager:
     def _message(self, chat_id: int, message_id: int, role: str) -> None:
         row = self._require("messages", "messageId", message_id)
         if row["chatId"] != chat_id or row["role"] != role:
-            raise ValueError("메시지의 채팅 또는 역할이 맞지 않습니다.")
+            raise StateConflictError("메시지의 채팅 또는 역할이 맞지 않습니다.")
 
     def _items(self, chat_id: int, ids: list[int]) -> None:
         if len(ids) != len(set(ids)):
-            raise ValueError("개인정보 ID가 중복되었습니다.")
+            raise StateConflictError("개인정보 ID가 중복되었습니다.")
         for pd_id in ids:
             if self._require("pd_items", "pdId", pd_id)["chatId"] != chat_id:
-                raise ValueError("다른 채팅의 개인정보입니다.")
+                raise StateConflictError("다른 채팅의 개인정보입니다.")
 
     def create_chat(self) -> int:
         with self._transaction() as db:
@@ -172,7 +263,14 @@ class ChatManager:
                 )
             ]
             runs = [
-                RunSummary.model_validate(dict(r))
+                RunSummary.model_validate(
+                    {
+                        **dict(r),
+                        "notice": safe_message(r["errorCode"])
+                        if r["errorCode"]
+                        else r["notice"],
+                    }
+                )
                 for r in db.execute(
                     "SELECT * FROM runs WHERE chatId=? ORDER BY runId", (chat_id,)
                 )
@@ -213,11 +311,148 @@ class ChatManager:
             "INSERT INTO messages(chatId, role, content, createdAt) VALUES (?, ?, ?, ?)",
             (chat_id, role, content, now),
         ).lastrowid
+        if role in {"user", "assistant"}:
+            self._db.execute(
+                """
+                INSERT INTO context_entries(chatId, contextKey, contextSeq, messageId)
+                SELECT ?, ?, COALESCE(MAX(contextSeq), 0) + 1, ?
+                FROM context_entries WHERE chatId=? AND contextKey=?
+            """,
+                (chat_id, CONVERSATION, message_id, chat_id, CONVERSATION),
+            )
         self._db.execute(
             "UPDATE chats SET updatedAt=?, title=CASE WHEN ? THEN ? ELSE title END WHERE chatId=?",
             (now, first, content[:30], chat_id),
         )
         return int(message_id)
+
+    def context_boundary(self, chat_id: int, message_id: int) -> int:
+        """이번 질문은 별도 입력이므로 그 직전 반영 순번을 반환한다."""
+        with self._transaction(write=False) as db:
+            self._message(chat_id, message_id, "user")
+            row = db.execute(
+                "SELECT contextSeq FROM context_entries WHERE chatId=? AND contextKey=? AND messageId=?",
+                (chat_id, CONVERSATION, message_id),
+            ).fetchone()
+            if row is None:
+                raise StateConflictError("질문의 컨텍스트 반영 기록이 없습니다.")
+            return int(row[0]) - 1
+
+    def _context_records(
+        self, chat_id: int, context_key: str, after_seq: int, through_seq: int
+    ) -> list[ContextRecord]:
+        return [
+            ContextRecord.model_validate(dict(row))
+            for row in self._db.execute(
+                """
+            SELECT e.contextSeq AS context_seq, e.messageId AS message_id, m.role, m.content
+            FROM context_entries e JOIN messages m ON m.messageId=e.messageId AND m.chatId=e.chatId
+            WHERE e.chatId=? AND e.contextKey=? AND e.contextSeq>? AND e.contextSeq<=?
+            ORDER BY e.contextSeq
+        """,
+                (chat_id, context_key, after_seq, through_seq),
+            )
+        ]
+
+    def load_context(
+        self,
+        chat_id: int,
+        through_seq: int,
+        context_key: str = CONVERSATION,
+        *,
+        after_seq: int = 0,
+        expected_compaction_id: int | None = None,
+    ) -> ContextSnapshot:
+        """캐시 기준이 유효하면 증분만, 변경됐으면 새 요약 이후 전체를 읽는다."""
+        with self._transaction(write=False) as db:
+            self._require("chats", "chatId", chat_id)
+            row = db.execute(
+                """
+                SELECT compactionId AS compaction_id, coveredThroughSeq AS covered_through_seq, summary
+                FROM context_compactions WHERE chatId=? AND contextKey=? AND coveredThroughSeq<=?
+                ORDER BY compactionId DESC LIMIT 1
+            """,
+                (chat_id, context_key, through_seq),
+            ).fetchone()
+            compaction = (
+                Compaction.model_validate(dict(row)) if row is not None else None
+            )
+            saved_id = compaction.compaction_id if compaction else None
+            start_seq = compaction.covered_through_seq if compaction else 0
+            if saved_id == expected_compaction_id and after_seq <= through_seq:
+                start_seq = max(start_seq, after_seq)
+            return ContextSnapshot(
+                compaction=compaction,
+                records=self._context_records(
+                    chat_id, context_key, start_seq, through_seq
+                ),
+            )
+
+    def context_delta(
+        self,
+        chat_id: int,
+        after_seq: int,
+        through_seq: int,
+        context_key: str = CONVERSATION,
+    ) -> list[ContextRecord]:
+        with self._transaction(write=False):
+            self._require("chats", "chatId", chat_id)
+            return self._context_records(chat_id, context_key, after_seq, through_seq)
+
+    def save_compaction(
+        self,
+        chat_id: int,
+        run_id: int,
+        covered_through_seq: int,
+        summary: str,
+        expected_compaction_id: int | None,
+        context_key: str = CONVERSATION,
+    ) -> Compaction:
+        """검증된 요약과 compaction 이벤트를 같은 트랜잭션으로 확정한다."""
+        if not summary.strip():
+            raise StateConflictError("빈 압축 결과입니다.")
+        with self._transaction() as db:
+            run = self._running(run_id)
+            if run["chatId"] != chat_id:
+                raise StateConflictError("다른 채팅의 압축 결과입니다.")
+            latest = db.execute(
+                "SELECT compactionId, coveredThroughSeq FROM context_compactions WHERE chatId=? AND contextKey=? ORDER BY compactionId DESC LIMIT 1",
+                (chat_id, context_key),
+            ).fetchone()
+            if (latest[0] if latest else None) != expected_compaction_id:
+                raise StateConflictError(
+                    "압축 기준이 변경되었습니다. 컨텍스트를 다시 불러와야 합니다."
+                )
+            if latest and covered_through_seq < latest[1]:
+                raise StateConflictError(
+                    "압축 범위를 이전 순번으로 되돌릴 수 없습니다."
+                )
+            source = db.execute(
+                "SELECT 1 FROM context_entries WHERE chatId=? AND contextKey=? AND contextSeq=?",
+                (chat_id, context_key, covered_through_seq),
+            ).fetchone()
+            if source is None:
+                raise StateConflictError("압축 범위의 반영 기록이 없습니다.")
+            compaction_id = db.execute(
+                "INSERT INTO context_compactions(chatId,contextKey,coveredThroughSeq,summary,runId,createdAt) VALUES (?,?,?,?,?,?)",
+                (chat_id, context_key, covered_through_seq, summary, run_id, _now()),
+            ).lastrowid
+            self._append_event(
+                run_id,
+                "compaction",
+                {
+                    "compaction_id": compaction_id,
+                    "chat_id": chat_id,
+                    "context_key": context_key,
+                    "covered_through_seq": covered_through_seq,
+                    "summary": summary,
+                },
+            )
+            return Compaction(
+                compaction_id=compaction_id,
+                covered_through_seq=covered_through_seq,
+                summary=summary,
+            )
 
     def save_setting(self, text: str, rules: list[Rule]) -> PrivacySetting:
         rules = [Rule.model_validate(rule) for rule in rules]
@@ -337,6 +572,8 @@ class ChatManager:
             notice = notice or row["notice"]
             if end_reason is None and error_code is None:
                 error_code = "INTERNAL_ERROR"
+            if error_code:
+                notice = safe_message(error_code)
             notice = notice or (
                 "실행 중 오류가 발생했습니다."
                 if error_code
@@ -394,7 +631,8 @@ class ChatManager:
                 "error",
                 {
                     "code": run["errorCode"] or "INTERNAL_ERROR",
-                    "message": run["notice"] or "실행 중 오류가 발생했습니다.",
+                    "message": safe_message(run["errorCode"] or "INTERNAL_ERROR"),
+                    "stage": run["errorStage"],
                 },
             )
         return self._append_event(
@@ -416,7 +654,7 @@ class ChatManager:
                 (now,),
             )
             count = db.execute(
-                "UPDATE runs SET status='finished', endReason=NULL, errorCode='RUN_INTERRUPTED', notice='앱 종료로 실행이 중단되었습니다.', endedAt=? WHERE status='running'",
+                "UPDATE runs SET status='finished', endReason=NULL, errorCode='RUN_INTERRUPTED', errorStage='STARTUP', notice='앱 종료로 실행이 중단되었습니다.', endedAt=? WHERE status='running'",
                 (now,),
             ).rowcount
             for row in db.execute(
@@ -643,10 +881,11 @@ class ChatManager:
                 raise ValueError("종료 이벤트는 finish_run()으로 기록합니다.")
             if type_ == "error" and isinstance(payload, dict):
                 db.execute(
-                    "UPDATE runs SET errorCode=COALESCE(errorCode, ?), notice=COALESCE(notice, ?) WHERE runId=?",
+                    "UPDATE runs SET errorStage=CASE WHEN errorCode IS NULL THEN ? ELSE errorStage END, errorCode=COALESCE(errorCode, ?), notice=COALESCE(notice, ?) WHERE runId=?",
                     (
+                        payload.get("stage"),
                         payload.get("code", "INTERNAL_ERROR"),
-                        payload.get("message", "실행 중 오류가 발생했습니다."),
+                        safe_message(str(payload.get("code", "INTERNAL_ERROR"))),
                         run_id,
                     ),
                 )
@@ -693,6 +932,9 @@ class ChatManager:
             return RunDetail.model_validate(
                 {
                     **dict(row),
+                    "notice": safe_message(row["errorCode"])
+                    if row["errorCode"]
+                    else row["notice"],
                     "config": json.loads(row["config"]),
                     "consents": consents,
                     "frontier_queries": queries,

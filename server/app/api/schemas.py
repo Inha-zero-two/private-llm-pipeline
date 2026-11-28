@@ -18,12 +18,12 @@ class ApiModel(BaseModel):
 
 
 class PDItem(ApiModel):
-    """동의 요청에 들어가는 개인정보 항목. category는 0 식별 · 1 민감 · 2 속성."""
+    """동의 요청에 들어가는 항목. category는 0 식별 · 1 민감 · 2 속성 · 3 기타."""
 
     pd_id: int
     label: str
     text: str
-    category: Literal[0, 1, 2]
+    category: Literal[0, 1, 2, 3]
 
 
 class Decision(ApiModel):
@@ -126,6 +126,7 @@ class FrontierQueryOut(ApiModel):
     request: str
     answer: str | None
     status: Literal["ok", "failed", "uncertain"]
+    created_at: str
 
 
 class ConsentOut(ApiModel):
@@ -150,5 +151,8 @@ class RunDetail(ApiModel):
     end_reason: str | None
     notice: str | None
     error_code: str | None
+    error_stage: str | None = None
+    started_at: str
+    ended_at: str | None
     frontier_queries: list[FrontierQueryOut]
     consents: list[ConsentOut]

@@ -1,12 +1,13 @@
 // 화면에서 쓰는 자료형
 
-/** 0: 식별정보, 1: 민감정보, 2: 속성정보 */
-export type PDCategory = 0 | 1 | 2
+/** 0: 식별정보, 1: 민감정보, 2: 속성정보, 3: 기타 (추가 보호 규칙) */
+export type PDCategory = 0 | 1 | 2 | 3
 
 export const CATEGORY_LABEL: Record<PDCategory, string> = {
   0: '식별정보',
   1: '민감정보',
   2: '속성정보',
+  3: '기타',
 }
 
 export type ConsentItem = {
@@ -43,6 +44,13 @@ export type FrontierQuery = {
 
 export type Notice = { kind: 'limited' | 'stopped' | 'error'; text: string }
 
+/** 파이프라인이 답하는 데 걸린 시간 */
+export type Elapsed = {
+  ms: number
+  /** 동의를 기다린 시간을 뺐는지 */
+  consentExcluded: boolean
+}
+
 /** 질문 하나와 그에 대한 답변 */
 export type Turn = {
   id: string
@@ -56,6 +64,12 @@ export type Turn = {
   consents: ConsentRecord[]
   answer: string
   notice: Notice | null
+  /** 서버가 확정한 종료 사유. 실행 중·오류·데모에서는 null */
+  endReason: string | null
+  errorCode: string | null
+  errorStage: string | null
+  /** 실행이 끝난 뒤 채워진다. 시각이 없는 과거 기록과 데모에는 없다 */
+  elapsed?: Elapsed | null
 }
 
 export type Chat = {

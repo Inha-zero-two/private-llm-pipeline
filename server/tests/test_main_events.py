@@ -45,6 +45,13 @@ def test_round_trip_emits_steps_frontier_tokens_and_done() -> None:
     frontier = [data for name, data, _ in events if name == "frontier"]
     assert len(frontier) == 1
     assert set(frontier[0]) == {"run_id", "request", "answer"}
+    request = next(data for name, data, _ in events if name == "frontier_request")
+    result = next(data for name, data, _ in events if name == "frontier_result")
+    assert request["request"] == frontier[0]["request"]
+    assert request["queryId"] == result["queryId"]
+    assert request["round"] == result["round"] == 1
+    assert result["status"] == "ok"
+    assert names.index("frontier_request") < names.index("frontier_result")
     assert "token" in names
     # 완료는 정리(finish_run)가 저장한 종료 이벤트를 마지막에 한 번 보낸다
     assert names[-1] == "done"
@@ -76,3 +83,27 @@ def test_stop_emits_done_stopped_after_cleanup() -> None:
     assert events[-1][0] == "done"
     assert events[-1][1]["endReason"] == EndReason.STOPPED
     assert "stopped" not in [name for name, _, _ in events]
+
+
+def test_failed_query_keeps_request_and_emits_failed_result() -> None:
+    from test_main import FakeFrontierClient
+
+    log: list[tuple[Any, ...]] = []
+    events, emit = collector()
+    frontier = FakeFrontierClient(log)
+    frontier.fail_send = True
+    main = make_main(
+        log,
+        planner=FakePlanner(log, enough_after=1),
+        frontier_client=frontier,
+        emit=emit,
+    )
+    asyncio.run(main.run_pipeline(1, "질문"))
+    request = next(data for name, data, _ in events if name == "frontier_request")
+    result = next(data for name, data, _ in events if name == "frontier_result")
+    assert request["request"] == "요청문"
+    assert request["queryId"] == result["queryId"]
+    assert result["status"] == "failed"
+    assert result["answer"] is None
+    assert not any(name == "frontier" for name, _, _ in events)
+    assert events[-1][0] == "done"  # 기존 offline 종료 정책은 유지

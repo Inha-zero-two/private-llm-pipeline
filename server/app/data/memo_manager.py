@@ -5,6 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ..models.errors import (
+    ErrorCode,
+    ErrorStage,
+    PipelineError,
+    describe_error,
+    log_diagnostic,
+    model_failure,
+)
+
 if TYPE_CHECKING:
     from ..runtime.local_llm_runner import LocalLLMRunner
     from .prompt_manager import PromptManager
@@ -49,6 +58,7 @@ class MemoManager:
         self._unshrinkable: dict[str, tuple[str, ...]] = {}
         # 후보 전체를 줄이지 못했다면 동일한 후보의 순환 작업도 반복하지 않는다.
         self._blocked_candidate: dict[str, tuple[str, ...]] | None = None
+        self._blocked_error: PipelineError | None = None
         input_limit = runner.get_input_limit(
             prompt_manager.get_prompt("MEMO_SUMMARY"), max_tokens=SUMMARY_MAX_TOKENS
         )
@@ -56,7 +66,11 @@ class MemoManager:
             input_limit if max_tokens is None else min(max_tokens, input_limit)
         )
         if self._max_tokens <= 0:
-            raise ValueError("메모 토큰 한도는 양수여야 합니다")
+            raise PipelineError(
+                ErrorCode.CONFIGURATION_ERROR,
+                ErrorStage.MEMO,
+                "메모 토큰 한도는 양수여야 합니다",
+            )
 
     def start(self, run_id: int, question: str) -> None:
         """실행 ID를 설정하고 질문을 담은 새 메모로 실행을 시작한다."""
@@ -88,7 +102,11 @@ class MemoManager:
         memo = self._require_memo()
         targets = list(dict.fromkeys(needs))
         if not targets or any(need not in memo.answers for need in targets):
-            raise ValueError("답변을 연결할 need는 등록된 필요 정보여야 합니다")
+            raise PipelineError(
+                ErrorCode.STATE_CONSISTENCY_ERROR,
+                ErrorStage.MEMO,
+                "답변을 연결할 need는 등록된 필요 정보여야 합니다",
+            )
 
         # 새 답변을 요약 입력에는 포함하되, 실제 메모는 압축 완료 후 교체한다.
         candidate = self._with_answer(targets, answer)
@@ -123,7 +141,13 @@ class MemoManager:
 
         original = {need: tuple(items) for need, items in source.items()}
         if self._blocked_candidate == original:
-            raise ValueError("메모를 압축 임계값 아래로 줄일 수 없습니다")
+            if self._blocked_error is not None:
+                raise self._blocked_error
+            raise PipelineError(
+                ErrorCode.COMPACTION_FAILED,
+                ErrorStage.MEMO_SUMMARY,
+                "메모를 압축 임계값 아래로 줄일 수 없습니다",
+            )
 
         # 질문·need·추가 입력만으로 기준을 넘으면 답변을 줄여도 해결할 수 없다.
         empty = {need: [] for need in answers}
@@ -131,9 +155,14 @@ class MemoManager:
             self._remaining_tokens(self._format_memo(empty))
             <= COMPACTION_REMAINING_TOKENS
         ):
-            raise ValueError("고정 입력만으로 압축 임계값을 초과합니다")
+            raise PipelineError(
+                ErrorCode.INPUT_LIMIT_EXCEEDED,
+                ErrorStage.MEMO_SUMMARY,
+                "고정 입력만으로 압축 임계값을 초과합니다",
+            )
 
         order = list(priority_needs or [])
+        last_failure: PipelineError | None = None
         order.extend(need for need in answers if need not in order)
         while remaining <= COMPACTION_REMAINING_TOKENS:
             before_round = remaining
@@ -143,8 +172,17 @@ class MemoManager:
                     continue
                 summary, reason = self._summarize(need, items)
                 if reason == "stopped":
-                    raise InterruptedError("메모 압축이 중지되었습니다")
+                    raise model_failure(reason, ErrorStage.MEMO_SUMMARY)
                 if summary is None:
+                    failure = model_failure(reason, ErrorStage.MEMO_SUMMARY)
+                    if isinstance(failure, PipelineError):
+                        last_failure = failure
+                        log_diagnostic(
+                            getattr(self._runner, "chat_manager", None),
+                            self._run_id,
+                            describe_error(failure),
+                            recovered=False,
+                        )
                     self._unshrinkable[need] = tuple(items)
                     continue
 
@@ -158,11 +196,25 @@ class MemoManager:
                     self._unshrinkable[need] = tuple(items)
                 if remaining > COMPACTION_REMAINING_TOKENS:
                     self._blocked_candidate = None
+                    if last_failure is not None:
+                        log_diagnostic(
+                            getattr(self._runner, "chat_manager", None),
+                            self._run_id,
+                            describe_error(last_failure),
+                            recovered=True,
+                        )
                     return answers
 
             if remaining == before_round:
                 self._blocked_candidate = original
-                raise ValueError("메모를 압축 임계값 아래로 줄일 수 없습니다")
+                self._blocked_error = last_failure
+                if last_failure is not None:
+                    raise last_failure
+                raise PipelineError(
+                    ErrorCode.COMPACTION_FAILED,
+                    ErrorStage.MEMO_SUMMARY,
+                    "메모를 압축 임계값 아래로 줄일 수 없습니다",
+                )
 
         return answers
 
@@ -255,5 +307,9 @@ class MemoManager:
     def _require_memo(self) -> Memo:
         """현재 메모를 반환하고, 메모가 시작되지 않았다면 RuntimeError를 발생시킨다."""
         if self._memo is None:
-            raise RuntimeError("메모가 시작되지 않았습니다")
+            raise PipelineError(
+                ErrorCode.STATE_CONSISTENCY_ERROR,
+                ErrorStage.MEMO,
+                "메모가 시작되지 않았습니다",
+            )
         return self._memo

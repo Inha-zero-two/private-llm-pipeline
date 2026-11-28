@@ -11,7 +11,8 @@ import type {
   Rule,
   Turn,
 } from '@/types'
-import { ApiError, type Backend, type RunHandle, type RunHandlers } from './types'
+import { pipelineElapsed } from './elapsed.ts'
+import { ApiError, type Backend, type RunHandle, type RunHandlers } from './types.ts'
 
 // 서버 응답 형식 (명세서 그대로)
 
@@ -36,8 +37,13 @@ type ApiRunDetail = {
   endReason: string | null
   notice: string | null
   errorCode: string | null
+  errorStage: string | null
+  startedAt?: string
+  endedAt?: string | null
   frontierQueries: { round: number; request: string; answer: string | null }[]
   consents: {
+    createdAt?: string
+    respondedAt?: string | null
     items: ApiItem[]
     result: 'answered' | 'cancelled' | null
     responseText: string | null
@@ -46,7 +52,7 @@ type ApiRunDetail = {
 }
 type ApiSetting = { settingId: number | null; text: string; rules: Rule[] }
 
-async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response
   try {
     res = await fetch(path, {
@@ -105,13 +111,30 @@ function follow(runId: number, h: RunHandlers): RunHandle {
   let lastId = 0
   let finished = false
 
-  const finish = (notice: Notice | null) => {
+  const finish = (
+    notice: Notice | null,
+    endReason: string | null = null,
+    errorCode: string | null = null,
+    errorStage: string | null = null,
+  ) => {
     if (finished) return
     finished = true
     source.close()
-    h.update((t) => ({ ...t, running: false, step: null, notice }))
+    h.update((t) => ({
+      ...t,
+      running: false,
+      step: null,
+      notice,
+      endReason,
+      errorCode,
+      errorStage,
+    }))
     h.onConsent(null)
     h.onFinish()
+    // 끝난 시각은 실행 상세에만 있다. 불러오지 못하면 걸린 시간만 표시하지 않는다
+    api<ApiRunDetail>('GET', `/api/runs/${runId}`)
+      .then((run) => h.update((t) => ({ ...t, elapsed: pipelineElapsed(run) })))
+      .catch(() => {})
   }
 
   // 기록 이벤트는 ID가 있다. 재접속으로 이미 받은 ID가 다시 오면 무시한다
@@ -174,13 +197,13 @@ function follow(runId: number, h: RunHandlers): RunHandle {
   )
   on('token', (d: { text: string }) => h.update((t) => ({ ...t, answer: t.answer + d.text })))
   on('done', (d: { endReason: string; limited: string | null }) =>
-    finish(noticeOf(d.endReason, null, d.limited)),
+    finish(noticeOf(d.endReason, null, d.limited), d.endReason),
   )
   source.addEventListener('error', (e) => {
     // 서버가 보낸 error 이벤트(data 있음)와 연결 오류(data 없음)를 구분한다
     if (e instanceof MessageEvent && e.data) {
-      const d = JSON.parse(e.data) as { message: string }
-      finish({ kind: 'error', text: d.message })
+      const d = JSON.parse(e.data) as { message: string; code: string; stage?: string | null }
+      finish({ kind: 'error', text: d.message }, null, d.code, d.stage ?? null)
       return
     }
     // 연결이 끊기면 EventSource가 마지막 ID로 다시 붙는다. 완전히 닫혔을 때만 상태를 확인한다
@@ -191,6 +214,9 @@ function follow(runId: number, h: RunHandlers): RunHandle {
             run.status === 'finished'
               ? noticeOf(run.endReason, run.errorCode, run.notice)
               : { kind: 'error', text: '진행 상황 연결이 끊겼습니다. 채팅을 다시 열어 주세요.' },
+            run.status === 'finished' && !run.errorCode ? run.endReason : null,
+            run.status === 'finished' ? run.errorCode : null,
+            run.status === 'finished' ? (run.errorStage ?? null) : null,
           ),
         )
         .catch((err: ApiError) => finish({ kind: 'error', text: err.message }))
@@ -198,6 +224,7 @@ function follow(runId: number, h: RunHandlers): RunHandle {
   })
 
   return {
+    runId,
     stop: () => {
       api('POST', `/api/runs/${runId}/stop`).catch(() => {
         // 이미 끝났으면(409) 스트림의 done이 상태를 정리한다
@@ -270,6 +297,10 @@ async function loadTurns(chatId: string): Promise<Turn[]> {
           }),
       answer: '',
       notice: run && !running ? noticeOf(run.endReason, run.errorCode, run.notice) : null,
+      endReason: run && !running && !run.errorCode ? run.endReason : null,
+      errorCode: run && !running ? run.errorCode : null,
+      errorStage: run && !running ? (run.errorStage ?? null) : null,
+      elapsed: run && !running ? pipelineElapsed(run) : null,
     })
   }
   return turns

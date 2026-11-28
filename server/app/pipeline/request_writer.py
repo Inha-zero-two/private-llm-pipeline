@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from app.models.enums import PromptIdx
+from app.models.errors import ErrorCode, ErrorStage, PipelineError, model_failure
 from app.privacy.pd_detector import CATEGORY_LABEL, PDItem
 from app.runtime.context_manager import COMPACTION_LIMIT
 
@@ -96,7 +97,7 @@ class RequestWriter:
         hit_items = [item for item in items if item.pd_id in hit_ids]
         if not hit_items:
             # 고칠 항목을 알 수 없으면 모델을 부르지 않고 실패로 처리
-            return None
+            raise PipelineError(ErrorCode.STATE_CONSISTENCY_ERROR, ErrorStage.REWRITE)
 
         rewrite_input = (
             f"[직전 요청문]\n{previous_request.strip()}\n\n"
@@ -118,14 +119,25 @@ class RequestWriter:
     ) -> str | None:
         """Runner로 텍스트를 생성하고 정리. 실패·중지·빈 답변·입력 초과는 None."""
         if self._runner is None:
-            return None
+            raise PipelineError(ErrorCode.CONFIGURATION_ERROR, ErrorStage(prompt_idx))
         # 입력이 한도를 넘으면 모델을 부르지 않고 실패로 처리
         if len(self._runner.tokenize(input_)) > _input_limit(self._runner, prompt_idx):
-            return None
-        output, ok, *_ = self._runner.request(run_id, input_, prompt_idx, chat_id)
-        if not ok or not isinstance(output, str):
-            return None
-        return _clean(output)
+            raise PipelineError(ErrorCode.INPUT_LIMIT_EXCEEDED, ErrorStage(prompt_idx))
+        output, ok, *_, reason = self._runner.request(
+            run_id, input_, prompt_idx, chat_id
+        )
+        if not ok:
+            raise model_failure(reason, ErrorStage(prompt_idx))
+        if not isinstance(output, str) or not output.strip():
+            raise PipelineError(
+                ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage(prompt_idx)
+            )
+        cleaned = _clean(output)
+        if cleaned is None:
+            raise PipelineError(
+                ErrorCode.MODEL_RESPONSE_INVALID, ErrorStage(prompt_idx)
+            )
+        return cleaned
 
 
 def _input_limit(runner: LocalLLMRunner, prompt_idx: PromptIdx) -> int:

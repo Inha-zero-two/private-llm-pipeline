@@ -87,11 +87,6 @@ export function runDemo(question: string, rules: Rule[], h: DemoHandlers): DemoR
           if (record.kind === 'answered') {
             for (const d of record.decisions) if (d.allow) allowed.add(d.item.id)
           }
-          // 하나도 공개하지 않으면 거절과 같다
-          if (allowed.size === 0) {
-            endText = LIMITED_TEXT.consent_denied
-            break
-          }
         }
 
         await step('도움 요청문 작성 중')

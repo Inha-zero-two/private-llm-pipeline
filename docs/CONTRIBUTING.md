@@ -29,6 +29,12 @@ uv run python -m pytest -q
 
 PR과 `dev`·`main` push에서는 GitHub Actions(`.github/workflows/ci.yml`)가 서버·Llama 래퍼·웹 검증을 자동으로 실행합니다.
 
+## 개인정보 검출 평가 (실제 모델)
+
+정답이 달린 문장 데이터(JSONL)로 PDDetector의 정확도와 안정성을 잽니다. 모델 키가 필요해 CI에서는 돌지 않습니다.
+검출 프롬프트나 모델을 바꾼 PR은 `server/`에서 `uv run python -m qa.pd_eval <데이터.jsonl>`로 전후 지표를 비교합니다.
+사용법은 [개인정보 검출 평가](pd-eval.md)를 참고합니다.
+
 ## Llama 어댑터 개발 규칙
 
 [코드 컨벤션](convention-code.md)에 따라

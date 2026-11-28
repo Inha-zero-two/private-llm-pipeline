@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import Mock, call
 
 import pytest
-
-from server.app.data import memo_manager as memo_module
-from server.app.data.memo_manager import (
+from app.data import memo_manager as memo_module
+from app.data.memo_manager import (
     COMPACTION_REMAINING_TOKENS,
     SUMMARY_MAX_TOKENS,
     MemoManager,
 )
+from app.models.errors import PipelineError
 
 
 @pytest.fixture
@@ -107,7 +108,7 @@ def test_invalid_answer_targets_do_not_modify_memo(
     """등록되지 않은 연결 대상은 일부 항목에도 답변을 넣지 않고 거부한다."""
     original = manager.read_all()
 
-    with pytest.raises(ValueError, match="등록된 필요 정보"):
+    with pytest.raises(PipelineError):
         manager.add_answer(needs, "answer")
 
     assert manager.read_all() == original
@@ -210,7 +211,7 @@ def test_stop_preserves_all_groups_and_skips_remaining_requests(
     ]
 
     require_reduction(manager, 4)
-    with pytest.raises(InterruptedError, match="중지"):
+    with pytest.raises(asyncio.CancelledError):
         manager.compact_answer()
 
     assert manager.read_all() == original
@@ -235,9 +236,9 @@ def test_summary_that_does_not_shrink_group_is_ignored(
     runner.request.return_value = ("a much longer summary", True, 10, 4, "stop")
 
     require_reduction(manager, 1)
-    with pytest.raises(ValueError, match="압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.compact_answer()
-    with pytest.raises(ValueError, match="압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.compact_answer()
     assert runner.request.call_count == 1
 
@@ -310,7 +311,7 @@ def test_failed_compaction_does_not_allow_overflow(
     original = manager.read_all()
     runner.request.return_value = (None, False, 10, 1, "length_failed")
 
-    with pytest.raises(ValueError, match="압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.add_answer(["need"], " ".join(["new"] * 6000))
 
     assert manager.read_all() == original
@@ -326,7 +327,7 @@ def test_memo_limit_respects_runner_input_budget(
     manager.start("run-1", "Question")
     manager.set_needs(["need"])
 
-    with pytest.raises(ValueError, match="압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.add_answer(["need"], " ".join(["new"] * 100))
 
     runner.get_input_limit.assert_called_once_with(
@@ -397,7 +398,7 @@ def test_failed_summary_cannot_overflow_current_request_budget(
     original = manager.read_all()
     runner.request.return_value = (None, False, 0, 0, "length_failed")
 
-    with pytest.raises(ValueError, match="압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.add_answer(["need-a"], " ".join(["new"] * 5300))
 
     assert manager.read_all() == original
@@ -409,7 +410,7 @@ def test_oversized_non_memo_input_is_rejected(
     """질문·개인정보만으로 입력 예산을 넘으면 메모 압축으로 해결했다고 처리하지 않는다."""
     runner.get_input_limit.return_value = 50
 
-    with pytest.raises(ValueError, match="고정 입력만으로 압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.prepare_for_request("judge prompt", prefix="word " * 60)
 
     runner.request.assert_not_called()
@@ -549,10 +550,10 @@ def test_stalled_round_stops_and_preserves_original_memo(
         ("b", True, 1, 1, "stop"),
     ]
 
-    with pytest.raises(ValueError, match="압축 임계값 아래로 줄일 수 없습니다"):
+    with pytest.raises(PipelineError):
         manager.add_answer(["need-b"], "new")
     # 일부가 줄었다가 실패한 후보를 그대로 재시도해도 모델 호출을 반복하지 않는다.
-    with pytest.raises(ValueError, match="압축 임계값 아래로 줄일 수 없습니다"):
+    with pytest.raises(PipelineError):
         manager.add_answer(["need-b"], "new")
 
     assert manager.read_all() == original
@@ -576,7 +577,7 @@ def test_unchanged_failed_candidate_is_skipped_until_input_changes(
     runner.request.return_value = (None, False, 1, 1, "parse_failed")
 
     for _ in range(2):
-        with pytest.raises(ValueError, match="압축 임계값"):
+        with pytest.raises(PipelineError):
             manager.add_answer(["need-a"], pending)
     assert runner.request.call_count == 1
 
@@ -598,7 +599,7 @@ def test_reset_allows_a_previously_failed_input_again(
     )
     manager._max_tokens = COMPACTION_REMAINING_TOKENS + candidate_size - 3 + 1
     runner.request.return_value = (None, False, 1, 1, "parse_failed")
-    with pytest.raises(ValueError, match="압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.add_answer(["need-a"], pending)
 
     if reset == "start":
@@ -623,7 +624,7 @@ def test_stopping_pending_input_does_not_store_it(
     manager._max_tokens = COMPACTION_REMAINING_TOKENS + candidate_size - 3 + 1
     runner.request.return_value = ("partial", False, 1, 1, "stopped")
 
-    with pytest.raises(InterruptedError, match="중지"):
+    with pytest.raises(asyncio.CancelledError):
         manager.add_answer(["need-a"], pending)
 
     assert manager.read_all() == original
@@ -670,10 +671,10 @@ def test_readiness_check_does_not_forget_failed_pending_candidate(
         ("one two three four five six seven", True, 1, 7, "stop"),
     ]
 
-    with pytest.raises(ValueError, match="압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.add_answer(["need-a"], pending)
     manager.compact_answer()
-    with pytest.raises(ValueError, match="압축 임계값"):
+    with pytest.raises(PipelineError):
         manager.add_answer(["need-a"], pending)
 
     assert runner.request.call_count == 2
